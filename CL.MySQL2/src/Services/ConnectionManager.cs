@@ -17,7 +17,7 @@ public sealed class ConnectionManager
     private readonly IEventBus? _events;
 
     // Per-connection-id configuration storage
-    private readonly Dictionary<string, DatabaseConfiguration> _configs = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, MySqlDatabaseConfig> _configs = new(StringComparer.OrdinalIgnoreCase);
 
     // Per-connection-id open connection counter
     private readonly ConcurrentDictionary<string, int> _openCounts = new(StringComparer.OrdinalIgnoreCase);
@@ -25,19 +25,16 @@ public sealed class ConnectionManager
     // ── Construction ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Creates a ConnectionManager with an optional default configuration.
+    /// Creates a ConnectionManager.
     /// </summary>
-    /// <param name="config">Default connection configuration (registered as "Default").</param>
     /// <param name="logger">Optional logger.</param>
     /// <param name="events">Optional event bus for publishing connection events.</param>
     public ConnectionManager(
-        DatabaseConfiguration config,
         ILogger? logger = null,
         IEventBus? events = null)
     {
         _logger = logger;
         _events = events;
-        RegisterConfiguration(config);
     }
 
     // ── Registration ──────────────────────────────────────────────────────────
@@ -45,7 +42,7 @@ public sealed class ConnectionManager
     /// <summary>
     /// Registers (or replaces) a connection configuration under a given ID.
     /// </summary>
-    public void RegisterConfiguration(DatabaseConfiguration config, string connectionId = "Default")
+    public void RegisterConfiguration(MySqlDatabaseConfig config, string connectionId = "Default")
     {
         ArgumentNullException.ThrowIfNull(config);
         _configs[connectionId] = config;
@@ -53,7 +50,7 @@ public sealed class ConnectionManager
     }
 
     /// <summary>Returns the configuration for the given connection ID, or null if not found.</summary>
-    public DatabaseConfiguration? GetConfiguration(string connectionId = "Default")
+    public MySqlDatabaseConfig? GetConfiguration(string connectionId = "Default")
         => _configs.TryGetValue(connectionId, out var cfg) ? cfg : null;
 
     /// <summary>Returns true when a configuration exists for the given connection ID.</summary>
@@ -240,9 +237,12 @@ public sealed class ConnectionManager
     public IReadOnlyDictionary<string, int> GetAllConnectionCounts()
         => new Dictionary<string, int>(_openCounts, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Returns the registered connection IDs.</summary>
+    public IEnumerable<string> GetConnectionIds() => _configs.Keys;
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    private DatabaseConfiguration RequireConfig(string connectionId)
+    private MySqlDatabaseConfig RequireConfig(string connectionId)
     {
         if (_configs.TryGetValue(connectionId, out var cfg)) return cfg;
         throw new InvalidOperationException(

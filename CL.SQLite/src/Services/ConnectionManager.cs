@@ -6,107 +6,98 @@ using Microsoft.Data.Sqlite;
 namespace CL.SQLite.Services;
 
 /// <summary>
-/// Manages a pool of SQLite connections for a single database file.
-/// Uses a <see cref="ConcurrentStack{T}"/> of <see cref="PooledConnection"/> objects
-/// to reuse connections across operations.
+/// Manages pools of SQLite connections for multiple named database files.
 /// </summary>
 public sealed class ConnectionManager : IDisposable
 {
-    private readonly SQLiteConfig _config;
     private readonly ILogger? _logger;
-    private readonly string _databasePath;
-    private readonly ConcurrentStack<PooledConnection> _pool = new();
-    private int _activeCount;
+    private readonly string? _dataDirectory;
+    private readonly ConcurrentDictionary<string, DatabaseState> _states =
+        new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
 
-    /// <summary>
-    /// Initializes a new instance of <see cref="ConnectionManager"/> and ensures the database directory exists.
-    /// </summary>
-    /// <param name="config">SQLite configuration (database path, pool size, pragmas).</param>
-    /// <param name="logger">Optional logger for connection lifecycle events.</param>
-    /// <param name="dataDirectory">
-    /// Optional base directory prepended to a relative <see cref="SQLiteConfig.DatabasePath"/>.
-    /// </param>
-    public ConnectionManager(
-        SQLiteConfig config,
-        ILogger? logger = null,
-        string? dataDirectory = null)
+    public ConnectionManager(ILogger? logger = null, string? dataDirectory = null)
     {
-        _config = config ?? throw new ArgumentNullException(nameof(config));
         _logger = logger;
-
-        if (dataDirectory is not null && !Path.IsPathRooted(config.DatabasePath))
-            _databasePath = Path.Combine(dataDirectory, config.DatabasePath);
-        else
-            _databasePath = config.DatabasePath;
-
-        // Ensure directory exists
-        var dir = Path.GetDirectoryName(_databasePath);
-        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
+        _dataDirectory = dataDirectory;
     }
 
-    /// <summary>Gets the resolved absolute path to the SQLite database file.</summary>
-    public string DatabasePath => _databasePath;
+    public void RegisterConfiguration(string connectionId, SQLiteDatabaseConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
 
-    /// <summary>Gets the number of connections currently checked out from the pool.</summary>
-    public int ActiveConnectionCount => _activeCount;
+        var state = new DatabaseState(config, ResolveDatabasePath(config));
+        EnsureDirectoryExists(state.DatabasePath);
 
-    /// <summary>Gets the number of idle connections currently held in the pool.</summary>
-    public int PooledConnectionCount => _pool.Count;
+        if (_states.TryRemove(connectionId, out var existing))
+            existing.Dispose();
 
-    /// <summary>
-    /// Obtains an open <see cref="SqliteConnection"/> from the pool, or creates a new one if the pool is empty.
-    /// The caller is responsible for returning the connection via <see cref="ReleaseConnectionAsync"/>.
-    /// </summary>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>An open <see cref="SqliteConnection"/> ready for use.</returns>
-    /// <exception cref="ObjectDisposedException">Thrown when the manager has been disposed.</exception>
-    public async Task<SqliteConnection> GetConnectionAsync(CancellationToken ct = default)
+        _states[connectionId] = state;
+        _logger?.Debug($"[SQLite] Configuration registered for '{connectionId}' -> {state.DatabasePath}");
+    }
+
+    public SQLiteDatabaseConfig GetConfiguration(string connectionId = "Default")
+        => RequireState(connectionId).Config;
+
+    public IEnumerable<string> GetConnectionIds() => _states.Keys;
+
+    public string GetDatabasePath(string connectionId = "Default")
+        => RequireState(connectionId).DatabasePath;
+
+    public int GetActiveConnectionCount(string connectionId = "Default")
+        => RequireState(connectionId).ActiveCount;
+
+    public int GetPooledConnectionCount(string connectionId = "Default")
+        => RequireState(connectionId).Pool.Count;
+
+    public async Task<SqliteConnection> GetConnectionAsync(
+        string connectionId = "Default",
+        CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Try to reuse a pooled connection
-        while (_pool.TryPop(out var pooled))
+        var state = RequireState(connectionId);
+
+        while (state.Pool.TryPop(out var pooled))
         {
             if (pooled.IsValid() && !pooled.IsIdleTooLong())
             {
                 pooled.MarkInUse();
-                Interlocked.Increment(ref _activeCount);
-                _logger?.Debug(_config.ToString() ?? "Reused pooled connection");
+                Interlocked.Increment(ref state.ActiveCount);
+                _logger?.Debug($"[SQLite] Reused pooled connection for '{connectionId}'");
                 return pooled.Connection;
             }
-            // Invalid or idle too long — dispose and try next
+
             pooled.Connection.Dispose();
         }
 
-        // Create a new connection
-        var conn = await CreateConnectionAsync(ct).ConfigureAwait(false);
-        Interlocked.Increment(ref _activeCount);
+        var conn = await CreateConnectionAsync(state, ct).ConfigureAwait(false);
+        Interlocked.Increment(ref state.ActiveCount);
         return conn;
     }
 
-    /// <summary>
-    /// Returns a connection to the pool. If the pool is at capacity the connection is disposed instead.
-    /// </summary>
-    /// <param name="connection">The connection to release. Disposed immediately if the pool is full or the manager is disposed.</param>
-    /// <returns>A completed task.</returns>
-    public Task ReleaseConnectionAsync(SqliteConnection connection)
+    public Task ReleaseConnectionAsync(
+        SqliteConnection connection,
+        string connectionId = "Default")
     {
-        if (connection is null || _disposed)
+        if (connection is null)
+            return Task.CompletedTask;
+
+        if (_disposed)
         {
-            connection?.Dispose();
+            connection.Dispose();
             return Task.CompletedTask;
         }
 
-        Interlocked.Decrement(ref _activeCount);
+        var state = RequireState(connectionId);
+        Interlocked.Decrement(ref state.ActiveCount);
 
-        if (_pool.Count < _config.MaxPoolSize)
+        if (state.Pool.Count < state.Config.MaxPoolSize)
         {
             var pooled = new PooledConnection(connection);
             pooled.MarkAvailable();
-            _pool.Push(pooled);
-            _logger?.Debug("Connection returned to pool");
+            state.Pool.Push(pooled);
+            _logger?.Debug($"[SQLite] Connection returned to pool for '{connectionId}'");
         }
         else
         {
@@ -116,112 +107,161 @@ public sealed class ConnectionManager : IDisposable
         return Task.CompletedTask;
     }
 
-    /// <summary>
-    /// Borrows a connection, executes the given asynchronous function, then returns the connection to the pool.
-    /// </summary>
-    /// <typeparam name="T">The type of value produced by <paramref name="action"/>.</typeparam>
-    /// <param name="action">The asynchronous function to execute with the borrowed connection.</param>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>The value returned by <paramref name="action"/>.</returns>
-    public async Task<T> ExecuteAsync<T>(Func<SqliteConnection, Task<T>> action, CancellationToken ct = default)
+    public async Task<T> ExecuteAsync<T>(
+        Func<SqliteConnection, Task<T>> action,
+        string connectionId = "Default",
+        CancellationToken ct = default)
     {
-        var conn = await GetConnectionAsync(ct).ConfigureAwait(false);
+        var conn = await GetConnectionAsync(connectionId, ct).ConfigureAwait(false);
         try
         {
             return await action(conn).ConfigureAwait(false);
         }
         finally
         {
-            await ReleaseConnectionAsync(conn).ConfigureAwait(false);
+            await ReleaseConnectionAsync(conn, connectionId).ConfigureAwait(false);
         }
     }
 
-    /// <summary>
-    /// Borrows a connection, executes the given asynchronous action, then returns the connection to the pool.
-    /// </summary>
-    /// <param name="action">The asynchronous action to execute with the borrowed connection.</param>
-    /// <param name="ct">Cancellation token.</param>
-    public async Task ExecuteAsync(Func<SqliteConnection, Task> action, CancellationToken ct = default)
+    public async Task ExecuteAsync(
+        Func<SqliteConnection, Task> action,
+        string connectionId = "Default",
+        CancellationToken ct = default)
     {
-        var conn = await GetConnectionAsync(ct).ConfigureAwait(false);
+        var conn = await GetConnectionAsync(connectionId, ct).ConfigureAwait(false);
         try
         {
             await action(conn).ConfigureAwait(false);
         }
         finally
         {
-            await ReleaseConnectionAsync(conn).ConfigureAwait(false);
+            await ReleaseConnectionAsync(conn, connectionId).ConfigureAwait(false);
         }
     }
 
-    /// <summary>
-    /// Disposes all pooled connections and marks the manager as disposed.
-    /// </summary>
+    public async Task<bool> TestConnectionAsync(
+        string connectionId = "Default",
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var conn = await GetConnectionAsync(connectionId, ct).ConfigureAwait(false);
+            await ReleaseConnectionAsync(conn, connectionId).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning($"[SQLite] Connection test failed for '{connectionId}': {ex.Message}");
+            return false;
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
 
-        while (_pool.TryPop(out var pooled))
-            pooled.Connection.Dispose();
+        foreach (var state in _states.Values)
+            state.Dispose();
+
+        _states.Clear();
     }
 
-    // ── Private helpers ──────────────────────────────────────────────────────
+    private DatabaseState RequireState(string connectionId)
+    {
+        if (_states.TryGetValue(connectionId, out var state))
+            return state;
 
-    private async Task<SqliteConnection> CreateConnectionAsync(CancellationToken ct)
+        throw new InvalidOperationException(
+            $"No SQLite configuration registered for connection ID '{connectionId}'.");
+    }
+
+    private string ResolveDatabasePath(SQLiteDatabaseConfig config)
+    {
+        if (_dataDirectory is not null && !Path.IsPathRooted(config.DatabasePath))
+            return Path.Combine(_dataDirectory, config.DatabasePath);
+
+        return config.DatabasePath;
+    }
+
+    private static void EnsureDirectoryExists(string databasePath)
+    {
+        var dir = Path.GetDirectoryName(databasePath);
+        if (!string.IsNullOrWhiteSpace(dir) && !Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+    }
+
+    private async Task<SqliteConnection> CreateConnectionAsync(DatabaseState state, CancellationToken ct)
     {
         var builder = new SqliteConnectionStringBuilder
         {
-            DataSource = _databasePath
+            DataSource = state.DatabasePath
         };
 
-        builder.Mode = _config.CacheMode switch
+        builder.Mode = state.Config.CacheMode switch
         {
-            CacheMode.Shared  => SqliteOpenMode.ReadWriteCreate,
+            CacheMode.Shared => SqliteOpenMode.ReadWriteCreate,
             CacheMode.Private => SqliteOpenMode.ReadWriteCreate,
-            _                 => SqliteOpenMode.ReadWriteCreate
+            _ => SqliteOpenMode.ReadWriteCreate
         };
 
-        if (_config.CacheMode == CacheMode.Shared)
+        if (state.Config.CacheMode == CacheMode.Shared)
             builder.Cache = SqliteCacheMode.Shared;
 
         var conn = new SqliteConnection(builder.ToString());
         await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        // Configure pragmas
-        if (_config.UseWAL)
+        if (state.Config.UseWAL)
         {
             await using var walCmd = conn.CreateCommand();
             walCmd.CommandText = "PRAGMA journal_mode=WAL;";
             await walCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        if (_config.EnableForeignKeys)
+        if (state.Config.EnableForeignKeys)
         {
             await using var fkCmd = conn.CreateCommand();
             fkCmd.CommandText = "PRAGMA foreign_keys=ON;";
             await fkCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        _logger?.Debug($"Created new SQLite connection: {_databasePath}");
+        _logger?.Debug($"[SQLite] Created new connection for '{state.DatabasePath}'");
         return conn;
     }
 
-    // ── Inner class: PooledConnection ────────────────────────────────────────
+    private sealed class DatabaseState : IDisposable
+    {
+        public DatabaseState(SQLiteDatabaseConfig config, string databasePath)
+        {
+            Config = config;
+            DatabasePath = databasePath;
+        }
+
+        public SQLiteDatabaseConfig Config { get; }
+        public string DatabasePath { get; }
+        public ConcurrentStack<PooledConnection> Pool { get; } = new();
+        public int ActiveCount;
+
+        public void Dispose()
+        {
+            while (Pool.TryPop(out var pooled))
+                pooled.Connection.Dispose();
+        }
+    }
 
     private sealed class PooledConnection
     {
         private static readonly TimeSpan MaxIdleTime = TimeSpan.FromMinutes(5);
-
-        public SqliteConnection Connection { get; }
-        private DateTime _lastUsed;
-        private bool _inUse;
 
         public PooledConnection(SqliteConnection connection)
         {
             Connection = connection;
             _lastUsed = DateTime.UtcNow;
         }
+
+        public SqliteConnection Connection { get; }
+        private DateTime _lastUsed;
+        private bool _inUse;
 
         public void MarkInUse()
         {

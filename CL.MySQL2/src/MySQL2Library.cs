@@ -10,7 +10,8 @@ namespace CL.MySQL2;
 
 /// <summary>
 /// <b>CL.MySQL2</b> — CodeLogic library providing MySQL database access with a fluent
-/// LINQ query builder, automatic table synchronization, migrations, and schema backups.
+/// LINQ query builder, automatic table synchronization, migrations, schema backups,
+/// and multiple named database connections.
 /// <para>
 /// Lifecycle:
 /// <list type="number">
@@ -65,10 +66,14 @@ public sealed class MySQL2Library : ILibrary
         var config = context.Configuration.Get<DatabaseConfiguration>();
         _strings = context.Localization.Get<MySQL2Strings>();
 
-        if (!config.Enabled)
+        var enabledDbs = config.Databases
+            .Where(kvp => kvp.Value.Enabled)
+            .ToList();
+
+        if (enabledDbs.Count == 0)
         {
             _isEnabled = false;
-            context.Logger.Warning($"{Manifest.Name} is disabled in configuration — skipping initialization.");
+            context.Logger.Warning($"{Manifest.Name} has no enabled databases — skipping initialization.");
             return;
         }
 
@@ -84,24 +89,36 @@ public sealed class MySQL2Library : ILibrary
         }
 
         // Create services
-        _connectionManager = new ConnectionManager(config, context.Logger, context.Events);
+        _connectionManager = new ConnectionManager(context.Logger, context.Events);
+
+        foreach (var kvp in enabledDbs)
+        {
+            _connectionManager.RegisterConfiguration(kvp.Value, kvp.Key);
+        }
+
         _tableSyncService = new TableSyncService(
             _connectionManager,
             context.DataDirectory,
             context.Logger,
             context.Events);
 
-        context.Logger.Info($"[MySQL2] Connecting to {config.Host}:{config.Port}/{config.Database}");
+        foreach (var kvp in enabledDbs)
+        {
+            context.Logger.Info($"[MySQL2] Connecting '{kvp.Key}' to {kvp.Value.Host}:{kvp.Value.Port}/{kvp.Value.Database}");
 
-        // Test connection
-        var connected = await _connectionManager.TestConnectionAsync(ct: default).ConfigureAwait(false);
-        if (connected)
-        {
-            context.Logger.Info(_strings?.ConnectionTestSuccess ?? "Connection test successful");
-        }
-        else
-        {
-            context.Logger.Warning(_strings?.ConnectionTestFailed ?? "Connection test failed");
+            var connected = await _connectionManager.TestConnectionAsync(kvp.Key, default).ConfigureAwait(false);
+            if (connected)
+            {
+                context.Logger.Info(string.Format(
+                    _strings?.ConnectionTestSuccess ?? "Connection '{0}' test successful",
+                    kvp.Key));
+            }
+            else
+            {
+                context.Logger.Warning(string.Format(
+                    _strings?.ConnectionTestFailed ?? "Connection '{0}' test failed",
+                    kvp.Key));
+            }
         }
 
         context.Logger.Info(_strings?.LibraryInitialized ?? "MySQL2 library initialized");
@@ -123,9 +140,12 @@ public sealed class MySQL2Library : ILibrary
 
         try
         {
-            var serverInfo = await _connectionManager.GetServerInfoAsync().ConfigureAwait(false);
-            context.Logger.Info($"[MySQL2] Server: {serverInfo.Version} ({serverInfo.Comment})");
-            context.Logger.Info($"[MySQL2] Database: {serverInfo.Database} on {serverInfo.Host}");
+            foreach (var connectionId in _connectionManager.GetConnectionIds())
+            {
+                var serverInfo = await _connectionManager.GetServerInfoAsync(connectionId).ConfigureAwait(false);
+                context.Logger.Info($"[MySQL2] [{connectionId}] Server: {serverInfo.Version} ({serverInfo.Comment})");
+                context.Logger.Info($"[MySQL2] [{connectionId}] Database: {serverInfo.Database} on {serverInfo.Host}");
+            }
         }
         catch (Exception ex)
         {
@@ -162,18 +182,37 @@ public sealed class MySQL2Library : ILibrary
 
         try
         {
-            var ok = await _connectionManager.TestConnectionAsync().ConfigureAwait(false);
+            var connectionIds = _connectionManager.GetConnectionIds().ToList();
+            var failedConnections = new List<string>();
+
+            foreach (var connectionId in connectionIds)
+            {
+                var ok = await _connectionManager.TestConnectionAsync(connectionId).ConfigureAwait(false);
+                if (!ok)
+                    failedConnections.Add(connectionId);
+            }
+
             var config = _context?.Configuration.Get<DatabaseConfiguration>();
-            var openCounts = _connectionManager.GetAllConnectionCounts();
 
             var data = new Dictionary<string, object>
             {
-                ["host"] = config?.Host ?? "?",
-                ["database"] = config?.Database ?? "?",
-                ["openConnections"] = _connectionManager.GetOpenConnectionCount()
+                ["totalDatabases"] = connectionIds.Count,
+                ["failedDatabases"] = failedConnections.Count,
+                ["connections"] = connectionIds.ToDictionary(
+                    id => id,
+                    id =>
+                    {
+                        var dbConfig = config?.Databases.TryGetValue(id, out var cfg) == true ? cfg : null;
+                        return new Dictionary<string, object?>
+                        {
+                            ["host"] = dbConfig?.Host ?? "?",
+                            ["database"] = dbConfig?.Database ?? "?",
+                            ["openConnections"] = _connectionManager.GetOpenConnectionCount(id)
+                        };
+                    })
             };
 
-            if (ok)
+            if (failedConnections.Count == 0)
             {
                 return new HealthStatus
                 {
@@ -182,17 +221,27 @@ public sealed class MySQL2Library : ILibrary
                     Data = data
                 };
             }
-            else
+
+            if (failedConnections.Count < connectionIds.Count)
             {
                 return new HealthStatus
                 {
-                    Status = HealthStatusLevel.Unhealthy,
+                    Status = HealthStatusLevel.Degraded,
                     Message = string.Format(
                         _strings?.HealthCheckFailed ?? "Health check failed: {0}",
-                        "Connection test returned false"),
+                        string.Join(", ", failedConnections)),
                     Data = data
                 };
             }
+
+            return new HealthStatus
+            {
+                Status = HealthStatusLevel.Unhealthy,
+                Message = string.Format(
+                    _strings?.HealthCheckFailed ?? "Health check failed: {0}",
+                    string.Join(", ", failedConnections)),
+                Data = data
+            };
         }
         catch (Exception ex)
         {
@@ -237,7 +286,9 @@ public sealed class MySQL2Library : ILibrary
             ConnectionManager,
             _context?.Logger,
             connectionId,
-            config?.SlowQueryThresholdMs ?? 1000);
+            config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
+                ? dbConfig.SlowQueryThresholdMs
+                : 1000);
     }
 
     /// <summary>
@@ -252,7 +303,9 @@ public sealed class MySQL2Library : ILibrary
             ConnectionManager,
             _context?.Logger,
             connectionId,
-            config?.SlowQueryThresholdMs ?? 1000);
+            config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
+                ? dbConfig.SlowQueryThresholdMs
+                : 1000);
     }
 
     /// <summary>

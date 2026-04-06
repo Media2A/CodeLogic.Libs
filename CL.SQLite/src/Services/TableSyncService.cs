@@ -51,7 +51,9 @@ public sealed class TableSyncService
     /// <typeparam name="T">The entity type whose table should be synchronized.</typeparam>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="Result{T}"/> containing a <see cref="TableSyncResult"/> describing what was done.</returns>
-    public async Task<Result<TableSyncResult>> SyncTableAsync<T>(CancellationToken ct = default) where T : class
+    public async Task<Result<TableSyncResult>> SyncTableAsync<T>(
+        string connectionId = "Default",
+        CancellationToken ct = default) where T : class
     {
         var entityType = typeof(T);
         var tableName = SchemaAnalyzer.GetTableName(entityType);
@@ -127,7 +129,7 @@ public sealed class TableSyncService
                     _logger?.Info($"[SQLite] {msg}");
                     return TableSyncResult.Succeeded(msg);
                 }
-            }, ct).ConfigureAwait(false);
+            }, connectionId, ct).ConfigureAwait(false);
 
             if (_events is not null)
             {
@@ -158,6 +160,7 @@ public sealed class TableSyncService
     /// </returns>
     public async Task<Dictionary<string, Result<TableSyncResult>>> SyncTablesAsync(
         Type[] modelTypes,
+        string connectionId = "Default",
         CancellationToken ct = default)
     {
         var results = new Dictionary<string, Result<TableSyncResult>>(StringComparer.OrdinalIgnoreCase);
@@ -171,7 +174,7 @@ public sealed class TableSyncService
                     .GetMethod(nameof(SyncTableAsync))!
                     .MakeGenericMethod(type);
 
-                var task = (Task<Result<TableSyncResult>>)method.Invoke(this, [ct])!;
+                var task = (Task<Result<TableSyncResult>>)method.Invoke(this, [connectionId, ct])!;
                 results[tableName] = await task.ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -200,6 +203,7 @@ public sealed class TableSyncService
     public async Task<Dictionary<string, Result<TableSyncResult>>> SyncNamespaceAsync(
         string namespaceName,
         bool includeDerived = false,
+        string connectionId = "Default",
         CancellationToken ct = default)
     {
         var assembly = Assembly.GetCallingAssembly();
@@ -209,7 +213,7 @@ public sealed class TableSyncService
                         t.GetCustomAttribute<SQLiteTableAttribute>() is not null)
             .ToArray();
 
-        return await SyncTablesAsync(types, ct).ConfigureAwait(false);
+        return await SyncTablesAsync(types, connectionId, ct).ConfigureAwait(false);
     }
 
     // ── Private helpers ────────────────────────────────────────────────────────

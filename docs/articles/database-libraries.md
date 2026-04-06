@@ -24,13 +24,24 @@ await Libraries.LoadAsync<CL.SQLite.SQLiteLibrary>();
 
 ```json
 {
-  "Enabled": true,
-  "DatabasePath": "database.db",
-  "ConnectionTimeoutSeconds": 30,
-  "CommandTimeoutSeconds": 120,
-  "UseWAL": true,
-  "EnableForeignKeys": true,
-  "MaxPoolSize": 10
+  "Databases": {
+    "Default": {
+      "Enabled": true,
+      "DatabasePath": "database.db",
+      "ConnectionTimeoutSeconds": 30,
+      "CommandTimeoutSeconds": 120,
+      "UseWAL": true,
+      "EnableForeignKeys": true,
+      "MaxPoolSize": 10
+    },
+    "cache": {
+      "Enabled": true,
+      "DatabasePath": "cache.db",
+      "UseWAL": true,
+      "EnableForeignKeys": false,
+      "MaxPoolSize": 5
+    }
+  }
 }
 ```
 
@@ -39,6 +50,7 @@ await Libraries.LoadAsync<CL.SQLite.SQLiteLibrary>();
 ```csharp
 var sqlite = context.GetLibrary<CL.SQLite.SQLiteLibrary>();
 var userRepo = sqlite.GetRepository<User>();
+var cacheRepo = sqlite.GetRepository<CachedItem>("cache");
 
 var inserted = await userRepo.InsertAsync(new User { Email = "alice@example.com", Name = "Alice" });
 var users = await userRepo.FindAsync(u => u.Email == "alice@example.com");
@@ -47,7 +59,7 @@ var users = await userRepo.FindAsync(u => u.Email == "alice@example.com");
 ### Query Builder
 
 ```csharp
-var results = await sqlite.GetQueryBuilder<User>()
+var results = await sqlite.GetQueryBuilder<User>("Default")
     .Where(u => u.IsActive)
     .OrderBy(u => u.Name)
     .Limit(20)
@@ -70,17 +82,34 @@ await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
 
 ```json
 {
-  "Enabled": true,
-  "Host": "localhost",
-  "Port": 3306,
-  "Database": "myapp",
-  "Username": "app",
-  "Password": "secret",
-  "EnablePooling": true,
-  "MinPoolSize": 1,
-  "MaxPoolSize": 20,
-  "ConnectionTimeout": 30,
-  "CommandTimeout": 30
+  "Databases": {
+    "Default": {
+      "Enabled": true,
+      "Host": "localhost",
+      "Port": 3306,
+      "Database": "myapp",
+      "Username": "app",
+      "Password": "secret",
+      "EnablePooling": true,
+      "MinPoolSize": 1,
+      "MaxPoolSize": 20,
+      "ConnectionTimeout": 30,
+      "CommandTimeout": 30
+    },
+    "reporting": {
+      "Enabled": true,
+      "Host": "replica.internal",
+      "Port": 3306,
+      "Database": "myapp_reporting",
+      "Username": "ro_app",
+      "Password": "secret",
+      "EnablePooling": true,
+      "MinPoolSize": 1,
+      "MaxPoolSize": 10,
+      "ConnectionTimeout": 30,
+      "CommandTimeout": 30
+    }
+  }
 }
 ```
 
@@ -89,6 +118,7 @@ await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
 ```csharp
 var mysql = context.GetLibrary<CL.MySQL2.MySQL2Library>();
 var orderRepo = mysql.GetRepository<Order>();
+var reportingRepo = mysql.GetRepository<OrderReport>("reporting");
 
 var pendingOrders = await orderRepo.FindAsync(o => o.Status == "Pending");
 ```
@@ -172,7 +202,7 @@ await pg.SyncTableAsync<User>(connectionId: "Default");
 The three libraries share the same broad approach:
 
 ```csharp
-Repository<T> GetRepository<T>() where T : class, new();
+Repository<T> GetRepository<T>(string connectionId = "Default") where T : class, new();
 Task<HealthStatus> HealthCheckAsync();
 ```
 
@@ -180,7 +210,7 @@ Query-builder entry points differ slightly:
 
 ```csharp
 // SQLite
-QueryBuilder<T> GetQueryBuilder<T>() where T : class, new();
+QueryBuilder<T> GetQueryBuilder<T>(string connectionId = "Default") where T : class, new();
 
 // MySQL2 / PostgreSQL
 QueryBuilder<T> Query<T>(string connectionId = "Default") where T : class, new();

@@ -18,6 +18,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 {
     private readonly ConnectionManager _connectionManager;
     private readonly ILogger? _logger;
+    private readonly string _connectionId;
     private readonly int _slowQueryThresholdMs;
 
     // Builder state
@@ -40,10 +41,12 @@ public sealed class QueryBuilder<T> where T : class, new()
     public QueryBuilder(
         ConnectionManager connectionManager,
         ILogger? logger = null,
+        string connectionId = "Default",
         int slowQueryThresholdMs = 500)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _logger = logger;
+        _connectionId = connectionId;
         _slowQueryThresholdMs = slowQueryThresholdMs;
     }
 
@@ -192,7 +195,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                     items.Add(MapReader(reader));
                 return items;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -224,7 +227,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 await using var cmd = BuildCommand(conn, sql, parms);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapReader(reader) : null;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -272,7 +275,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                     entities.Add(MapReader(reader));
 
                 return (entities, totalCount);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
@@ -311,7 +314,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 await using var cmd = BuildCommand(conn, sql, parms);
                 var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 return result is null ? 0L : Convert.ToInt64(result);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             return Result<long>.Success(count);
         }
@@ -374,7 +377,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql, parms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -414,7 +417,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql, allParms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -536,7 +539,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 var raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 if (raw is null || raw is DBNull) return default!;
                 return (TResult)Convert.ChangeType(raw, typeof(TResult))!;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);

@@ -25,6 +25,7 @@ public sealed class SQLiteLibrary : ILibrary
     private ConnectionManager? _connectionManager;
     private TableSyncService? _tableSyncService;
     private SQLiteStrings? _strings;
+    private SQLiteConfig? _config;
     private bool _isEnabled;
 
     // ── Phase 1: Configure ────────────────────────────────────────────────────
@@ -47,33 +48,42 @@ public sealed class SQLiteLibrary : ILibrary
         _context = context;
         context.Logger.Info($"Initializing {Manifest.Name}");
 
-        var config = context.Configuration.Get<SQLiteConfig>();
+        _config = context.Configuration.Get<SQLiteConfig>();
         _strings = context.Localization.Get<SQLiteStrings>();
 
-        if (!config.Enabled)
+        var enabledDbs = _config.Databases
+            .Where(kvp => kvp.Value.Enabled)
+            .ToList();
+
+        if (enabledDbs.Count == 0)
         {
             _isEnabled = false;
-            context.Logger.Warning($"{Manifest.Name} is disabled in configuration — skipping initialization.");
+            context.Logger.Warning($"{Manifest.Name} has no enabled databases — skipping initialization.");
             return Task.CompletedTask;
         }
 
         _isEnabled = true;
 
-        var validation = config.Validate();
+        var validation = _config.Validate();
         if (!validation.IsValid)
         {
             var errors = string.Join("; ", validation.Errors);
             throw new InvalidOperationException($"{Manifest.Name} configuration is invalid: {errors}");
         }
 
-        _connectionManager = new ConnectionManager(config, context.Logger, context.DataDirectory);
+        _connectionManager = new ConnectionManager(context.Logger, context.DataDirectory);
+        foreach (var kvp in enabledDbs)
+            _connectionManager.RegisterConfiguration(kvp.Key, kvp.Value);
+
         _tableSyncService = new TableSyncService(
             _connectionManager,
             context.DataDirectory,
             context.Logger,
             context.Events);
 
-        context.Logger.Info(string.Format(_strings?.LibraryInitialized ?? "SQLite library initialized: {0}", config.DatabasePath));
+        context.Logger.Info(string.Format(
+            _strings?.LibraryInitialized ?? "SQLite library initialized with {0} database(s)",
+            enabledDbs.Count));
 
         return Task.CompletedTask;
     }
@@ -121,21 +131,41 @@ public sealed class SQLiteLibrary : ILibrary
 
         try
         {
-            var conn = await _connectionManager.GetConnectionAsync().ConfigureAwait(false);
-            await _connectionManager.ReleaseConnectionAsync(conn).ConfigureAwait(false);
+            var connectionIds = _connectionManager.GetConnectionIds().ToList();
+            var failedConnections = new List<string>();
 
-            var dbPath = _connectionManager.DatabasePath;
-            var msg = string.Format(_strings?.HealthCheckPassed ?? "SQLite is operational: {0}", dbPath);
+            foreach (var connectionId in connectionIds)
+            {
+                var ok = await _connectionManager.TestConnectionAsync(connectionId).ConfigureAwait(false);
+                if (!ok)
+                    failedConnections.Add(connectionId);
+            }
+
+            var msg = failedConnections.Count == 0
+                ? string.Format(_strings?.HealthCheckPassed ?? "SQLite is operational: {0}", string.Join(", ", connectionIds))
+                : string.Format(_strings?.HealthCheckFailed ?? "SQLite health check failed: {0}", string.Join(", ", failedConnections));
 
             return new HealthStatus
             {
-                Status = HealthStatusLevel.Healthy,
+                Status = failedConnections.Count switch
+                {
+                    0 => HealthStatusLevel.Healthy,
+                    var count when count < connectionIds.Count => HealthStatusLevel.Degraded,
+                    _ => HealthStatusLevel.Unhealthy
+                },
                 Message = msg,
                 Data = new Dictionary<string, object>
                 {
-                    ["databasePath"] = dbPath,
-                    ["activeConnections"] = _connectionManager.ActiveConnectionCount,
-                    ["pooledConnections"] = _connectionManager.PooledConnectionCount
+                    ["totalDatabases"] = connectionIds.Count,
+                    ["failedDatabases"] = failedConnections.Count,
+                    ["connections"] = connectionIds.ToDictionary(
+                        id => id,
+                        id => new Dictionary<string, object>
+                        {
+                            ["databasePath"] = _connectionManager.GetDatabasePath(id),
+                            ["activeConnections"] = _connectionManager.GetActiveConnectionCount(id),
+                            ["pooledConnections"] = _connectionManager.GetPooledConnectionCount(id)
+                        })
                 }
             };
         }
@@ -161,22 +191,30 @@ public sealed class SQLiteLibrary : ILibrary
         _tableSyncService?.MigrationTracker ?? throw new InvalidOperationException(
             $"{Manifest.Name} has not been initialized or is disabled.");
 
-    public Repository<T> GetRepository<T>() where T : class, new()
+    public Repository<T> GetRepository<T>(string connectionId = "Default") where T : class, new()
     {
-        var config = _context?.Configuration.Get<SQLiteConfig>();
+        var slowMs = _config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
+            ? dbConfig.SlowQueryThresholdMs
+            : 500;
+
         return new Repository<T>(
             ConnectionManager,
             _context?.Logger,
-            config?.SlowQueryThresholdMs ?? 500);
+            connectionId,
+            slowMs);
     }
 
-    public QueryBuilder<T> GetQueryBuilder<T>() where T : class, new()
+    public QueryBuilder<T> GetQueryBuilder<T>(string connectionId = "Default") where T : class, new()
     {
-        var config = _context?.Configuration.Get<SQLiteConfig>();
+        var slowMs = _config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
+            ? dbConfig.SlowQueryThresholdMs
+            : 500;
+
         return new QueryBuilder<T>(
             ConnectionManager,
             _context?.Logger,
-            config?.SlowQueryThresholdMs ?? 500);
+            connectionId,
+            slowMs);
     }
 
     // ── IDisposable ───────────────────────────────────────────────────────────

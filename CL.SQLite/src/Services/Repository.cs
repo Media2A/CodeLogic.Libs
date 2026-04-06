@@ -18,6 +18,7 @@ public sealed class Repository<T> where T : class, new()
 {
     private readonly ConnectionManager _connectionManager;
     private readonly ILogger? _logger;
+    private readonly string _connectionId;
     private readonly int _slowQueryThresholdMs;
 
     private static readonly ConcurrentDictionary<Type, PropertyInfo[]> _cachedProperties = new();
@@ -36,10 +37,12 @@ public sealed class Repository<T> where T : class, new()
     public Repository(
         ConnectionManager connectionManager,
         ILogger? logger = null,
+        string connectionId = "Default",
         int slowQueryThresholdMs = 500)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _logger = logger;
+        _connectionId = connectionId;
         _slowQueryThresholdMs = slowQueryThresholdMs;
     }
 
@@ -83,7 +86,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
                 var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 return result is null ? 0L : Convert.ToInt64(result);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -141,7 +144,7 @@ public sealed class Repository<T> where T : class, new()
                 foreach (var kv in values)
                     cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -180,7 +183,7 @@ public sealed class Repository<T> where T : class, new()
                 cmd.Parameters.AddWithValue("@id", id ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapFromReader(reader) : null;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -222,7 +225,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapFromReader(reader) : null;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -258,7 +261,7 @@ public sealed class Repository<T> where T : class, new()
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                     items.Add(MapFromReader(reader));
                 return items;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -299,7 +302,7 @@ public sealed class Repository<T> where T : class, new()
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                     items.Add(MapFromReader(reader));
                 return items;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -355,7 +358,7 @@ public sealed class Repository<T> where T : class, new()
                 foreach (var kv in values)
                     cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -393,7 +396,7 @@ public sealed class Repository<T> where T : class, new()
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@id", id ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -434,7 +437,7 @@ public sealed class Repository<T> where T : class, new()
                 foreach (var kv in parameters)
                     cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -465,7 +468,7 @@ public sealed class Repository<T> where T : class, new()
                 cmd.CommandText = sql;
                 var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 return result is null ? 0L : Convert.ToInt64(result);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             return Result<long>.Success(count);
         }
@@ -518,7 +521,7 @@ public sealed class Repository<T> where T : class, new()
                     entities.Add(MapFromReader(reader));
 
                 return (entities, totalCount);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
@@ -567,7 +570,7 @@ public sealed class Repository<T> where T : class, new()
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                     items.Add(MapFromReader(reader));
                 return items;
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -605,7 +608,7 @@ public sealed class Repository<T> where T : class, new()
                     foreach (var kv in @params)
                         cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct).ConfigureAwait(false);
+            }, _connectionId, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);

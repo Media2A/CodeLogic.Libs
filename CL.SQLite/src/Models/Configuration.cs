@@ -5,6 +5,31 @@ namespace CL.SQLite.Models;
 [ConfigSection("sqlite")]
 public class SQLiteConfig : ConfigModelBase
 {
+    public Dictionary<string, SQLiteDatabaseConfig> Databases { get; set; } = new()
+    {
+        ["Default"] = new SQLiteDatabaseConfig()
+    };
+
+    public override ConfigValidationResult Validate()
+    {
+        var errors = new List<string>();
+
+        if (Databases.Count == 0)
+            errors.Add("At least one database configuration is required");
+
+        foreach (var kvp in Databases)
+        {
+            var result = kvp.Value.Validate();
+            if (!result.IsValid)
+                errors.Add($"Database '{kvp.Key}': {string.Join(", ", result.Errors)}");
+        }
+
+        return errors.Any() ? ConfigValidationResult.Invalid(errors) : ConfigValidationResult.Valid();
+    }
+}
+
+public class SQLiteDatabaseConfig
+{
     public bool Enabled { get; set; } = true;
     public string DatabasePath { get; set; } = "database.db";
     public uint ConnectionTimeoutSeconds { get; set; } = 30;
@@ -16,7 +41,7 @@ public class SQLiteConfig : ConfigModelBase
     public int MaxPoolSize { get; set; } = 10;
     public int SlowQueryThresholdMs { get; set; } = 500;
 
-    public override ConfigValidationResult Validate()
+    public ConfigValidationResult Validate()
     {
         var errors = new List<string>();
         if (string.IsNullOrWhiteSpace(DatabasePath)) errors.Add("DatabasePath is required");

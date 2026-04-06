@@ -26,7 +26,7 @@ The database libraries (CL.MySQL2, CL.PostgreSQL, CL.SQLite) share a consistent 
 
 ```csharp
 // All three database libraries expose:
-IRepository<T> GetRepository<T>() where T : class, new();
+Repository<T> GetRepository<T>(string connectionId = "Default") where T : class, new();
 
 // Repository methods:
 Task<T?> FindAsync(Expression<Func<T, bool>> predicate);
@@ -48,7 +48,7 @@ var results = await library.Query<User>()
     .ToListAsync();
 
 // SQLite
-var sqliteResults = await sqlite.GetQueryBuilder<User>()
+var sqliteResults = await sqlite.GetQueryBuilder<User>("Default")
     .Where(u => u.IsActive)
     .OrderBy(u => u.CreatedAt)
     .Limit(20)

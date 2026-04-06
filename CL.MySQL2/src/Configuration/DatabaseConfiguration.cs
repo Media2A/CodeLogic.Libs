@@ -10,10 +10,44 @@ namespace CL.MySQL2.Configuration;
 [ConfigSection("mysql")]
 public sealed class DatabaseConfiguration : ConfigModelBase
 {
-    /// <summary>Whether the library is active. When false, all database operations are skipped.</summary>
-    public bool Enabled { get; set; } = true;
+    /// <summary>
+    /// Named database configurations keyed by connection ID.
+    /// </summary>
+    public Dictionary<string, MySqlDatabaseConfig> Databases { get; set; } = new()
+    {
+        ["Default"] = new MySqlDatabaseConfig()
+    };
 
-    // ── Connection ────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Validates all configured databases.
+    /// </summary>
+    public override ConfigValidationResult Validate()
+    {
+        var errors = new List<string>();
+
+        if (Databases.Count == 0)
+            errors.Add("At least one database configuration is required");
+
+        foreach (var kvp in Databases)
+        {
+            var result = kvp.Value.Validate();
+            if (!result.IsValid)
+                errors.Add($"Database '{kvp.Key}': {string.Join(", ", result.Errors)}");
+        }
+
+        return errors.Count > 0
+            ? ConfigValidationResult.Invalid(errors)
+            : ConfigValidationResult.Valid();
+    }
+}
+
+/// <summary>
+/// Per-database MySQL connection settings.
+/// </summary>
+public sealed class MySqlDatabaseConfig
+{
+    /// <summary>Whether this database connection is active.</summary>
+    public bool Enabled { get; set; } = true;
 
     /// <summary>MySQL server hostname or IP address.</summary>
     public string Host { get; set; } = "localhost";
@@ -22,15 +56,13 @@ public sealed class DatabaseConfiguration : ConfigModelBase
     public int Port { get; set; } = 3306;
 
     /// <summary>Database (schema) name.</summary>
-    public string Database { get; set; } = "";
+    public string Database { get; set; } = string.Empty;
 
     /// <summary>MySQL username.</summary>
-    public string Username { get; set; } = "";
+    public string Username { get; set; } = string.Empty;
 
     /// <summary>MySQL password.</summary>
-    public string Password { get; set; } = "";
-
-    // ── Connection Pool ───────────────────────────────────────────────────────
+    public string Password { get; set; } = string.Empty;
 
     /// <summary>Whether connection pooling is enabled. Default: true.</summary>
     public bool EnablePooling { get; set; } = true;
@@ -50,8 +82,6 @@ public sealed class DatabaseConfiguration : ConfigModelBase
     /// <summary>Command timeout in seconds. Default: 30.</summary>
     public int CommandTimeout { get; set; } = 30;
 
-    // ── SSL ───────────────────────────────────────────────────────────────────
-
     /// <summary>Whether to require SSL/TLS for connections. Default: false.</summary>
     public bool EnableSsl { get; set; } = false;
 
@@ -61,15 +91,11 @@ public sealed class DatabaseConfiguration : ConfigModelBase
     /// <summary>Whether to allow servers without RSA public key. Default: false.</summary>
     public bool AllowPublicKeyRetrieval { get; set; } = false;
 
-    // ── Character Set ─────────────────────────────────────────────────────────
-
     /// <summary>Connection character set. Default: "utf8mb4".</summary>
     public string CharacterSet { get; set; } = "utf8mb4";
 
     /// <summary>Default collation. Default: "utf8mb4_unicode_ci".</summary>
     public string Collation { get; set; } = "utf8mb4_unicode_ci";
-
-    // ── Sync / Operations ─────────────────────────────────────────────────────
 
     /// <summary>
     /// When false (default), the table sync will never DROP or TRUNCATE existing data.
@@ -85,8 +111,6 @@ public sealed class DatabaseConfiguration : ConfigModelBase
 
     /// <summary>Queries exceeding this threshold (ms) are logged as slow queries. Default: 1000.</summary>
     public int SlowQueryThresholdMs { get; set; } = 1000;
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Builds and returns the MySqlConnector connection string from the current configuration.
@@ -110,15 +134,17 @@ public sealed class DatabaseConfiguration : ConfigModelBase
             CharacterSet = CharacterSet,
             SslMode = EnableSsl ? MySqlSslMode.Required : MySqlSslMode.None
         };
+
         return builder.ConnectionString;
     }
 
     /// <summary>
-    /// Validates the configuration, returning any detected issues.
+    /// Validates the per-database configuration.
     /// </summary>
-    public override ConfigValidationResult Validate()
+    public ConfigValidationResult Validate()
     {
-        if (!Enabled) return ConfigValidationResult.Valid();
+        if (!Enabled)
+            return ConfigValidationResult.Valid();
 
         var errors = new List<string>();
 
