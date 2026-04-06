@@ -42,7 +42,14 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Clone CodeLogic framework (dependency)
-        run: git clone --depth 1 https://github.com/Media2A/CodeLogic.git ../../CodeLogic
+        run: |
+          # CL.* projects reference ../../CodeLogic/src/CodeLogic.csproj
+          # Working dir is /home/runner/work/<repo>/<repo>/
+          # So target is /home/runner/work/<repo>/CodeLogic/
+          TARGET="$(dirname $(pwd))/CodeLogic"
+          git clone --depth 1 https://github.com/Media2A/CodeLogic.git "$TARGET"
+          echo "Cloned to: $TARGET"
+          ls "$TARGET/src/"
 
       - name: Install DocFX
         run: dotnet tool install -g docfx
