@@ -36,16 +36,13 @@ jobs:
       - name: Checkout CodeLogic.Libs
         uses: actions/checkout@v4
 
-      - name: Checkout CodeLogic (dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: Media2A/CodeLogic
-          path: ../CodeLogic
-
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+
+      - name: Clone CodeLogic framework (dependency)
+        run: git clone --depth 1 https://github.com/Media2A/CodeLogic.git ../../CodeLogic
 
       - name: Install DocFX
         run: dotnet tool install -g docfx
