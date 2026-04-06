@@ -27,6 +27,12 @@ public sealed class Repository<T> where T : class, new()
     private static readonly string _tableName = GetTableName();
     private static readonly string[] _pkColumnNames = GetPrimaryKeyColumnNames();
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="Repository{T}"/>.
+    /// </summary>
+    /// <param name="connectionManager">The connection manager used to obtain and release database connections.</param>
+    /// <param name="logger">Optional logger for debug and warning output.</param>
+    /// <param name="slowQueryThresholdMs">Queries exceeding this threshold in milliseconds are logged as warnings.</param>
     public Repository(
         ConnectionManager connectionManager,
         ILogger? logger = null,
@@ -39,6 +45,13 @@ public sealed class Repository<T> where T : class, new()
 
     // ── CRUD ──────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Inserts a new entity into the table. If the entity has an auto-increment primary key,
+    /// the generated row ID is written back to the entity's PK property.
+    /// </summary>
+    /// <param name="entity">The entity to insert.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the SQLite row ID of the inserted row.</returns>
     public async Task<Result<long>> InsertAsync(T entity, CancellationToken ct = default)
     {
         try
@@ -93,6 +106,12 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Inserts the entity or replaces an existing row with the same primary key (INSERT OR REPLACE).
+    /// </summary>
+    /// <param name="entity">The entity to upsert.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result"/> indicating success or failure.</returns>
     public async Task<Result> UpsertAsync(T entity, CancellationToken ct = default)
     {
         try
@@ -135,6 +154,12 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Retrieves a single entity by its primary key value.
+    /// </summary>
+    /// <param name="id">The primary key value to look up.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the matching entity, or <c>null</c> if not found.</returns>
     public async Task<Result<T?>> GetByIdAsync(object id, CancellationToken ct = default)
     {
         try
@@ -168,6 +193,13 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Retrieves a single entity by a composite primary key. The number and order of
+    /// <paramref name="keys"/> must match the entity's primary key columns.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <param name="keys">The ordered set of primary key values.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the matching entity, or <c>null</c> if not found.</returns>
     public async Task<Result<T?>> GetByKeysAsync(CancellationToken ct, params object[] keys)
     {
         try
@@ -203,6 +235,12 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Retrieves all rows from the table up to the specified limit.
+    /// </summary>
+    /// <param name="limit">Maximum number of rows to return (defaults to 1000).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the list of entities.</returns>
     public async Task<Result<List<T>>> GetAllAsync(int limit = 1000, CancellationToken ct = default)
     {
         try
@@ -233,6 +271,12 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Retrieves all rows matching the given predicate expression.
+    /// </summary>
+    /// <param name="predicate">A LINQ predicate expression translated to a SQL WHERE clause.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the list of matching entities.</returns>
     public async Task<Result<List<T>>> FindAsync(
         Expression<Func<T, bool>> predicate,
         CancellationToken ct = default)
@@ -268,6 +312,12 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Updates an existing row by its primary key with the current property values of the entity.
+    /// </summary>
+    /// <param name="entity">The entity containing updated values. The primary key must be set.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result"/> indicating success or failure.</returns>
     public async Task<Result> UpdateAsync(T entity, CancellationToken ct = default)
     {
         try
@@ -318,6 +368,12 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Deletes the row with the given single primary key value.
+    /// </summary>
+    /// <param name="id">The primary key value identifying the row to delete.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result"/> indicating success or failure.</returns>
     public async Task<Result> DeleteAsync(object id, CancellationToken ct = default)
     {
         try
@@ -350,6 +406,13 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Deletes the row identified by a composite primary key. The number and order of
+    /// <paramref name="keys"/> must match the entity's primary key columns.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <param name="keys">The ordered set of primary key values.</param>
+    /// <returns>A <see cref="Result"/> indicating success or failure.</returns>
     public async Task<Result> DeleteByKeysAsync(CancellationToken ct, params object[] keys)
     {
         try
@@ -384,6 +447,11 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Returns the total number of rows in the table.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the row count.</returns>
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
@@ -408,6 +476,15 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Returns a paginated slice of rows from the table.
+    /// </summary>
+    /// <param name="page">1-based page number.</param>
+    /// <param name="pageSize">Number of rows per page.</param>
+    /// <param name="orderBy">Optional column name to sort by.</param>
+    /// <param name="desc">When <c>true</c>, sorts in descending order.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing a <see cref="PagedResult{T}"/> with items and total count.</returns>
     public async Task<Result<PagedResult<T>>> GetPagedAsync(
         int page,
         int pageSize,
@@ -461,6 +538,13 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Executes a raw SQL SELECT statement and maps the results to a list of entities.
+    /// </summary>
+    /// <param name="sql">The raw SQL SELECT query to execute.</param>
+    /// <param name="params">Optional named parameters to bind (e.g. <c>@id</c> → value).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the list of mapped entities.</returns>
     public async Task<Result<List<T>>> RawQueryAsync(
         string sql,
         Dictionary<string, object?>? @params = null,
@@ -496,6 +580,13 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Executes a raw non-query SQL statement (INSERT, UPDATE, DELETE, etc.).
+    /// </summary>
+    /// <param name="sql">The raw SQL statement to execute.</param>
+    /// <param name="params">Optional named parameters to bind (e.g. <c>@id</c> → value).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the number of rows affected.</returns>
     public async Task<Result<int>> RawExecuteAsync(
         string sql,
         Dictionary<string, object?>? @params = null,

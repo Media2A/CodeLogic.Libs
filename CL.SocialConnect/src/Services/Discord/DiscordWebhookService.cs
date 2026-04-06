@@ -52,6 +52,7 @@ public sealed class DiscordWebhookService
     /// <param name="webhookUrl">
     /// Webhook URL to post to. Falls back to <c>config.DefaultWebhookUrl</c> when not specified.
     /// </param>
+    /// <returns>A <see cref="Result"/> indicating whether the message was delivered successfully.</returns>
     public Task<Result> SendMessageAsync(string content, string? webhookUrl = null)
     {
         var message = new DiscordWebhookMessage
@@ -71,6 +72,7 @@ public sealed class DiscordWebhookService
     /// <param name="webhookUrl">
     /// Webhook URL to post to. Falls back to <c>config.DefaultWebhookUrl</c> when not specified.
     /// </param>
+    /// <returns>A <see cref="Result"/> indicating whether the message was delivered successfully.</returns>
     public Task<Result> SendEmbedAsync(IEnumerable<DiscordEmbed> embeds, string? content = null, string? webhookUrl = null)
     {
         var message = new DiscordWebhookMessage
@@ -90,6 +92,7 @@ public sealed class DiscordWebhookService
     /// <param name="webhookUrl">
     /// Webhook URL to post to. Falls back to <c>config.DefaultWebhookUrl</c> when not specified.
     /// </param>
+    /// <returns>A <see cref="Result"/> indicating whether the message was delivered successfully.</returns>
     public async Task<Result> SendAsync(DiscordWebhookMessage message, string? webhookUrl = null)
     {
         var url = ResolveUrl(webhookUrl);

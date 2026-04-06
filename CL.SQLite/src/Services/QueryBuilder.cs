@@ -31,6 +31,12 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="QueryBuilder{T}"/>.
+    /// </summary>
+    /// <param name="connectionManager">The connection manager used to obtain and release database connections.</param>
+    /// <param name="logger">Optional logger for debug and warning output.</param>
+    /// <param name="slowQueryThresholdMs">Queries exceeding this threshold in milliseconds are logged as warnings.</param>
     public QueryBuilder(
         ConnectionManager connectionManager,
         ILogger? logger = null,
@@ -43,6 +49,12 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     // ── Fluent chain methods ──────────────────────────────────────────────────
 
+    /// <summary>
+    /// Adds a WHERE condition translated from the given LINQ predicate expression.
+    /// Multiple calls are combined with AND.
+    /// </summary>
+    /// <param name="predicate">A LINQ predicate expression to translate to SQL.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> Where(Expression<Func<T, bool>> predicate)
     {
         var (clause, parms) = SQLiteExpressionVisitor.Parse(predicate);
@@ -58,6 +70,11 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
+    /// <summary>
+    /// Adds an ascending ORDER BY clause for the column selected by <paramref name="keySelector"/>.
+    /// </summary>
+    /// <param name="keySelector">Expression identifying the column to sort by.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> OrderBy<TKey>(Expression<Func<T, TKey>> keySelector)
     {
         var col = SQLiteExpressionVisitor.ParseOrderBy(keySelector);
@@ -65,6 +82,11 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
+    /// <summary>
+    /// Adds a descending ORDER BY clause for the column selected by <paramref name="keySelector"/>.
+    /// </summary>
+    /// <param name="keySelector">Expression identifying the column to sort by.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> OrderByDescending<TKey>(Expression<Func<T, TKey>> keySelector)
     {
         var col = SQLiteExpressionVisitor.ParseOrderBy(keySelector);
@@ -72,6 +94,11 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
+    /// <summary>
+    /// Adds a secondary ascending ORDER BY clause for the column selected by <paramref name="keySelector"/>.
+    /// </summary>
+    /// <param name="keySelector">Expression identifying the column to sort by.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> ThenBy<TKey>(Expression<Func<T, TKey>> keySelector)
     {
         var col = SQLiteExpressionVisitor.ParseOrderBy(keySelector);
@@ -79,6 +106,11 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
+    /// <summary>
+    /// Adds a secondary descending ORDER BY clause for the column selected by <paramref name="keySelector"/>.
+    /// </summary>
+    /// <param name="keySelector">Expression identifying the column to sort by.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> ThenByDescending<TKey>(Expression<Func<T, TKey>> keySelector)
     {
         var col = SQLiteExpressionVisitor.ParseOrderBy(keySelector);
@@ -86,17 +118,50 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
+    /// <summary>
+    /// Sets the maximum number of rows to return (LIMIT clause).
+    /// </summary>
+    /// <param name="count">The maximum row count.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> Limit(int count) { _limit = count; return this; }
+
+    /// <summary>
+    /// Sets the number of rows to skip before returning results (OFFSET clause).
+    /// </summary>
+    /// <param name="count">The number of rows to skip.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> Offset(int count) { _offset = count; return this; }
+
+    /// <summary>
+    /// Alias for <see cref="Limit"/>. Sets the maximum number of rows to return.
+    /// </summary>
+    /// <param name="count">The maximum row count.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> Take(int count) => Limit(count);
+
+    /// <summary>
+    /// Alias for <see cref="Offset"/>. Sets the number of rows to skip.
+    /// </summary>
+    /// <param name="count">The number of rows to skip.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> Skip(int count) => Offset(count);
 
+    /// <summary>
+    /// Restricts the SELECT column list to those referenced in <paramref name="selector"/>.
+    /// </summary>
+    /// <param name="selector">Expression identifying the column(s) to include in the SELECT clause.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> Select(Expression<Func<T, object?>> selector)
     {
         _selectColumns = SQLiteExpressionVisitor.ParseSelect(selector);
         return this;
     }
 
+    /// <summary>
+    /// Adds a GROUP BY clause for the column selected by <paramref name="keySelector"/>.
+    /// </summary>
+    /// <param name="keySelector">Expression identifying the column to group by.</param>
+    /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> GroupBy<TKey>(Expression<Func<T, TKey>> keySelector)
     {
         var col = SQLiteExpressionVisitor.ParseGroupBy(keySelector);
@@ -106,6 +171,11 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     // ── Terminal methods ──────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Executes the built query and returns all matching rows as a list.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the list of matching entities.</returns>
     public async Task<Result<List<T>>> ToListAsync(CancellationToken ct = default)
     {
         try
@@ -135,6 +205,11 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Executes the query with LIMIT 1 and returns the first matching entity, or <c>null</c> if none found.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the first entity or <c>null</c>.</returns>
     public async Task<Result<T?>> FirstOrDefaultAsync(CancellationToken ct = default)
     {
         try
@@ -162,6 +237,13 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Executes the query as a paginated request, returning a page of results alongside the total row count.
+    /// </summary>
+    /// <param name="page">1-based page number.</param>
+    /// <param name="pageSize">Number of rows per page.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing a <see cref="PagedResult{T}"/> with items and total count.</returns>
     public async Task<Result<PagedResult<T>>> ToPagedListAsync(
         int page,
         int pageSize,
@@ -210,6 +292,11 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Executes a COUNT(*) query using the current WHERE conditions and returns the total row count.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the number of matching rows.</returns>
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
@@ -235,21 +322,44 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Executes a SUM aggregate over the column identified by <paramref name="selector"/>.
+    /// </summary>
+    /// <param name="selector">Expression identifying the numeric column to sum.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the sum value.</returns>
     public Task<Result<TResult>> SumAsync<TResult>(
         Expression<Func<T, TResult>> selector,
         CancellationToken ct = default)
         => ExecuteAggregateAsync<TResult>("SUM", selector, ct);
 
+    /// <summary>
+    /// Executes a MAX aggregate over the column identified by <paramref name="selector"/>.
+    /// </summary>
+    /// <param name="selector">Expression identifying the column to find the maximum value of.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the maximum value.</returns>
     public Task<Result<TResult>> MaxAsync<TResult>(
         Expression<Func<T, TResult>> selector,
         CancellationToken ct = default)
         => ExecuteAggregateAsync<TResult>("MAX", selector, ct);
 
+    /// <summary>
+    /// Executes a MIN aggregate over the column identified by <paramref name="selector"/>.
+    /// </summary>
+    /// <param name="selector">Expression identifying the column to find the minimum value of.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the minimum value.</returns>
     public Task<Result<TResult>> MinAsync<TResult>(
         Expression<Func<T, TResult>> selector,
         CancellationToken ct = default)
         => ExecuteAggregateAsync<TResult>("MIN", selector, ct);
 
+    /// <summary>
+    /// Deletes all rows matching the current WHERE conditions.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the number of rows deleted.</returns>
     public async Task<Result<int>> DeleteAsync(CancellationToken ct = default)
     {
         try
@@ -277,6 +387,12 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Updates all rows matching the current WHERE conditions with the specified column values.
+    /// </summary>
+    /// <param name="updates">A dictionary mapping column names to their new values.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the number of rows updated.</returns>
     public async Task<Result<int>> UpdateAsync(
         Dictionary<string, object?> updates,
         CancellationToken ct = default)

@@ -14,6 +14,10 @@ internal sealed class SchemaAnalyzer
 {
     private readonly ILogger? _logger;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="SchemaAnalyzer"/>.
+    /// </summary>
+    /// <param name="logger">Optional logger for diagnostic output.</param>
     public SchemaAnalyzer(ILogger? logger = null)
     {
         _logger = logger;
@@ -21,6 +25,12 @@ internal sealed class SchemaAnalyzer
 
     // ── Public API ────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Reflects over the given model type and returns a column definition for each
+    /// property decorated with <see cref="SQLiteColumnAttribute"/>.
+    /// </summary>
+    /// <param name="modelType">The entity type to inspect.</param>
+    /// <returns>An ordered list of <see cref="ModelColumnDefinition"/> objects.</returns>
     public List<ModelColumnDefinition> GetModelColumns(Type modelType)
     {
         var result = new List<ModelColumnDefinition>();
@@ -47,6 +57,12 @@ internal sealed class SchemaAnalyzer
         return result;
     }
 
+    /// <summary>
+    /// Generates a <c>CREATE TABLE IF NOT EXISTS</c> statement for the given table name and column definitions.
+    /// </summary>
+    /// <param name="tableName">The target table name.</param>
+    /// <param name="columns">The column definitions to include in the table.</param>
+    /// <returns>A complete SQL CREATE TABLE statement string.</returns>
     public string GenerateCreateTableSql(string tableName, List<ModelColumnDefinition> columns)
     {
         var sb = new StringBuilder();
@@ -92,6 +108,12 @@ internal sealed class SchemaAnalyzer
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Returns the list of existing column names in the specified table by querying <c>PRAGMA table_info</c>.
+    /// </summary>
+    /// <param name="conn">An open SQLite connection.</param>
+    /// <param name="tableName">The table to inspect.</param>
+    /// <returns>A list of column name strings as stored in the database.</returns>
     public async Task<List<string>> GetDatabaseColumnsAsync(SqliteConnection conn, string tableName)
     {
         var columns = new List<string>();
@@ -105,6 +127,12 @@ internal sealed class SchemaAnalyzer
         return columns;
     }
 
+    /// <summary>
+    /// Determines whether a table with the given name exists in the database.
+    /// </summary>
+    /// <param name="conn">An open SQLite connection.</param>
+    /// <param name="tableName">The table name to check for.</param>
+    /// <returns><c>true</c> if the table exists; otherwise <c>false</c>.</returns>
     public async Task<bool> TableExistsAsync(SqliteConnection conn, string tableName)
     {
         await using var cmd = conn.CreateCommand();
@@ -114,6 +142,11 @@ internal sealed class SchemaAnalyzer
         return result is not null && result is not DBNull;
     }
 
+    /// <summary>
+    /// Maps a <see cref="SQLiteDataType"/> enum value to the corresponding SQLite type affinity string.
+    /// </summary>
+    /// <param name="dt">The data type to map.</param>
+    /// <returns>The SQLite type affinity string (e.g. <c>"INTEGER"</c>, <c>"TEXT"</c>).</returns>
     public string MapDataType(SQLiteDataType dt) => dt switch
     {
         SQLiteDataType.INTEGER  => "INTEGER",
@@ -128,6 +161,12 @@ internal sealed class SchemaAnalyzer
         _                       => "TEXT"
     };
 
+    /// <summary>
+    /// Returns the SQLite table name for the given entity type, using <see cref="SQLiteTableAttribute"/> when present,
+    /// or the type's simple name as a fallback.
+    /// </summary>
+    /// <param name="entityType">The entity type to resolve the table name for.</param>
+    /// <returns>The table name string.</returns>
     public static string GetTableName(Type entityType)
     {
         var attr = entityType.GetCustomAttribute<SQLiteTableAttribute>();
@@ -147,17 +186,39 @@ internal sealed class SchemaAnalyzer
 
     // ── Inner class ──────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Describes the schema of a single entity property as it maps to a SQLite column.
+    /// </summary>
     public sealed class ModelColumnDefinition
     {
+        /// <summary>Gets or sets the C# property name on the entity class.</summary>
         public string PropertyName { get; set; } = string.Empty;
+
+        /// <summary>Gets or sets the SQLite column name.</summary>
         public string ColumnName { get; set; } = string.Empty;
+
+        /// <summary>Gets or sets the SQLite data type affinity for the column.</summary>
         public SQLiteDataType DataType { get; set; }
+
+        /// <summary>Gets or sets a value indicating whether this column is part of the primary key.</summary>
         public bool IsPrimaryKey { get; set; }
+
+        /// <summary>Gets or sets a value indicating whether the primary key column uses AUTOINCREMENT.</summary>
         public bool IsAutoIncrement { get; set; }
+
+        /// <summary>Gets or sets a value indicating whether the column has a NOT NULL constraint.</summary>
         public bool IsNotNull { get; set; }
+
+        /// <summary>Gets or sets a value indicating whether the column has a UNIQUE constraint.</summary>
         public bool IsUnique { get; set; }
+
+        /// <summary>Gets or sets the SQL literal used as the column's DEFAULT value, or <c>null</c> for no default.</summary>
         public string? DefaultValue { get; set; }
+
+        /// <summary>Gets or sets the foreign key attribute declaring a REFERENCES constraint, or <c>null</c> if none.</summary>
         public SQLiteForeignKeyAttribute? ForeignKey { get; set; }
+
+        /// <summary>Gets or sets the reflected CLR <see cref="Type"/> of the property.</summary>
         public Type? PropertyType { get; set; }
     }
 }

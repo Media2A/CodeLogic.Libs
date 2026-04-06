@@ -19,6 +19,14 @@ public sealed class ConnectionManager : IDisposable
     private int _activeCount;
     private bool _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="ConnectionManager"/> and ensures the database directory exists.
+    /// </summary>
+    /// <param name="config">SQLite configuration (database path, pool size, pragmas).</param>
+    /// <param name="logger">Optional logger for connection lifecycle events.</param>
+    /// <param name="dataDirectory">
+    /// Optional base directory prepended to a relative <see cref="SQLiteConfig.DatabasePath"/>.
+    /// </param>
     public ConnectionManager(
         SQLiteConfig config,
         ILogger? logger = null,
@@ -38,10 +46,22 @@ public sealed class ConnectionManager : IDisposable
             Directory.CreateDirectory(dir);
     }
 
+    /// <summary>Gets the resolved absolute path to the SQLite database file.</summary>
     public string DatabasePath => _databasePath;
+
+    /// <summary>Gets the number of connections currently checked out from the pool.</summary>
     public int ActiveConnectionCount => _activeCount;
+
+    /// <summary>Gets the number of idle connections currently held in the pool.</summary>
     public int PooledConnectionCount => _pool.Count;
 
+    /// <summary>
+    /// Obtains an open <see cref="SqliteConnection"/> from the pool, or creates a new one if the pool is empty.
+    /// The caller is responsible for returning the connection via <see cref="ReleaseConnectionAsync"/>.
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>An open <see cref="SqliteConnection"/> ready for use.</returns>
+    /// <exception cref="ObjectDisposedException">Thrown when the manager has been disposed.</exception>
     public async Task<SqliteConnection> GetConnectionAsync(CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -66,6 +86,11 @@ public sealed class ConnectionManager : IDisposable
         return conn;
     }
 
+    /// <summary>
+    /// Returns a connection to the pool. If the pool is at capacity the connection is disposed instead.
+    /// </summary>
+    /// <param name="connection">The connection to release. Disposed immediately if the pool is full or the manager is disposed.</param>
+    /// <returns>A completed task.</returns>
     public Task ReleaseConnectionAsync(SqliteConnection connection)
     {
         if (connection is null || _disposed)
@@ -91,6 +116,13 @@ public sealed class ConnectionManager : IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Borrows a connection, executes the given asynchronous function, then returns the connection to the pool.
+    /// </summary>
+    /// <typeparam name="T">The type of value produced by <paramref name="action"/>.</typeparam>
+    /// <param name="action">The asynchronous function to execute with the borrowed connection.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The value returned by <paramref name="action"/>.</returns>
     public async Task<T> ExecuteAsync<T>(Func<SqliteConnection, Task<T>> action, CancellationToken ct = default)
     {
         var conn = await GetConnectionAsync(ct).ConfigureAwait(false);
@@ -104,6 +136,11 @@ public sealed class ConnectionManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Borrows a connection, executes the given asynchronous action, then returns the connection to the pool.
+    /// </summary>
+    /// <param name="action">The asynchronous action to execute with the borrowed connection.</param>
+    /// <param name="ct">Cancellation token.</param>
     public async Task ExecuteAsync(Func<SqliteConnection, Task> action, CancellationToken ct = default)
     {
         var conn = await GetConnectionAsync(ct).ConfigureAwait(false);
@@ -117,6 +154,9 @@ public sealed class ConnectionManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// Disposes all pooled connections and marks the manager as disposed.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed) return;

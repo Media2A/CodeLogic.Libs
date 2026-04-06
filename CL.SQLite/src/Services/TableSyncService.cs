@@ -20,6 +20,13 @@ public sealed class TableSyncService
     private readonly SchemaAnalyzer _analyzer;
     private readonly MigrationTracker _migrationTracker;
 
+    /// <summary>
+    /// Initializes a new instance of <see cref="TableSyncService"/>.
+    /// </summary>
+    /// <param name="connectionManager">The connection manager providing database access.</param>
+    /// <param name="dataDirectory">Optional base directory used to resolve relative migration tracking paths.</param>
+    /// <param name="logger">Optional logger for sync progress and errors.</param>
+    /// <param name="events">Optional event bus for publishing <see cref="TableSyncedEvent"/>.</param>
     public TableSyncService(
         ConnectionManager connectionManager,
         string? dataDirectory = null,
@@ -33,8 +40,17 @@ public sealed class TableSyncService
         _migrationTracker = new MigrationTracker(dataDirectory, logger);
     }
 
+    /// <summary>Gets the migration tracker used to record schema changes.</summary>
     public MigrationTracker MigrationTracker => _migrationTracker;
 
+    /// <summary>
+    /// Synchronizes the database table for entity type <typeparamref name="T"/>.
+    /// Creates the table if it does not exist, or adds any missing columns if it does.
+    /// Indexes declared via attributes are also created.
+    /// </summary>
+    /// <typeparam name="T">The entity type whose table should be synchronized.</typeparam>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="Result{T}"/> containing a <see cref="TableSyncResult"/> describing what was done.</returns>
     public async Task<Result<TableSyncResult>> SyncTableAsync<T>(CancellationToken ct = default) where T : class
     {
         var entityType = typeof(T);
@@ -132,6 +148,14 @@ public sealed class TableSyncService
         }
     }
 
+    /// <summary>
+    /// Synchronizes the database tables for a collection of entity types.
+    /// </summary>
+    /// <param name="modelTypes">The entity types whose tables should be synchronized.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// A dictionary keyed by table name, where each value is the <see cref="Result{T}"/> of that table's sync.
+    /// </returns>
     public async Task<Dictionary<string, Result<TableSyncResult>>> SyncTablesAsync(
         Type[] modelTypes,
         CancellationToken ct = default)
@@ -161,6 +185,18 @@ public sealed class TableSyncService
         return results;
     }
 
+    /// <summary>
+    /// Synchronizes all entity types in the specified namespace within the calling assembly.
+    /// Only types decorated with <see cref="SQLiteTableAttribute"/> are processed.
+    /// </summary>
+    /// <param name="namespaceName">The namespace to scan for entity types.</param>
+    /// <param name="includeDerived">
+    /// When <c>true</c>, also includes types in sub-namespaces that start with <paramref name="namespaceName"/>.
+    /// </param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// A dictionary keyed by table name, where each value is the <see cref="Result{T}"/> of that table's sync.
+    /// </returns>
     public async Task<Dictionary<string, Result<TableSyncResult>>> SyncNamespaceAsync(
         string namespaceName,
         bool includeDerived = false,

@@ -56,6 +56,7 @@ public sealed class SteamProfileService
     /// Results are cached according to <c>config.CacheTtlSeconds</c>.
     /// </summary>
     /// <param name="steamId">The 64-bit Steam ID string.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the <see cref="SteamPlayer"/> profile on success.</returns>
     public async Task<Result<SteamPlayer>> GetPlayerAsync(string steamId)
     {
         if (string.IsNullOrWhiteSpace(steamId))
@@ -126,6 +127,7 @@ public sealed class SteamProfileService
     /// Results are cached according to <c>config.CacheTtlSeconds</c>.
     /// </summary>
     /// <param name="steamId">The 64-bit Steam ID string.</param>
+    /// <returns>A <see cref="Result{T}"/> containing the <see cref="SteamPlayerBans"/> record on success.</returns>
     public async Task<Result<SteamPlayerBans>> GetPlayerBansAsync(string steamId)
     {
         if (string.IsNullOrWhiteSpace(steamId))
@@ -191,6 +193,7 @@ public sealed class SteamProfileService
     /// </summary>
     /// <param name="steamId">The 64-bit Steam ID string.</param>
     /// <param name="includeAppInfo">When <c>true</c>, include game name and image data (more data transferred).</param>
+    /// <returns>A <see cref="Result{T}"/> containing the list of <see cref="SteamGame"/> objects on success.</returns>
     public async Task<Result<List<SteamGame>>> GetOwnedGamesAsync(string steamId, bool includeAppInfo = true)
     {
         if (string.IsNullOrWhiteSpace(steamId))

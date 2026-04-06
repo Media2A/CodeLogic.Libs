@@ -8,6 +8,17 @@ namespace CL.SQLite.Services;
 /// </summary>
 internal static class WhereClauseBuilder
 {
+    /// <summary>
+    /// Builds a SQL WHERE clause string and its associated parameter dictionary from a list of conditions.
+    /// Conditions are joined with their respective <see cref="WhereCondition.LogicalOperator"/> values.
+    /// <c>NULL</c> values are converted to <c>IS NULL</c> / <c>IS NOT NULL</c> fragments automatically.
+    /// </summary>
+    /// <param name="conditions">The list of <see cref="WhereCondition"/> objects to combine.</param>
+    /// <returns>
+    /// A tuple containing the SQL WHERE clause (e.g. <c>" WHERE "col" = @p0"</c>) and
+    /// a dictionary of named parameter bindings. Returns an empty clause and empty dictionary when
+    /// <paramref name="conditions"/> is empty.
+    /// </returns>
     public static (string Clause, Dictionary<string, object?> Parameters) Build(
         List<WhereCondition> conditions)
     {
