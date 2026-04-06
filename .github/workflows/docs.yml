@@ -33,8 +33,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout CodeLogic.Libs
         uses: actions/checkout@v4
+
+      - name: Checkout CodeLogic (dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: Media2A/CodeLogic
+          path: ../CodeLogic
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
