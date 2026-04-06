@@ -1,0 +1,124 @@
+name: Build And Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'CL.Common/**'
+      - 'CL.GitHelper/**'
+      - 'CL.Mail/**'
+      - 'CL.MySQL2/**'
+      - 'CL.NetUtils/**'
+      - 'CL.PostgreSQL/**'
+      - 'CL.SQLite/**'
+      - 'CL.SocialConnect/**'
+      - 'CL.StorageS3/**'
+      - 'CL.SystemStats/**'
+      - 'CL.TwoFactorAuth/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codelogic-libs-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout CodeLogic.Libs
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Clone CodeLogic framework dependency
+        shell: bash
+        env:
+          CODELOGIC_REPO_TOKEN: ${{ secrets.CODELOGIC_REPO_TOKEN }}
+          GITHUB_TOKEN_FALLBACK: ${{ github.token }}
+        run: |
+          TOKEN="${CODELOGIC_REPO_TOKEN:-$GITHUB_TOKEN_FALLBACK}"
+          TARGET="$(dirname "$GITHUB_WORKSPACE")/CodeLogic"
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${{ github.repository_owner }}/CodeLogic.git" "$TARGET"
+          echo "Cloned CodeLogic to $TARGET"
+
+      - name: Compute version metadata
+        id: version
+        shell: pwsh
+        run: |
+          $timestamp = Get-Date -Format 'yyyyMMdd.HHmmss'
+          $buildStamp = "$timestamp.${env:GITHUB_RUN_NUMBER}"
+          $tag = "libs-build.$buildStamp"
+
+          "timestamp=$timestamp" >> $env:GITHUB_OUTPUT
+          "build_stamp=$buildStamp" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Restore and pack libraries
+        shell: pwsh
+        run: |
+          $projects = @(
+            'CL.Common',
+            'CL.GitHelper',
+            'CL.Mail',
+            'CL.MySQL2',
+            'CL.NetUtils',
+            'CL.PostgreSQL',
+            'CL.SQLite',
+            'CL.SocialConnect',
+            'CL.StorageS3',
+            'CL.SystemStats',
+            'CL.TwoFactorAuth'
+          )
+
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $versionLines = New-Object System.Collections.Generic.List[string]
+
+          foreach ($project in $projects) {
+            $csproj = Join-Path $project "$project.csproj"
+            [xml]$proj = Get-Content $csproj
+            $baseVersion = ($proj.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1).Version
+            if ([string]::IsNullOrWhiteSpace($baseVersion)) {
+              throw "Could not read <Version> from $csproj"
+            }
+
+            $packageVersion = "$baseVersion-build.${{ steps.version.outputs.build_stamp }}"
+            $versionLines.Add("$project=$packageVersion")
+
+            dotnet restore $csproj
+            dotnet pack $csproj --configuration Release --no-restore --output artifacts /p:PackageVersion=$packageVersion /p:Version=$packageVersion /p:InformationalVersion=$packageVersion
+          }
+
+          $versionLines | Set-Content 'artifacts/package-versions.txt'
+
+          @"
+          CodeLogic.Libs release
+
+          Build stamp: ${{ steps.version.outputs.build_stamp }}
+          Commit: ${{ github.sha }}
+
+          Package versions:
+          $($versionLines -join "`n")
+          "@ | Set-Content 'artifacts/release-notes.md'
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: CodeLogic.Libs ${{ steps.version.outputs.build_stamp }}
+          body_path: artifacts/release-notes.md
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            artifacts/*.nupkg
+            artifacts/package-versions.txt
