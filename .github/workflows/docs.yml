@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout CodeLogic.Libs
         uses: actions/checkout@v4
@@ -42,11 +42,12 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Clone CodeLogic framework (dependency)
+        shell: bash
         run: |
           # CL.* projects reference ../../CodeLogic/src/CodeLogic.csproj
-          # Working dir is /home/runner/work/<repo>/<repo>/
-          # So target is /home/runner/work/<repo>/CodeLogic/
-          TARGET="$(dirname $(pwd))/CodeLogic"
+          # Working dir is D:\a\<repo>\<repo>\ on Windows runners
+          # So we need to clone to D:\a\<repo>\CodeLogic\
+          TARGET="$(dirname "$(pwd)")/CodeLogic"
           git clone --depth 1 https://github.com/Media2A/CodeLogic.git "$TARGET"
           echo "Cloned to: $TARGET"
           ls "$TARGET/src/"
@@ -55,6 +56,7 @@ jobs:
         run: dotnet tool install -g docfx
 
       - name: Build all projects (generates XML docs)
+        shell: bash
         run: |
           for proj in CL.Common CL.GitHelper CL.Mail CL.MySQL2 CL.NetUtils CL.PostgreSQL CL.SQLite CL.SocialConnect CL.StorageS3 CL.SystemStats CL.TwoFactorAuth; do
             dotnet build $proj/$proj.csproj --configuration Release
