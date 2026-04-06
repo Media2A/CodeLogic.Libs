@@ -106,9 +106,10 @@ public sealed class ConnectionManager : IDisposable
         string connectionId = "Default",
         CancellationToken ct = default)
     {
+        NpgsqlConnection? conn = null;
         try
         {
-            await using var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
+            conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT 1";
             await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
@@ -130,6 +131,13 @@ public sealed class ConnectionManager : IDisposable
         {
             _logger?.Warning($"[PostgreSQL] Connection test failed for '{connectionId}': {ex.Message}");
             return false;
+        }
+        finally
+        {
+            if (conn is not null)
+            {
+                await CloseAndDisposeConnectionAsync(conn).ConfigureAwait(false);
+            }
         }
     }
 
@@ -174,8 +182,7 @@ public sealed class ConnectionManager : IDisposable
         }
         finally
         {
-            await conn.CloseAsync().ConfigureAwait(false);
-            _openCounts.AddOrUpdate(connectionId, 0, (_, v) => Math.Max(0, v - 1));
+            await CloseAndDisposeConnectionAsync(conn).ConfigureAwait(false);
         }
     }
 
@@ -200,8 +207,7 @@ public sealed class ConnectionManager : IDisposable
         }
         finally
         {
-            await conn.CloseAsync().ConfigureAwait(false);
-            _openCounts.AddOrUpdate(connectionId, 0, (_, v) => Math.Max(0, v - 1));
+            await CloseAndDisposeConnectionAsync(conn).ConfigureAwait(false);
         }
     }
 
@@ -236,5 +242,11 @@ public sealed class ConnectionManager : IDisposable
                 return kv.Key;
         }
         return null;
+    }
+
+    private async Task CloseAndDisposeConnectionAsync(NpgsqlConnection connection)
+    {
+        await CloseConnectionAsync(connection).ConfigureAwait(false);
+        await connection.DisposeAsync().ConfigureAwait(false);
     }
 }

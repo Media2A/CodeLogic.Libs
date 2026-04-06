@@ -98,10 +98,6 @@ public sealed class MySQL2Library : ILibrary
         if (connected)
         {
             context.Logger.Info(_strings?.ConnectionTestSuccess ?? "Connection test successful");
-
-            await context.Events.PublishAsync(new DatabaseConnectedEvent(
-                "Default", config.Host, config.Port, config.Database, DateTime.UtcNow))
-                .ConfigureAwait(false);
         }
         else
         {

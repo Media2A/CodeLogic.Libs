@@ -13,7 +13,7 @@ namespace CL.SocialConnect.Services.Discord;
 /// <summary>
 /// Sends messages and embeds to Discord channels via the Webhook API.
 /// </summary>
-public sealed class DiscordWebhookService
+public sealed class DiscordWebhookService : IDisposable
 {
     private readonly Models.DiscordConfig _config;
     private readonly ILogger? _logger;
@@ -173,4 +173,6 @@ public sealed class DiscordWebhookService
     {
         _events?.Publish(new WebhookSentEvent(url, success, sentAt, statusCode, errorMessage));
     }
+
+    public void Dispose() => _http.Dispose();
 }

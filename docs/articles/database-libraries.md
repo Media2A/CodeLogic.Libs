@@ -1,18 +1,18 @@
 # Database Libraries
 
-CodeLogic Libraries provides three database libraries sharing a consistent `Repository<T>` and `QueryBuilder<T>` API. Use the one that matches your infrastructure — or mix them in the same application.
+CodeLogic Libraries includes three database libraries with a similar repository and query-builder workflow. Use the backend that fits your infrastructure, or mix them in the same application.
 
 | Library | Database | Driver |
 |---------|----------|--------|
-| CL.MySQL2 | MySQL 5.7+ / MariaDB 10.5+ | MySqlConnector |
-| CL.PostgreSQL | PostgreSQL 13+ | Npgsql |
-| CL.SQLite | SQLite 3 | Microsoft.Data.Sqlite |
+| CL.MySQL2 | MySQL / MariaDB | MySqlConnector |
+| CL.PostgreSQL | PostgreSQL | Npgsql |
+| CL.SQLite | SQLite | Microsoft.Data.Sqlite |
 
 ---
 
 ## CL.SQLite
 
-SQLite is ideal for embedded storage, local caches, and development environments.
+SQLite is a good fit for embedded storage, local tools, and lightweight deployments.
 
 ### Registration
 
@@ -24,164 +24,101 @@ await Libraries.LoadAsync<CL.SQLite.SQLiteLibrary>();
 
 ```json
 {
-  "DatabasePath": "data/myapp.db",
-  "MaxConnections": 10,
-  "TimeoutSeconds": 30,
-  "EnableWAL": true,
-  "MigrationsPath": "migrations/"
+  "Enabled": true,
+  "DatabasePath": "database.db",
+  "ConnectionTimeoutSeconds": 30,
+  "CommandTimeoutSeconds": 120,
+  "UseWAL": true,
+  "EnableForeignKeys": true,
+  "MaxPoolSize": 10
 }
 ```
 
-### Entity Definition
+### Repository Usage
 
 ```csharp
-[Table("users")]
-public class User
-{
-    [PrimaryKey, AutoIncrement]
-    public int Id { get; set; }
-
-    [Column("email"), Unique]
-    public string Email { get; set; } = "";
-
-    [Column("name")]
-    public string Name { get; set; } = "";
-
-    [Column("created_at")]
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-
-    [Column("is_active")]
-    public bool IsActive { get; set; } = true;
-}
-```
-
-### Repository Pattern
-
-```csharp
-// In OnInitializeAsync:
 var sqlite = context.GetLibrary<CL.SQLite.SQLiteLibrary>();
 var userRepo = sqlite.GetRepository<User>();
 
-// Create
-var user = await userRepo.InsertAsync(new User
-{
-    Email = "alice@example.com",
-    Name  = "Alice"
-});
-
-// Read
-var alice = await userRepo.FindAsync(u => u.Email == "alice@example.com");
-
-// Query
-var activeUsers = await userRepo.QueryAsync(u => u.IsActive);
-
-// Update
-alice!.Name = "Alice Smith";
-await userRepo.UpdateAsync(alice);
-
-// Delete
-await userRepo.DeleteAsync(u => u.Email == "old@example.com");
-
-// Count
-var total = await userRepo.CountAsync();
-var active = await userRepo.CountAsync(u => u.IsActive);
+var inserted = await userRepo.InsertAsync(new User { Email = "alice@example.com", Name = "Alice" });
+var users = await userRepo.FindAsync(u => u.Email == "alice@example.com");
 ```
 
-### QueryBuilder
+### Query Builder
 
 ```csharp
-var results = await sqlite.Query<User>()
+var results = await sqlite.GetQueryBuilder<User>()
     .Where(u => u.IsActive)
-    .Where(u => u.CreatedAt > DateTime.UtcNow.AddDays(-30))
     .OrderBy(u => u.Name)
     .Limit(20)
-    .Offset(0)
     .ToListAsync();
 ```
-
-### Migrations
-
-Place SQL files in the `migrations/` directory within the library's data directory:
-
-```
-CodeLogic/Libraries/CL.SQLite/data/migrations/
-  001_create_users.sql
-  002_add_roles.sql
-  003_add_user_index.sql
-```
-
-Migrations run in numeric order on startup, tracking applied migrations in a `_migrations` table.
 
 ---
 
 ## CL.MySQL2
 
-MySQL library with connection pooling, repository pattern, and table sync.
+MySQL library with repository access, query building, schema sync, and health checks.
 
 ### Registration
 
 ```csharp
-await Libraries.LoadAsync<CL.MySQL2.MySqlLibrary>();
+await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
 ```
 
 ### Configuration (`config.mysql.json`)
 
 ```json
 {
-  "ConnectionString": "Server=localhost;Port=3306;Database=myapp;Uid=app;Pwd=secret;",
+  "Enabled": true,
+  "Host": "localhost",
+  "Port": 3306,
+  "Database": "myapp",
+  "Username": "app",
+  "Password": "secret",
+  "EnablePooling": true,
+  "MinPoolSize": 1,
   "MaxPoolSize": 20,
-  "MinPoolSize": 2,
-  "ConnectionTimeoutSeconds": 30,
-  "CommandTimeoutSeconds": 60
+  "ConnectionTimeout": 30,
+  "CommandTimeout": 30
 }
 ```
 
 ### Repository Usage
 
-Same `IRepository<T>` interface as CL.SQLite:
-
 ```csharp
-var mysql = context.GetLibrary<CL.MySQL2.MySqlLibrary>();
+var mysql = context.GetLibrary<CL.MySQL2.MySQL2Library>();
 var orderRepo = mysql.GetRepository<Order>();
 
-var pendingOrders = await orderRepo.QueryAsync(o => o.Status == "Pending");
-
-foreach (var order in pendingOrders)
-{
-    order.Status = "Processing";
-    await orderRepo.UpdateAsync(order);
-}
+var pendingOrders = await orderRepo.FindAsync(o => o.Status == "Pending");
 ```
 
-### Raw Queries
-
-For complex SQL not covered by the query builder:
+### Query Builder
 
 ```csharp
-var results = await mysql.QueryRawAsync<OrderSummary>(
-    "SELECT customer_id, COUNT(*) as count, SUM(total) as total FROM orders WHERE status = @status GROUP BY customer_id",
-    new { status = "Completed" }
-);
+var results = await mysql.Query<Order>()
+    .Where(o => o.Status == "Completed")
+    .OrderByDescending(o => o.Id)
+    .Limit(50)
+    .ToListAsync();
 ```
 
 ### Table Sync
 
-CL.MySQL2 can synchronize table schemas to match your entity definitions:
-
 ```csharp
-await mysql.SyncTableAsync<User>();   // CREATE TABLE IF NOT EXISTS + ALTER TABLE for new columns
+await mysql.SyncTableAsync<User>();
 ```
 
 ---
 
 ## CL.PostgreSQL
 
-PostgreSQL library with multi-database support.
+PostgreSQL library with support for multiple named database connections.
 
 ### Registration
 
 ```csharp
-await Libraries.LoadAsync<CL.PostgreSQL.PostgreSqlLibrary>();
+await Libraries.LoadAsync<CL.PostgreSQL.PostgreSQLLibrary>();
 ```
 
 ### Configuration (`config.postgresql.json`)
@@ -189,47 +126,64 @@ await Libraries.LoadAsync<CL.PostgreSQL.PostgreSqlLibrary>();
 ```json
 {
   "Databases": {
-    "main": "Host=localhost;Database=myapp;Username=app;Password=secret;",
-    "reporting": "Host=replica.internal;Database=myapp_ro;Username=ro_app;Password=secret;"
-  },
-  "DefaultDatabase": "main",
-  "MaxPoolSize": 20,
-  "CommandTimeoutSeconds": 30
+    "Default": {
+      "Enabled": true,
+      "Host": "localhost",
+      "Port": 5432,
+      "Database": "myapp",
+      "Username": "app",
+      "Password": "secret"
+    },
+    "reporting": {
+      "Enabled": true,
+      "Host": "replica.internal",
+      "Port": 5432,
+      "Database": "myapp_ro",
+      "Username": "ro_app",
+      "Password": "secret"
+    }
+  }
 }
 ```
 
 ### Multi-Database Usage
 
 ```csharp
-var pg = context.GetLibrary<CL.PostgreSQL.PostgreSqlLibrary>();
+var pg = context.GetLibrary<CL.PostgreSQL.PostgreSQLLibrary>();
 
-// Default database
 var userRepo = pg.GetRepository<User>();
-
-// Specific database
 var reportRepo = pg.GetRepository<ReportRow>("reporting");
 
-// Query from reporting replica
-var monthlyStats = await reportRepo.QueryAsync(r => r.Month == DateTime.UtcNow.Month);
+var monthlyStats = await pg.Query<ReportRow>("reporting")
+    .Where(r => r.Month == DateTime.UtcNow.Month)
+    .ToListAsync();
 ```
 
-### Migrations
+### Table Sync
 
-PostgreSQL migrations work identically to SQLite migrations — numbered SQL files in the library's `migrations/` folder, applied in order.
+```csharp
+await pg.SyncTableAsync<User>(connectionId: "Default");
+```
 
 ---
 
-## Shared Interface Summary
+## Shared Patterns
 
-All three database libraries implement the same interfaces:
+The three libraries share the same broad approach:
 
 ```csharp
-// Available on all three:
-IRepository<T> GetRepository<T>() where T : class, new();
-IQueryBuilder<T> Query<T>() where T : class, new();
-Task<IEnumerable<T>> QueryRawAsync<T>(string sql, object? parameters = null);
-Task ExecuteAsync(string sql, object? parameters = null);
+Repository<T> GetRepository<T>() where T : class, new();
 Task<HealthStatus> HealthCheckAsync();
 ```
 
-This means you can swap database backends by changing the registered library type and updating config — your application code stays the same.
+Query-builder entry points differ slightly:
+
+```csharp
+// SQLite
+QueryBuilder<T> GetQueryBuilder<T>() where T : class, new();
+
+// MySQL2 / PostgreSQL
+QueryBuilder<T> Query<T>(string connectionId = "Default") where T : class, new();
+```
+
+That keeps most application code familiar across backends, while still allowing each library to expose backend-specific behavior where needed.

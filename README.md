@@ -1,28 +1,27 @@
 # CodeLogic.Libs
 
-Official CL.* library integrations for the CodeLogic 3 framework.
-Each library implements `ILibrary` and plugs into the CodeLogic lifecycle.
+Official `CL.*` library integrations for CodeLogic 3.
 
 ## Libraries
 
 | Library | Description |
 |---------|-------------|
-| CL.Core | Shared utilities — hashing, caching, imaging, networking, generators |
+| CL.Common | Shared utilities - hashing, caching, imaging, networking, generators |
 | CL.SQLite | SQLite with LINQ query builder, table sync, migrations |
-| CL.MySQL2 | MySQL with full ORM-like features, connection pooling, health checks |
+| CL.MySQL2 | MySQL with ORM-style features, connection pooling, health checks |
 | CL.PostgreSQL | PostgreSQL integration |
 | CL.Mail | SMTP/IMAP email with template engine |
-| CL.SystemStats | Cross-platform CPU, memory, process statistics |
+| CL.SystemStats | Cross-platform CPU, memory, and process statistics |
 | CL.GitHelper | Git repository management |
 | CL.NetUtils | DNS, IP geolocation, DNSBL checking |
-| CL.SocialConnect | Discord webhooks, Steam API |
+| CL.SocialConnect | Discord webhooks and Steam API integration |
 | CL.StorageS3 | Amazon S3 storage |
-| CL.TwoFactorAuth | TOTP 2FA + QR code generation |
+| CL.TwoFactorAuth | TOTP 2FA and QR code generation |
 
 ## Dependency
 
-All libs reference `CodeLogic` (the framework). No other shared dependency.
+All libs reference `CodeLogic`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT - see [LICENSE](LICENSE)

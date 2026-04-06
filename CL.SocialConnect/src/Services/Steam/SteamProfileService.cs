@@ -14,7 +14,7 @@ namespace CL.SocialConnect.Services.Steam;
 /// Retrieves Steam player profiles, ban records, and game libraries via the Steam Web API.
 /// Results are cached for a configurable TTL to reduce API call volume.
 /// </summary>
-public sealed class SteamProfileService
+public sealed class SteamProfileService : IDisposable
 {
     private readonly Models.SteamConfig _config;
     private readonly ILogger? _logger;
@@ -260,6 +260,8 @@ public sealed class SteamProfileService
 
     private bool IsCacheExpired(DateTime cachedAt) =>
         (DateTime.UtcNow - cachedAt).TotalSeconds > _config.CacheTtlSeconds;
+
+    public void Dispose() => _http.Dispose();
 
     // ── Internal response models ──────────────────────────────────────────────
 

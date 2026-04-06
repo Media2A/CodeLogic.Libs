@@ -228,13 +228,10 @@ public sealed class ImapService : IDisposable
             var startIdx = Math.Max(0, total - offset - count);
             var endIdx   = Math.Max(0, total - offset - 1);
 
-            var uids = Enumerable.Range(startIdx, endIdx - startIdx + 1)
-                .Select(i => new UniqueId((uint)(i + 1))).ToList();
-
             var items = MessageSummaryItems.UniqueId | MessageSummaryItems.Envelope | MessageSummaryItems.Flags;
             if (includeBody) items |= MessageSummaryItems.BodyStructure;
 
-            var summaries = await imapFolder.FetchAsync(uids, items, cancellationToken).ConfigureAwait(false);
+            var summaries = await imapFolder.FetchAsync(startIdx, endIdx, items, cancellationToken).ConfigureAwait(false);
             var messages = new List<ReceivedMessage>();
 
             foreach (var summary in summaries.Reverse())

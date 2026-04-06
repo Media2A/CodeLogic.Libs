@@ -14,7 +14,7 @@ Each `CL.*` package is a `ILibrary` implementation that plugs directly into the 
 
 ```csharp
 // Program.cs
-await Libraries.LoadAsync<CL.MySQL2.MySqlLibrary>();
+await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
 await Libraries.LoadAsync<CL.Mail.MailLibrary>();
 await Libraries.LoadAsync<CL.TwoFactorAuth.TwoFactorAuthLibrary>();
 
@@ -36,7 +36,7 @@ await CodeLogic.StartAsync();
 | [CL.NetUtils](articles/getting-started.md) | DNSBL spam checking and MaxMind GeoIP2 database lookup for IP intelligence |
 | [CL.PostgreSQL](articles/database-libraries.md) | PostgreSQL with multi-database support, `Repository<T>`, `QueryBuilder<T>`, schema migrations |
 | [CL.SQLite](articles/database-libraries.md) | SQLite with custom connection pool, `Repository<T>`, `QueryBuilder<T>`, migration runner |
-| [CL.SocialConnect](articles/social.md) | Discord webhooks (rich embeds) and Steam OpenID 2.0 authentication |
+| [CL.SocialConnect](articles/social.md) | Discord webhooks plus Steam Web API profile lookups and ticket-based authentication |
 | [CL.StorageS3](articles/storage.md) | Amazon S3 and MinIO object storage: upload, download, delete, presigned URLs, bucket management |
 | [CL.SystemStats](articles/system-monitoring.md) | Cross-platform CPU usage, memory (total/available/used), and per-process statistics |
 | [CL.TwoFactorAuth](articles/security.md) | TOTP-based 2FA with QR code generation (compatible with Google Authenticator, Authy) |
@@ -60,7 +60,7 @@ await CodeLogic.StartAsync();
 // <ProjectReference Include="path/to/CodeLogic.Libs/CL.MySQL2/CL.MySQL2.csproj" />
 
 // 2. Load it
-await Libraries.LoadAsync<CL.MySQL2.MySqlLibrary>();
+await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
 
 // 3. After StartAsync(), use it from your application or other libraries
 public class MyApp : IApplication
@@ -69,7 +69,7 @@ public class MyApp : IApplication
 
     public async Task RunAsync(ApplicationContext context)
     {
-        var mysql = context.GetLibrary<CL.MySQL2.MySqlLibrary>();
+        var mysql = context.GetLibrary<CL.MySQL2.MySQL2Library>();
         _users = mysql.GetRepository<User>();
 
         var user = await _users.FindAsync(u => u.Email == "alice@example.com");

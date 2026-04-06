@@ -40,7 +40,15 @@ Task<int> CountAsync(Expression<Func<T, bool>>? predicate = null);
 ### QueryBuilder Pattern
 
 ```csharp
+// MySQL2 / PostgreSQL
 var results = await library.Query<User>()
+    .Where(u => u.IsActive)
+    .OrderBy(u => u.CreatedAt)
+    .Limit(20)
+    .ToListAsync();
+
+// SQLite
+var sqliteResults = await sqlite.GetQueryBuilder<User>()
     .Where(u => u.IsActive)
     .OrderBy(u => u.CreatedAt)
     .Limit(20)

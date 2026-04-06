@@ -133,9 +133,7 @@ public sealed class SocialConnectLibrary : ILibrary
     {
         _context?.Logger.Info($"Stopping {Manifest.Name}");
 
-        _discord = null;
-        _steam = null;
-        _auth = null;
+        DisposeServices();
 
         _context?.Logger.Info($"{Manifest.Name} stopped");
         return Task.CompletedTask;
@@ -207,6 +205,15 @@ public sealed class SocialConnectLibrary : ILibrary
     /// <inheritdoc/>
     public void Dispose()
     {
+        DisposeServices();
+    }
+
+    private void DisposeServices()
+    {
+        _discord?.Dispose();
+        _steam?.Dispose();
+        _auth?.Dispose();
+
         _discord = null;
         _steam = null;
         _auth = null;

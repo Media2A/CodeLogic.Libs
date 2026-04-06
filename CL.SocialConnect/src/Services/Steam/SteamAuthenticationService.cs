@@ -13,7 +13,7 @@ namespace CL.SocialConnect.Services.Steam;
 /// (<c>ISteamUserAuth/AuthenticateUserTicket</c>).
 /// Use this to verify that a client's Steam session is genuine before granting access.
 /// </summary>
-public sealed class SteamAuthenticationService
+public sealed class SteamAuthenticationService : IDisposable
 {
     private readonly Models.SteamConfig _config;
     private readonly ILogger? _logger;
@@ -178,4 +178,5 @@ public sealed class SteamAuthenticationService
             return Result<SteamAuthResult>.Failure(Error.Internal("social.steam.error", errMsg, ex.GetType().Name));
         }
     }
+    public void Dispose() => _http.Dispose();
 }
