@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>CL.SQLite</RootNamespace>
+    <AssemblyName>CL.SQLite</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>13</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Version>2.0.0</Version>
+    <Authors>Media2A</Authors>
+    <Description>SQLite database library with connection pooling, LINQ queries, and table sync for CodeLogic 3</Description>
+    <NoWarn>CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
+  </ItemGroup>
+</Project>
