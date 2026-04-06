@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>CL.SystemStats</RootNamespace>
+    <AssemblyName>CL.SystemStats</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>13</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>CS1591</NoWarn>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Authors>Media2A</Authors>
+    <Company>Media2A</Company>
+    <Product>CL.SystemStats</Product>
+    <Description>Cross-platform system statistics for CodeLogic3 (Windows and Linux)</Description>
+    <Version>3.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.*" />
+    <PackageReference Include="System.Management" Version="9.*" />
+  </ItemGroup>
+</Project>
