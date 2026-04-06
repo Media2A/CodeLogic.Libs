@@ -1,0 +1,14 @@
+- name: Getting Started
+  href: getting-started.md
+- name: Database Libraries
+  href: database-libraries.md
+- name: Mail
+  href: mail.md
+- name: Storage
+  href: storage.md
+- name: Security & 2FA
+  href: security.md
+- name: System Monitoring
+  href: system-monitoring.md
+- name: Social & Webhooks
+  href: social.md

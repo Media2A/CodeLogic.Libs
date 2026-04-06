@@ -9,3 +9,7 @@ obj/
 *.snupkg
 .DS_Store
 Thumbs.db
+docs-output/
+# DocFX generated API yml files (regenerated in CI)
+docs/api/*.yml
+docs/api/.manifest
