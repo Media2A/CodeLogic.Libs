@@ -20,6 +20,11 @@ public sealed class QueryResult
     /// <summary>How long the query took in milliseconds.</summary>
     public long DurationMs { get; init; }
 
+    /// <summary>Creates a successful query result.</summary>
+    /// <param name="info">The server information retrieved.</param>
+    /// <param name="players">Optional list of players on the server.</param>
+    /// <param name="durationMs">Duration of the query in milliseconds.</param>
+    /// <returns>A successful <see cref="QueryResult"/>.</returns>
     public static QueryResult Ok(ServerInfo info, IReadOnlyList<PlayerInfo>? players = null, long durationMs = 0) => new()
     {
         Success = true,
@@ -28,6 +33,10 @@ public sealed class QueryResult
         DurationMs = durationMs
     };
 
+    /// <summary>Creates a failed query result.</summary>
+    /// <param name="error">The error message describing the failure.</param>
+    /// <param name="durationMs">Duration of the query in milliseconds.</param>
+    /// <returns>A failed <see cref="QueryResult"/>.</returns>
     public static QueryResult Fail(string error, long durationMs = 0) => new()
     {
         Success = false,

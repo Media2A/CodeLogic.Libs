@@ -14,7 +14,8 @@
             "CL.SocialConnect/CL.SocialConnect.csproj",
             "CL.StorageS3/CL.StorageS3.csproj",
             "CL.SystemStats/CL.SystemStats.csproj",
-            "CL.TwoFactorAuth/CL.TwoFactorAuth.csproj"
+            "CL.TwoFactorAuth/CL.TwoFactorAuth.csproj",
+            "CL.GameNetQuery/CL.GameNetQuery.csproj"
           ],
           "src": "../"
         }

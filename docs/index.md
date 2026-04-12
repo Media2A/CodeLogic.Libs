@@ -4,7 +4,7 @@ _layout: landing
 
 # CodeLogic Libraries
 
-**CodeLogic Libraries** (`CL.*`) is a suite of 11 production-ready .NET 10 libraries designed to integrate seamlessly with the [CodeLogic 3 framework](https://media2a.github.io/CodeLogic). Each library is a self-contained CodeLogic library that manages its own configuration, lifecycle, and health checks.
+**CodeLogic Libraries** (`CL.*`) is a suite of 12 production-ready .NET 10 libraries designed to integrate seamlessly with the [CodeLogic 3 framework](https://media2a.github.io/CodeLogic). Each library is a self-contained CodeLogic library that manages its own configuration, lifecycle, and health checks.
 
 ---
 
@@ -40,6 +40,7 @@ await CodeLogic.StartAsync();
 | [CL.StorageS3](articles/storage.md) | Amazon S3 and MinIO object storage: upload, download, delete, presigned URLs, bucket management |
 | [CL.SystemStats](articles/system-monitoring.md) | Cross-platform CPU usage, memory (total/available/used), and per-process statistics |
 | [CL.TwoFactorAuth](articles/security.md) | TOTP-based 2FA with QR code generation (compatible with Google Authenticator, Authy) |
+| [CL.GameNetQuery](articles/game-queries.md) | Game server queries: Valve RCON, Source UDP (A2S), Minecraft UDP/RCON |
 
 ---
 
@@ -88,4 +89,5 @@ public class MyApp : IApplication
 - [Security](articles/security.md) — TOTP two-factor authentication
 - [System Monitoring](articles/system-monitoring.md) — CPU and memory stats
 - [Social](articles/social.md) — Discord webhooks and Steam auth
+- [Game Server Queries](articles/game-queries.md) — Valve RCON, Source UDP, Minecraft
 - [API Reference](api/index.md) — full API documentation

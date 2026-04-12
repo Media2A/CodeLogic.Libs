@@ -9,18 +9,30 @@ namespace CL.GameNetQuery.Valve;
 /// </summary>
 public static class ValveStatusParserCS2
 {
+    /// <summary>Extracts the server hostname from the CS2 status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>The server hostname, or empty string if not found.</returns>
     public static string GetHostname(string status) =>
         ValveStatusParser.GetHostname(status);
 
+    /// <summary>Extracts the current map name from the CS2 status output, falling back to Source 1 format.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>The map name, or empty string if not found.</returns>
     public static string GetMapName(string status)
     {
         var match = Regex.Match(status, @"loaded spawngroup\(.+\):\s*SV:\s*\[\d+:\s*(\S+)\s*\|\s*main lump");
         return match.Success ? match.Groups[1].Value.Trim() : ValveStatusParser.GetMapName(status);
     }
 
+    /// <summary>Extracts the human and bot player counts from the CS2 status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A tuple containing the human player count and bot count.</returns>
     public static (int HumanCount, int BotCount) GetPlayerCount(string status) =>
         ValveStatusParser.GetPlayerCount(status);
 
+    /// <summary>Parses the CS2-format player list from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A list of player information entries.</returns>
     public static List<PlayerInfo> GetPlayerList(string status)
     {
         var players = new List<PlayerInfo>();
@@ -43,6 +55,9 @@ public static class ValveStatusParserCS2
         return players;
     }
 
+    /// <summary>Extracts loaded spawngroup names from the CS2 status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A list of spawngroup names.</returns>
     public static List<string> GetSpawngroups(string status)
     {
         var groups = new List<string>();

@@ -17,6 +17,10 @@ public sealed class ValveRconClient : IDisposable
     private TcpClient? _tcpClient;
     private NetworkStream? _networkStream;
 
+    /// <summary>Initializes a new RCON client using a string IP address.</summary>
+    /// <param name="ip">The server IP address as a string.</param>
+    /// <param name="port">The RCON port number.</param>
+    /// <param name="password">The RCON password.</param>
     public ValveRconClient(string ip, ushort port, string password)
     {
         _serverIp = IPAddress.Parse(ip);
@@ -24,6 +28,10 @@ public sealed class ValveRconClient : IDisposable
         _password = password;
     }
 
+    /// <summary>Initializes a new RCON client using an <see cref="IPAddress"/>.</summary>
+    /// <param name="ip">The server IP address.</param>
+    /// <param name="port">The RCON port number.</param>
+    /// <param name="password">The RCON password.</param>
     public ValveRconClient(IPAddress ip, ushort port, string password)
     {
         _serverIp = ip;
@@ -34,6 +42,8 @@ public sealed class ValveRconClient : IDisposable
     /// <summary>
     /// Connects to the RCON server and authenticates.
     /// </summary>
+    /// <param name="timeoutMs">Connection timeout in milliseconds.</param>
+    /// <returns><c>true</c> if connection and authentication succeeded.</returns>
     public async Task<bool> ConnectAsync(int timeoutMs = 5000)
     {
         try
@@ -53,6 +63,8 @@ public sealed class ValveRconClient : IDisposable
     /// <summary>
     /// Sends a command and returns the response.
     /// </summary>
+    /// <param name="command">The RCON command to execute.</param>
+    /// <returns>The server response string.</returns>
     public async Task<string> SendCommandAsync(string command)
     {
         if (_networkStream is null)
@@ -149,5 +161,6 @@ public sealed class ValveRconClient : IDisposable
         }
     }
 
+    /// <summary>Disposes the client by disconnecting from the server.</summary>
     public void Dispose() => Disconnect();
 }

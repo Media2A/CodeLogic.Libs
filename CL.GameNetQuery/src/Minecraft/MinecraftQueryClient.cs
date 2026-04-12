@@ -17,6 +17,9 @@ public static class MinecraftQueryClient
     /// <summary>
     /// Queries a Minecraft server and returns the parsed key-value response.
     /// </summary>
+    /// <param name="ip">The server IP address as a string.</param>
+    /// <param name="queryPort">The query port number.</param>
+    /// <returns>The parsed server response as key-value lines.</returns>
     public static string QueryServer(string ip, int queryPort)
     {
         return QueryServer(IPAddress.Parse(ip), queryPort);
@@ -25,6 +28,9 @@ public static class MinecraftQueryClient
     /// <summary>
     /// Queries a Minecraft server and returns the parsed key-value response.
     /// </summary>
+    /// <param name="serverIp">The server IP address.</param>
+    /// <param name="queryPort">The query port number.</param>
+    /// <returns>The parsed server response as key-value lines.</returns>
     public static string QueryServer(IPAddress serverIp, int queryPort)
     {
         using var udpClient = new UdpClient();
@@ -61,6 +67,9 @@ public static class MinecraftQueryClient
     /// <summary>
     /// Gets a specific value from a parsed query response.
     /// </summary>
+    /// <param name="response">The parsed query response string.</param>
+    /// <param name="key">The key to look up.</param>
+    /// <returns>The value associated with the key, or empty string if not found.</returns>
     public static string GetStatusValue(string response, string key)
     {
         var cleanResponse = RemoveMinecraftFormatting(response);

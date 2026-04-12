@@ -7,9 +7,13 @@ namespace CL.GameNetQuery.Valve;
 /// </summary>
 public enum RconPacketType
 {
+    /// <summary>A response packet from the server.</summary>
     Response = 0,
+    /// <summary>An authentication response packet.</summary>
     AuthResponse = 2,
+    /// <summary>A command execution request packet.</summary>
     ExecCommand = 2,
+    /// <summary>An authentication request packet.</summary>
     Auth = 3
 }
 
@@ -22,12 +26,22 @@ public sealed class RconPacket
 
     private RconPacket() { }
 
+    /// <summary>Gets the total packet size in bytes.</summary>
     public int Size => Math.Max(10, Body.Length + 9);
+    /// <summary>Gets the packet identifier.</summary>
     public int Id { get; private init; }
+    /// <summary>Gets the packet type.</summary>
     public RconPacketType Type { get; private init; }
+    /// <summary>Gets the packet body content.</summary>
     public string Body { get; private init; } = string.Empty;
+    /// <summary>Gets whether this is a dummy/sentinel packet.</summary>
     public bool IsDummy => Body.Equals("\u0001") && Id == 0;
 
+    /// <summary>Creates a new RCON packet with the specified id, type, and content.</summary>
+    /// <param name="id">The packet identifier.</param>
+    /// <param name="type">The packet type.</param>
+    /// <param name="content">The packet body content.</param>
+    /// <returns>A new <see cref="RconPacket"/> instance.</returns>
     public static RconPacket Create(int id, RconPacketType type, string content) => new()
     {
         Type = type,
@@ -35,6 +49,10 @@ public sealed class RconPacket
         Id = id
     };
 
+    /// <summary>Creates a new RCON packet with an auto-incremented id.</summary>
+    /// <param name="type">The packet type.</param>
+    /// <param name="content">The packet body content.</param>
+    /// <returns>A new <see cref="RconPacket"/> instance.</returns>
     public static RconPacket Create(RconPacketType type, string content) => new()
     {
         Type = type,
@@ -42,8 +60,12 @@ public sealed class RconPacket
         Id = Interlocked.Increment(ref _nextId)
     };
 
+    /// <summary>Lazy-initialized dummy packet used as a sentinel value.</summary>
     public static readonly Lazy<RconPacket> Dummy = new(() => new RconPacket { Id = 0, Type = RconPacketType.Response });
 
+    /// <summary>Serializes this packet to a byte array for transmission.</summary>
+    /// <param name="encoding">The text encoding to use; defaults to ASCII.</param>
+    /// <returns>The serialized packet bytes.</returns>
     public byte[] ToBytes(Encoding? encoding = null)
     {
         encoding ??= Encoding.ASCII;
@@ -57,6 +79,10 @@ public sealed class RconPacket
         return buffer;
     }
 
+    /// <summary>Deserializes an RCON packet from a byte array.</summary>
+    /// <param name="buffer">The raw packet bytes.</param>
+    /// <param name="encoding">The text encoding to use; defaults to system default.</param>
+    /// <returns>The deserialized <see cref="RconPacket"/>.</returns>
     public static RconPacket FromBytes(byte[] buffer, Encoding? encoding = null)
     {
         encoding ??= Encoding.Default;

@@ -17,6 +17,10 @@ public sealed class MinecraftRconClient : IDisposable
     private TcpClient? _tcpClient;
     private NetworkStream? _networkStream;
 
+    /// <summary>Initializes a new Minecraft RCON client with the specified connection details.</summary>
+    /// <param name="ip">The server IP address as a string.</param>
+    /// <param name="port">The RCON port number.</param>
+    /// <param name="password">The RCON password.</param>
     public MinecraftRconClient(string ip, ushort port, string password)
     {
         _serverIp = IPAddress.Parse(ip);
@@ -24,6 +28,9 @@ public sealed class MinecraftRconClient : IDisposable
         _password = password;
     }
 
+    /// <summary>Connects to the Minecraft RCON server and authenticates.</summary>
+    /// <param name="timeoutMs">Connection timeout in milliseconds.</param>
+    /// <returns><c>true</c> if connection and authentication succeeded.</returns>
     public async Task<bool> ConnectAsync(int timeoutMs = 5000)
     {
         try
@@ -40,6 +47,9 @@ public sealed class MinecraftRconClient : IDisposable
         }
     }
 
+    /// <summary>Sends a command to the Minecraft server and returns the response.</summary>
+    /// <param name="command">The command to execute.</param>
+    /// <returns>The server response string.</returns>
     public async Task<string> SendCommandAsync(string command)
     {
         if (_networkStream is null)
@@ -63,6 +73,7 @@ public sealed class MinecraftRconClient : IDisposable
         }
     }
 
+    /// <summary>Disconnects from the Minecraft RCON server.</summary>
     public void Disconnect()
     {
         _networkStream?.Close();
@@ -130,25 +141,44 @@ public sealed class MinecraftRconClient : IDisposable
         }
     }
 
+    /// <summary>Disposes the client by disconnecting from the server.</summary>
     public void Dispose() => Disconnect();
 }
 
+/// <summary>
+/// Packet types used in Minecraft RCON communication.
+/// </summary>
 public enum MinecraftPacketType
 {
+    /// <summary>A response packet from the server.</summary>
     Response = 0,
+    /// <summary>An authentication response packet.</summary>
     AuthResponse = 2,
+    /// <summary>A command execution request packet.</summary>
     ExecCommand = 2,
+    /// <summary>An authentication request packet.</summary>
     Auth = 3
 }
 
+/// <summary>
+/// Represents a packet in the Minecraft RCON protocol.
+/// </summary>
 public sealed class MinecraftRconPacket
 {
     private MinecraftRconPacket() { }
 
+    /// <summary>Gets the packet identifier.</summary>
     public int Id { get; private init; }
+    /// <summary>Gets the packet type.</summary>
     public MinecraftPacketType Type { get; private init; }
+    /// <summary>Gets the packet body content.</summary>
     public string Body { get; private init; } = string.Empty;
 
+    /// <summary>Creates a new Minecraft RCON packet with the specified id, type, and content.</summary>
+    /// <param name="id">The packet identifier.</param>
+    /// <param name="type">The packet type.</param>
+    /// <param name="content">The packet body content.</param>
+    /// <returns>A new <see cref="MinecraftRconPacket"/> instance.</returns>
     public static MinecraftRconPacket Create(int id, MinecraftPacketType type, string content) => new()
     {
         Type = type,
@@ -156,6 +186,8 @@ public sealed class MinecraftRconPacket
         Id = id
     };
 
+    /// <summary>Serializes this packet to a byte array for transmission.</summary>
+    /// <returns>The serialized packet bytes.</returns>
     public byte[] ToBytes()
     {
         var body = Encoding.ASCII.GetBytes(Body + "\0");
@@ -168,6 +200,9 @@ public sealed class MinecraftRconPacket
         return buffer;
     }
 
+    /// <summary>Deserializes a Minecraft RCON packet from a byte array.</summary>
+    /// <param name="buffer">The raw packet bytes.</param>
+    /// <returns>The deserialized <see cref="MinecraftRconPacket"/>.</returns>
     public static MinecraftRconPacket FromBytes(byte[] buffer) => new()
     {
         Type = (MinecraftPacketType)BitConverter.ToInt32(buffer[8..12]),

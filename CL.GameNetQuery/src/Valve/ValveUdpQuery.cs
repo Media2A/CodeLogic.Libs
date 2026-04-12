@@ -16,6 +16,10 @@ public static class ValveUdpQuery
     /// <summary>
     /// Sends an A2S_INFO query to get basic server info.
     /// </summary>
+    /// <param name="ip">The server IP address.</param>
+    /// <param name="port">The server port number.</param>
+    /// <param name="timeoutMs">Query timeout in milliseconds.</param>
+    /// <returns>The server info, or <c>null</c> if the query failed.</returns>
     public static async Task<ServerInfo?> GetServerInfoAsync(string ip, ushort port, int timeoutMs = DefaultTimeout)
     {
         try
@@ -39,6 +43,10 @@ public static class ValveUdpQuery
     /// <summary>
     /// Sends an A2S_PLAYER query to get the player list with scores and durations.
     /// </summary>
+    /// <param name="ip">The server IP address.</param>
+    /// <param name="port">The server port number.</param>
+    /// <param name="timeoutMs">Query timeout in milliseconds.</param>
+    /// <returns>A list of player information entries.</returns>
     public static async Task<List<PlayerInfo>> GetPlayerListAsync(string ip, ushort port, int timeoutMs = DefaultTimeout)
     {
         try

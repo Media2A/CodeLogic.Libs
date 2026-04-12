@@ -9,18 +9,27 @@ namespace CL.GameNetQuery.Valve;
 /// </summary>
 public static class ValveStatusParser
 {
+    /// <summary>Extracts the server hostname from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>The server hostname, or empty string if not found.</returns>
     public static string GetHostname(string status)
     {
         var match = Regex.Match(status, @"hostname:\s*(.+)");
         return match.Success ? match.Groups[1].Value.Trim() : string.Empty;
     }
 
+    /// <summary>Extracts the current map name from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>The map name, or empty string if not found.</returns>
     public static string GetMapName(string status)
     {
         var match = Regex.Match(status, @"map\s*:\s*(\S+)");
         return match.Success ? match.Groups[1].Value.Trim() : string.Empty;
     }
 
+    /// <summary>Extracts the human and bot player counts from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A tuple containing the human player count and bot count.</returns>
     public static (int HumanCount, int BotCount) GetPlayerCount(string status)
     {
         var match = Regex.Match(status, @"players\s*:\s*(\d+)\s*humans,\s*(\d+)\s*bots");
@@ -29,6 +38,9 @@ public static class ValveStatusParser
             : (0, 0);
     }
 
+    /// <summary>Extracts the server IP address and port from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A tuple containing the IP address and port number.</returns>
     public static (string Ip, int Port) GetServerAddress(string status)
     {
         var match = Regex.Match(status, @"udp/ip\s*:\s*(\S+):(\d+)");
@@ -37,12 +49,18 @@ public static class ValveStatusParser
             : (string.Empty, 0);
     }
 
+    /// <summary>Extracts the server version string from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>The version string, or empty string if not found.</returns>
     public static string GetVersion(string status)
     {
         var match = Regex.Match(status, @"version\s*:\s*(\S+)");
         return match.Success ? match.Groups[1].Value.Trim() : string.Empty;
     }
 
+    /// <summary>Extracts the server tags from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A list of server tags.</returns>
     public static List<string> GetTags(string status)
     {
         var match = Regex.Match(status, @"tags\s*:\s*(.+)");
@@ -51,6 +69,9 @@ public static class ValveStatusParser
             : [];
     }
 
+    /// <summary>Parses the player list from the status output.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A list of player information entries.</returns>
     public static List<PlayerInfo> GetPlayerList(string status)
     {
         var players = new List<PlayerInfo>();
@@ -80,9 +101,15 @@ public static class ValveStatusParser
         return players;
     }
 
+    /// <summary>Parses the full status output into a <see cref="ServerInfo"/> object.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>The parsed server information.</returns>
     public static ServerInfo ParseStatus(string status) =>
         ParseStatusWithPlayers(status).Info;
 
+    /// <summary>Parses the full status output into server info and a player list.</summary>
+    /// <param name="status">The raw status command output.</param>
+    /// <returns>A tuple containing the server information and player list.</returns>
     public static (ServerInfo Info, List<PlayerInfo> Players) ParseStatusWithPlayers(string status)
     {
         var (humanCount, botCount) = GetPlayerCount(status);

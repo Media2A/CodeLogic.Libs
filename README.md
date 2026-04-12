@@ -17,6 +17,7 @@ Official `CL.*` library integrations for CodeLogic 3.
 | CL.SocialConnect | Discord webhooks and Steam API integration |
 | CL.StorageS3 | Amazon S3 storage |
 | CL.TwoFactorAuth | TOTP 2FA and QR code generation |
+| CL.GameNetQuery | Game server queries — Valve RCON, Source UDP, Minecraft |
 
 ## Dependency
 
