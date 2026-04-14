@@ -163,6 +163,11 @@ public class S3StorageService
                 InputStream = data
             };
 
+            // Disable chunked payload signing for services that don't support it (e.g. Cloudflare R2)
+            var connCfg = _connectionManager.GetConfiguration(_connectionId);
+            if (connCfg?.DisablePayloadSigning == true)
+                request.DisablePayloadSigning = true;
+
             ApplyUploadOptions(request, opts);
             var response = await client.PutObjectAsync(request, ct);
 

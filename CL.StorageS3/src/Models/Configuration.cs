@@ -96,6 +96,13 @@ public class S3ConnectionConfig
     public int MaxRetries { get; set; } = 3;
 
     /// <summary>
+    /// Disables chunked payload signing (STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER).
+    /// Required for Cloudflare R2 and some other S3-compatible services that don't
+    /// support the streaming signature format. Default: false (AWS/MinIO compatible).
+    /// </summary>
+    public bool DisablePayloadSigning { get; set; }
+
+    /// <summary>
     /// Builds and returns a configured <see cref="AmazonS3Client"/> for this connection.
     /// </summary>
     public AmazonS3Client BuildClient()
