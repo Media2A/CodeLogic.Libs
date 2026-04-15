@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -33,6 +34,10 @@ public sealed class QueryBuilder<T> where T : class, new()
     private int? _offset;
     private string? _selectColumns;
     private int _paramCounter;
+
+    // Static column-name whitelist cache (case-insensitive) — defends against SQL injection
+    // when column names are passed as strings (e.g., UpdateAsync dictionary keys).
+    private static readonly ConcurrentDictionary<Type, HashSet<string>> _cachedColumnNames = new();
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
@@ -343,6 +348,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            foreach (var key in updates.Keys) EnsureValidColumn(key);
             var tableName = GetTableName();
             var (whereClause, whereParms) = BuildWhereSql();
             var setClauses = string.Join(", ", updates.Keys.Select(k => $"`{k}` = @upd_{k}"));
@@ -491,6 +497,27 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         var attr = member.GetCustomAttribute<ColumnAttribute>();
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : member.Name;
+    }
+
+    /// <summary>
+    /// Throws ArgumentException if <paramref name="column"/> is not a known column on <typeparamref name="T"/>.
+    /// </summary>
+    private static void EnsureValidColumn(string column)
+    {
+        if (string.IsNullOrEmpty(column))
+            throw new ArgumentException("Column name cannot be null or empty.", nameof(column));
+
+        var allowed = _cachedColumnNames.GetOrAdd(typeof(T), t =>
+        {
+            var names = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => p.CanRead && p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)
+                .Select(GetColumnName);
+            return new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
+        });
+
+        if (!allowed.Contains(column))
+            throw new ArgumentException(
+                $"Column '{column}' is not defined on entity '{typeof(T).Name}'.", nameof(column));
     }
 
     private void LogSlowQuery(string sql, long elapsedMs)

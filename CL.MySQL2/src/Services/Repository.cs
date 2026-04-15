@@ -27,6 +27,10 @@ public sealed class Repository<T> where T : class, new()
     // Static property cache — populated once per entity type
     private static readonly ConcurrentDictionary<Type, PropertyInfo[]> _cachedProperties = new();
 
+    // Static column-name whitelist cache (case-insensitive) — defends against SQL injection
+    // when a column name is passed as a string parameter (e.g., GetByColumnAsync, GetPagedAsync).
+    private static readonly ConcurrentDictionary<Type, HashSet<string>> _cachedColumnNames = new();
+
     // ── Constructors ──────────────────────────────────────────────────────────
 
     /// <summary>
@@ -176,6 +180,7 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
+            EnsureValidColumn(column);
             var tableName = GetTableName();
             var sql = $"SELECT * FROM `{tableName}` WHERE `{column}` = @val";
 
@@ -250,6 +255,7 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
+            if (orderByColumn is not null) EnsureValidColumn(orderByColumn);
             var tableName = GetTableName();
             var offset = (page - 1) * pageSize;
             var orderClause = orderByColumn is not null
@@ -597,6 +603,24 @@ public sealed class Repository<T> where T : class, new()
             t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
              .Where(p => p.CanRead && p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)
              .ToArray());
+
+    /// <summary>
+    /// Throws ArgumentException if <paramref name="column"/> is not a known column on <typeparamref name="T"/>.
+    /// Used by APIs that accept a column name as a string (e.g., GetByColumnAsync, GetPagedAsync)
+    /// to prevent SQL injection via the column-name parameter.
+    /// </summary>
+    private static void EnsureValidColumn(string column)
+    {
+        if (string.IsNullOrEmpty(column))
+            throw new ArgumentException("Column name cannot be null or empty.", nameof(column));
+
+        var allowed = _cachedColumnNames.GetOrAdd(typeof(T), _ =>
+            new HashSet<string>(GetCachedProperties().Select(GetColumnName), StringComparer.OrdinalIgnoreCase));
+
+        if (!allowed.Contains(column))
+            throw new ArgumentException(
+                $"Column '{column}' is not defined on entity '{typeof(T).Name}'.", nameof(column));
+    }
 
     private void LogSlowQuery(string sql, long elapsedMs)
     {

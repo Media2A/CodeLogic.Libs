@@ -156,7 +156,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
                     _sql.Append($"`{col}`");
 
                 _sql.Append(" LIKE ");
-                var val = GetValue(node.Arguments[0]);
+                var val = EscapeLikeValue(GetValue(node.Arguments[0]));
                 AddParameter($"%{val}%");
                 break;
             }
@@ -170,7 +170,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
                     _sql.Append($"`{col}`");
 
                 _sql.Append(" LIKE ");
-                var val = GetValue(node.Arguments[0]);
+                var val = EscapeLikeValue(GetValue(node.Arguments[0]));
                 AddParameter($"{val}%");
                 break;
             }
@@ -184,7 +184,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
                     _sql.Append($"`{col}`");
 
                 _sql.Append(" LIKE ");
-                var val = GetValue(node.Arguments[0]);
+                var val = EscapeLikeValue(GetValue(node.Arguments[0]));
                 AddParameter($"%{val}");
                 break;
             }
@@ -245,5 +245,15 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     private static object? GetValue(Expression expression)
     {
         return Expression.Lambda(expression).Compile().DynamicInvoke();
+    }
+
+    /// <summary>
+    /// Escapes LIKE special characters (%, _, \) in a user-supplied value so it is treated
+    /// as a literal, not as a wildcard pattern. Non-string values pass through unchanged.
+    /// </summary>
+    private static object? EscapeLikeValue(object? value)
+    {
+        if (value is not string s) return value;
+        return s.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
     }
 }
