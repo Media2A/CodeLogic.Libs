@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>3.2.0</Version>
+    <Version>3.2.1</Version>
     <PackageId>CodeLogic.Mail</PackageId>
     <PackageTags>smtp;imap;email;template</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
