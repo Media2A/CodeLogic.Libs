@@ -25,9 +25,16 @@ public static class QueryCache
     /// <summary>Total number of cached entries.</summary>
     public static int Count => _cache.Count;
 
+    /// <summary>Number of tracked tables with at least one cached entry.</summary>
+    public static int TableCount => _tableIndex.Count;
+
     /// <summary>Number of cached entries associated with a specific table.</summary>
     public static int CountForTable(string tableName) =>
         _tableIndex.TryGetValue(tableName, out var keys) ? keys.Count : 0;
+
+    /// <summary>Returns the names of all tables that currently have cached entries.</summary>
+    public static IReadOnlyCollection<string> CachedTables =>
+        _tableIndex.Keys.ToArray();
 
     /// <summary>Set the maximum number of cache entries (default 1000). Soft cap — enforced lazily on add.</summary>
     public static void Configure(int maxEntries) => _maxEntries = Math.Max(1, maxEntries);
