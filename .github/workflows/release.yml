@@ -77,26 +77,28 @@ jobs:
 
           Write-Host "Changed projects: $($changedProjects -join ', ')"
 
-          # Determine bump from commit log since last tag
-          if ($lastTag) {
-            $log = git log "$lastTag..HEAD" --format=%s
-          } else {
-            $log = git log -10 --format=%s
-          }
-
-          $logStr = $log -join "`n"
-          if ($logStr -match '(?i)breaking[:\s]|BREAKING CHANGE') {
-            $bump = 'major'
-          } elseif ($logStr -match '(?i)feat[:\s]') {
-            $bump = 'minor'
-          } else {
-            $bump = 'patch'
-          }
-          Write-Host "Bump level: $bump"
-
-          # Bump versions in changed csprojs
+          # Per-library bump: scan only the commits that touched each lib's folder
           $versionMap = @{}
+          $bumpSummary = @()
           foreach ($project in $changedProjects) {
+            # Get commit messages that touched THIS project's folder
+            if ($lastTag) {
+              $projectLog = git log "$lastTag..HEAD" --format=%s -- "$project/" 2>$null
+            } else {
+              $projectLog = git log -10 --format=%s -- "$project/" 2>$null
+            }
+            $projectLogStr = ($projectLog ?? @()) -join "`n"
+
+            # Determine bump level for THIS project
+            if ($projectLogStr -match '(?i)breaking[:\s]|BREAKING CHANGE') {
+              $bump = 'major'
+            } elseif ($projectLogStr -match '(?i)feat[:\s]') {
+              $bump = 'minor'
+            } else {
+              $bump = 'patch'
+            }
+
+            # Read and bump version
             $csproj = Join-Path $project "$project.csproj"
             [xml]$proj = Get-Content $csproj
             $versionNode = $proj.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
@@ -119,12 +121,12 @@ jobs:
             $proj.Save((Resolve-Path $csproj).Path)
 
             $versionMap[$project] = $newVersion
+            $bumpSummary += "$project : $currentVersion -> $newVersion ($bump)"
             Write-Host "$project : $currentVersion -> $newVersion ($bump)"
           }
 
           $projectList = $changedProjects -join ','
           "projects=$projectList" >> $env:GITHUB_OUTPUT
-          "bump=$bump" >> $env:GITHUB_OUTPUT
           "has_changes=$($changedProjects.Count -gt 0)" >> $env:GITHUB_OUTPUT
 
           $versionLines = $versionMap.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }
@@ -172,7 +174,6 @@ jobs:
           @"
           ## CodeLogic.Libs release
 
-          **Bump**: ${{ steps.changes.outputs.bump }}
           **Commit**: ${{ github.sha }}
           **Time**: $timestamp
 
@@ -189,7 +190,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: libs-v${{ github.run_number }}
-          name: CodeLogic.Libs (${{ steps.changes.outputs.bump }} bump)
+          name: CodeLogic.Libs release ${{ github.run_number }}
           body_path: artifacts/release-notes.md
           prerelease: false
           generate_release_notes: true
