@@ -185,6 +185,20 @@ jobs:
           $($versionLines | ForEach-Object { "- $_" } | Out-String)
           "@ | Set-Content 'artifacts/release-notes.md'
 
+      - name: Sign NuGet packages
+        if: steps.changes.outputs.has_changes == 'True'
+        shell: bash
+        run: |
+          echo "${{ secrets.NUGET_SIGNING_CERT }}" | base64 -d > /tmp/nuget-sign.pfx
+          for pkg in artifacts/*.nupkg; do
+            dotnet nuget sign "$pkg" \
+              --certificate-path /tmp/nuget-sign.pfx \
+              --certificate-password "${{ secrets.NUGET_SIGNING_CERT_PASSWORD }}" \
+              --timestamper http://timestamp.digicert.com \
+              --overwrite
+          done
+          rm -f /tmp/nuget-sign.pfx
+
       - name: Push to NuGet.org
         if: steps.changes.outputs.has_changes == 'True'
         run: dotnet nuget push 'artifacts/*.nupkg' --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
