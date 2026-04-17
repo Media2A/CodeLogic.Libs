@@ -102,6 +102,7 @@ public sealed class Repository<T> where T : class, new()
             }
 
             _logger?.Debug($"[MySQL2] Inserted into `{tableName}`");
+            QueryCache.Invalidate(tableName);
             return Result<T>.Success(entity);
         }
         catch (Exception ex)
@@ -129,6 +130,7 @@ public sealed class Repository<T> where T : class, new()
 
             var tableName = GetTableName();
             _logger?.Debug($"[MySQL2] Bulk-inserted {count} records into `{tableName}`");
+            QueryCache.Invalidate(tableName);
             return Result<int>.Success(count);
         }
         catch (Exception ex)
@@ -360,6 +362,7 @@ public sealed class Repository<T> where T : class, new()
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
             _logger?.Debug($"[MySQL2] Updated record in `{tableName}`");
+            QueryCache.Invalidate(tableName);
             return Result<T>.Success(entity);
         }
         catch (Exception ex)
@@ -394,6 +397,7 @@ public sealed class Repository<T> where T : class, new()
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
             _logger?.Debug($"[MySQL2] Deleted record from `{tableName}`");
+            QueryCache.Invalidate(tableName);
             return Result<bool>.Success(affected > 0);
         }
         catch (Exception ex)
@@ -429,6 +433,7 @@ public sealed class Repository<T> where T : class, new()
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
+            QueryCache.Invalidate(tableName);
             return Result<int>.Success(affected);
         }
         catch (Exception ex)
@@ -464,6 +469,7 @@ public sealed class Repository<T> where T : class, new()
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
+            QueryCache.Invalidate(tableName);
             return Result<int>.Success(affected);
         }
         catch (Exception ex)

@@ -34,6 +34,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     private int? _offset;
     private string? _selectColumns;
     private int _paramCounter;
+    private TimeSpan? _cacheTtl;
 
     // Static column-name whitelist cache (case-insensitive) — defends against SQL injection
     // when column names are passed as strings (e.g., UpdateAsync dictionary keys).
@@ -144,6 +145,19 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
+    /// <summary>
+    /// Enable result caching for this query. Cached results are automatically invalidated
+    /// when any mutation (INSERT/UPDATE/DELETE) occurs on the same table.
+    /// Has no effect inside a transaction scope (reads in transactions see uncommitted writes).
+    /// </summary>
+    public QueryBuilder<T> WithCache(TimeSpan ttl)
+    {
+        _cacheTtl = ttl;
+        return this;
+    }
+
+    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null;
+
     // ── Terminal methods ──────────────────────────────────────────────────────
 
     public async Task<Result<List<T>>> ToListAsync(CancellationToken ct = default)
@@ -151,22 +165,14 @@ public sealed class QueryBuilder<T> where T : class, new()
         try
         {
             var (sql, parms) = BuildSelectSql();
-            LogQuery(sql);
-            var sw = Stopwatch.StartNew();
 
-            var list = await ExecuteAsync(async conn =>
+            if (ShouldCache)
             {
-                await using var cmd = BuildCommand(conn, sql, parms);
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                var items = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    items.Add(MapReader(reader));
-                return items;
-            }).ConfigureAwait(false);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, sql, parms);
+                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteToList(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+            }
 
-            sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
-            return Result<List<T>>.Success(list);
+            return await ExecuteToList(sql, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -175,31 +181,63 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    private async Task<Result<List<T>>> ExecuteToList(string sql, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        LogQuery(sql);
+        var sw = Stopwatch.StartNew();
+
+        var list = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var items = new List<T>();
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                items.Add(MapReader(reader));
+            return items;
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        return Result<List<T>>.Success(list);
+    }
+
     public async Task<Result<T?>> FirstOrDefaultAsync(CancellationToken ct = default)
     {
         try
         {
             Limit(1);
             var (sql, parms) = BuildSelectSql();
-            LogQuery(sql);
-            var sw = Stopwatch.StartNew();
 
-            var result = await ExecuteAsync(async conn =>
+            if (ShouldCache)
             {
-                await using var cmd = BuildCommand(conn, sql, parms);
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapReader(reader) : null;
-            }).ConfigureAwait(false);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, sql, parms);
+                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteFirstOrDefault(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+            }
 
-            sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
-            return Result<T?>.Success(result);
+            return await ExecuteFirstOrDefault(sql, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _logger?.Error($"[MySQL2] QueryBuilder.FirstOrDefaultAsync failed: {ex.Message}", ex);
             return Result<T?>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
+    }
+
+    private async Task<Result<T?>> ExecuteFirstOrDefault(string sql, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        LogQuery(sql);
+        var sw = Stopwatch.StartNew();
+
+        var result = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapReader(reader) : null;
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        return Result<T?>.Success(result);
     }
 
     public async Task<Result<PagedResult<T>>> ToPagedListAsync(
@@ -209,41 +247,22 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
-            var tableName = GetTableName();
+            var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
             var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM `{tableName}`{joinSql}{whereClause}{groupBySql}";
+            var countSql = $"SELECT COUNT(*) FROM `{tblName}`{joinSql}{whereClause}{groupBySql}";
             var dataSql = BuildSelectSql(page, pageSize).Sql;
-            LogQuery(dataSql);
 
-            var sw = Stopwatch.StartNew();
-            var (items, total) = await ExecuteAsync(async conn =>
+            if (ShouldCache)
             {
-                await using var countCmd = BuildCommand(conn, countSql, parms);
-                var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, dataSql, parms);
+                return await QueryCache.GetOrSetAsync(cacheKey, tblName,
+                    () => ExecutePagedList(countSql, page, pageSize, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+            }
 
-                var (dSql, dParms) = BuildSelectSql(page, pageSize);
-                await using var cmd = BuildCommand(conn, dSql, dParms);
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                var entities = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    entities.Add(MapReader(reader));
-
-                return (entities, totalCount);
-            }).ConfigureAwait(false);
-
-            sw.Stop();
-            LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
-
-            return Result<PagedResult<T>>.Success(new PagedResult<T>
-            {
-                Items = items,
-                PageNumber = page,
-                PageSize = pageSize,
-                TotalItems = total
-            });
+            return await ExecutePagedList(countSql, page, pageSize, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -252,29 +271,74 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    private async Task<Result<PagedResult<T>>> ExecutePagedList(
+        string countSql, int page, int pageSize, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        var dataSql = BuildSelectSql(page, pageSize).Sql;
+        LogQuery(dataSql);
+
+        var sw = Stopwatch.StartNew();
+        var (items, total) = await ExecuteAsync(async conn =>
+        {
+            await using var countCmd = BuildCommand(conn, countSql, parms);
+            var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+
+            var (dSql, dParms) = BuildSelectSql(page, pageSize);
+            await using var cmd = BuildCommand(conn, dSql, dParms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var entities = new List<T>();
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                entities.Add(MapReader(reader));
+
+            return (entities, totalCount);
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
+
+        return Result<PagedResult<T>>.Success(new PagedResult<T>
+        {
+            Items = items,
+            PageNumber = page,
+            PageSize = pageSize,
+            TotalItems = total
+        });
+    }
+
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
         {
-            var tableName = GetTableName();
+            var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
-            var sql = $"SELECT COUNT(*) FROM `{tableName}`{joinSql}{whereClause}";
+            var sql = $"SELECT COUNT(*) FROM `{tblName}`{joinSql}{whereClause}";
 
-            LogQuery(sql);
-            var count = await ExecuteAsync(async conn =>
+            if (ShouldCache)
             {
-                await using var cmd = BuildCommand(conn, sql, parms);
-                return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, sql, parms);
+                return await QueryCache.GetOrSetAsync(cacheKey, tblName, () => ExecuteCount(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+            }
 
-            return Result<long>.Success(count);
+            return await ExecuteCount(sql, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _logger?.Error($"[MySQL2] QueryBuilder.CountAsync failed: {ex.Message}", ex);
             return Result<long>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
+    }
+
+    private async Task<Result<long>> ExecuteCount(string sql, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        LogQuery(sql);
+        var count = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+        }).ConfigureAwait(false);
+
+        return Result<long>.Success(count);
     }
 
     public Task<Result<TResult>> MaxAsync<TResult>(
@@ -335,6 +399,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
+            QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
         }
         catch (Exception ex)
@@ -365,6 +430,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
+            QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
         }
         catch (Exception ex)
