@@ -1,8 +1,14 @@
-# CodeLogic Libraries
+<p align="center">
+  <img src="logo.svg" alt="CodeLogic Libraries" width="128" height="128">
+</p>
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+<h1 align="center">CodeLogic Libraries</h1>
 
-Production-ready .NET 10 library integrations for [CodeLogic 3](https://github.com/Media2A/CodeLogic). Each library is a self-contained `ILibrary` implementation with auto-generated configuration, health checks, and lifecycle management.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
+</p>
+
+<p align="center">Production-ready .NET 10 library integrations for <a href="https://github.com/Media2A/CodeLogic">CodeLogic 3</a>. Each library is a self-contained <code>ILibrary</code> implementation with auto-generated configuration, health checks, and lifecycle management.</p>
 
 ## Libraries
 
