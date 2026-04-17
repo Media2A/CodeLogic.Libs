@@ -13,15 +13,13 @@
     <Company>Media2A</Company>
     <Product>CL.SystemStats</Product>
     <Description>Cross-platform system statistics for CodeLogic3 (Windows and Linux)</Description>
-    <Version>3.0.0</Version>
+    <Version>3.1.0</Version>
     <PackageId>CodeLogic.SystemStats</PackageId>
     <PackageTags>cpu;memory;process;monitoring;cross-platform</PackageTags>
   </PropertyGroup>
-
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
   </ItemGroup>
-
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.*" />
     <PackageReference Include="System.Management" Version="9.*" />

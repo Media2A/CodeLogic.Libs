@@ -8,17 +8,15 @@
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>CS1591</NoWarn>
-    <Version>3.0.0</Version>
+    <Version>3.1.0</Version>
     <PackageId>CodeLogic.MySQL2</PackageId>
     <PackageTags>mysql;database;orm;linq;query-builder</PackageTags>
     <Authors>Media2A</Authors>
     <Description>MySQL database access with LINQ query builder, table sync, migrations, and backups for CodeLogic 3 applications</Description>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageReference Include="MySqlConnector" Version="2.*" />
   </ItemGroup>
-
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
   </ItemGroup>
