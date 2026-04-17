@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>2.0.0</Version>
+    <Version>3.0.0</Version>
     <Authors>Media2A</Authors>
     <Description>SQLite database library with connection pooling, LINQ queries, and table sync for CodeLogic 3</Description>
     <NoWarn>CS1591</NoWarn>

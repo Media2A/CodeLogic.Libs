@@ -24,7 +24,7 @@ public sealed class GitHelperLibrary : ILibrary
     {
         Id = "CL.GitHelper",
         Name = "Git Helper Library",
-        Version = "1.0.0",
+        Version = "3.0.0",
         Description = "Git repository management with LibGit2Sharp integration",
         Author = "Media2A",
         Tags = ["git", "vcs", "source-control"]
