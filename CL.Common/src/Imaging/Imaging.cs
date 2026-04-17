@@ -136,7 +136,7 @@ public static class CLU_Imaging
                 int scaledW = (int)(sourceBitmap.Width  * scale);
                 int scaledH = (int)(sourceBitmap.Height * scale);
 
-                resized = sourceBitmap.Resize(new SKImageInfo(scaledW, scaledH), SKFilterQuality.High);
+                resized = sourceBitmap.Resize(new SKImageInfo(scaledW, scaledH), SKSamplingOptions.Default);
                 int cropX = (scaledW - targetWidth)  / 2;
                 int cropY = (scaledH - targetHeight) / 2;
 
@@ -148,7 +148,7 @@ public static class CLU_Imaging
             }
             else
             {
-                resized = sourceBitmap.Resize(new SKImageInfo(targetWidth, targetHeight), SKFilterQuality.High);
+                resized = sourceBitmap.Resize(new SKImageInfo(targetWidth, targetHeight), SKSamplingOptions.Default);
             }
 
             using (resized)

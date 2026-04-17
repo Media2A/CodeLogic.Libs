@@ -59,6 +59,8 @@ public static class FileSystem
     }
 
     /// <summary>Copies a file asynchronously.</summary>
+    /// <param name="source">The source file path.</param>
+    /// <param name="dest">The destination file path.</param>
     /// <param name="overwrite">When true, overwrites the destination if it exists.</param>
     public static async Task<Result> CopyAsync(string source, string dest, bool overwrite = false)
     {
