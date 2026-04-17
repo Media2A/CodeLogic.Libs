@@ -28,7 +28,6 @@ jobs:
         with:
           fetch-depth: 0
           ref: release
-          token: ${{ secrets.CODELOGIC_REPO_TOKEN || github.token }}
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
@@ -37,13 +36,9 @@ jobs:
 
       - name: Clone CodeLogic framework dependency
         shell: bash
-        env:
-          CODELOGIC_REPO_TOKEN: ${{ secrets.CODELOGIC_REPO_TOKEN }}
-          GITHUB_TOKEN_FALLBACK: ${{ github.token }}
         run: |
-          TOKEN="${CODELOGIC_REPO_TOKEN:-$GITHUB_TOKEN_FALLBACK}"
           TARGET="$(dirname "$GITHUB_WORKSPACE")/CodeLogic"
-          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${{ github.repository_owner }}/CodeLogic.git" "$TARGET"
+          git clone --depth 1 "https://github.com/${{ github.repository_owner }}/CodeLogic.git" "$TARGET"
           echo "Cloned CodeLogic to $TARGET"
 
       - name: Detect changes and bump versions
