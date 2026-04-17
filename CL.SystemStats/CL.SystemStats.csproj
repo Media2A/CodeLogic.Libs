@@ -12,7 +12,7 @@
     <Authors>Media2A</Authors>
     <Company>Media2A</Company>
     <Product>CL.SystemStats</Product>
-    <Description>Cross-platform system statistics for CodeLogic3 (Windows and Linux)</Description>
+    <Description>Cross-platform system statistics (CPU, memory, processes, uptime) for CodeLogic 3 — Windows and Linux via /proc</Description>
     <Version>3.2.2</Version>
     <PackageId>CodeLogic.SystemStats</PackageId>
     <PackageTags>cpu;memory;process;monitoring;cross-platform</PackageTags>
