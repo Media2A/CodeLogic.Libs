@@ -13,7 +13,7 @@
     <Company>Media2A</Company>
     <Product>CL.SystemStats</Product>
     <Description>Cross-platform system statistics for CodeLogic3 (Windows and Linux)</Description>
-    <Version>3.1.1</Version>
+    <Version>3.1.2</Version>
     <PackageId>CodeLogic.SystemStats</PackageId>
     <PackageTags>cpu;memory;process;monitoring;cross-platform</PackageTags>
   </PropertyGroup>
