@@ -21,7 +21,9 @@
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
   </ItemGroup>
-  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+  <!-- Always restore these so the project compiles on all platforms.
+       The Windows provider uses them at runtime; the Linux provider doesn't. -->
+  <ItemGroup>
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.*" />
     <PackageReference Include="System.Management" Version="9.*" />
   </ItemGroup>
