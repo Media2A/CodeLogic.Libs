@@ -10,6 +10,7 @@
     <Version>3.1.2</Version>
     <PackageId>CodeLogic.Common</PackageId>
     <PackageTags>utilities;imaging;caching;hashing;compression</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
     <Description>General-purpose utility toolkit for CodeLogic 3 applications</Description>
   </PropertyGroup>
@@ -20,5 +21,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

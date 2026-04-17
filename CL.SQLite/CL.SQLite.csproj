@@ -10,6 +10,7 @@
     <Version>3.1.2</Version>
     <PackageId>CodeLogic.SQLite</PackageId>
     <PackageTags>sqlite;database;orm;linq</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
     <Description>SQLite database library with connection pooling, LINQ queries, and table sync for CodeLogic 3</Description>
     <NoWarn>CS1591</NoWarn>
@@ -19,5 +20,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

@@ -10,6 +10,7 @@
     <Version>3.1.2</Version>
     <PackageId>CodeLogic.Mail</PackageId>
     <PackageTags>smtp;imap;email;template</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
     <Description>SMTP/IMAP email library with template engine for CodeLogic 3 applications</Description>
   </PropertyGroup>
@@ -19,5 +20,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

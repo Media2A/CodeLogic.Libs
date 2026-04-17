@@ -10,6 +10,7 @@
     <Version>3.1.2</Version>
     <PackageId>CodeLogic.NetUtils</PackageId>
     <PackageTags>dns;dnsbl;geoip;geolocation</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
     <Description>DNSBL blacklist checking and IP geolocation services for CodeLogic 3 applications</Description>
     <NoWarn>CS1591</NoWarn>
@@ -20,5 +21,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

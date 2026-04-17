@@ -13,6 +13,7 @@
     <Version>3.1.2</Version>
     <PackageId>CodeLogic.TwoFactorAuth</PackageId>
     <PackageTags>2fa;totp;qrcode;authentication</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
@@ -20,5 +21,8 @@
   <ItemGroup>
     <PackageReference Include="Otp.NET" Version="1.*" />
     <PackageReference Include="QRCoder" Version="1.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>
