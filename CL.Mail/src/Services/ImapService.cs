@@ -116,6 +116,7 @@ public sealed class ImapService : IDisposable
 
             // INBOX
             var inbox = _client.Inbox;
+            if (inbox is null) throw new InvalidOperationException("IMAP client Inbox is null");
             await inbox.StatusAsync(StatusItems.Count | StatusItems.Unread, cancellationToken).ConfigureAwait(false);
             folders.Add(new ModelMailFolder { Name = inbox.Name, FullName = inbox.FullName, MessageCount = inbox.Count, UnreadCount = inbox.Unread, CanSelect = true });
 
@@ -189,6 +190,7 @@ public sealed class ImapService : IDisposable
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var folder = await GetImapFolderAsync(oldName, FolderAccess.None, cancellationToken).ConfigureAwait(false);
             if (folder is null) return MailResult.Failure(MailError.FolderNotFound, $"Folder '{oldName}' not found");
+            if (folder.ParentFolder is null) return MailResult.Failure(MailError.ImapError, $"Folder '{oldName}' has no parent folder");
             await folder.RenameAsync(folder.ParentFolder, newName, cancellationToken).ConfigureAwait(false);
             _logger?.Info($"Renamed folder: {oldName} → {newName}");
             return MailResult.Success();
@@ -553,9 +555,11 @@ public sealed class ImapService : IDisposable
     {
         try
         {
-            IMailFolder folder = string.Equals(name, "INBOX", StringComparison.OrdinalIgnoreCase)
+            IMailFolder? folder = string.Equals(name, "INBOX", StringComparison.OrdinalIgnoreCase)
                 ? _client!.Inbox
                 : await _client!.GetFolderAsync(name, ct).ConfigureAwait(false);
+
+            if (folder is null) return null;
 
             if (access != FolderAccess.None)
             {
@@ -599,6 +603,7 @@ public sealed class ImapService : IDisposable
         }
 
         var env = summary.Envelope;
+        if (env is null) throw new InvalidOperationException($"Message summary for UID {summary.UniqueId} has no envelope");
         return new ReceivedMessage
         {
             MessageId = env.MessageId,
