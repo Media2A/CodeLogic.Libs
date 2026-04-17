@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>3.2.2</Version>
+    <Version>3.2.3</Version>
     <PackageId>CodeLogic.SQLite</PackageId>
     <PackageTags>sqlite;database;orm;linq</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
