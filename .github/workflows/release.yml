@@ -184,6 +184,10 @@ jobs:
           $($versionLines | ForEach-Object { "- $_" } | Out-String)
           "@ | Set-Content 'artifacts/release-notes.md'
 
+      - name: Push to NuGet.org
+        if: steps.changes.outputs.has_changes == 'True'
+        run: dotnet nuget push 'artifacts/*.nupkg' --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
       - name: Create GitHub release
         if: steps.changes.outputs.has_changes == 'True'
         uses: softprops/action-gh-release@v2
