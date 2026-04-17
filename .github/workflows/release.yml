@@ -56,8 +56,8 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $timestamp = Get-Date -Format 'yyyyMMdd.HHmmss'
-          $buildStamp = "$timestamp.${env:GITHUB_RUN_NUMBER}"
+          $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+          $buildStamp = "$timestamp-${env:GITHUB_RUN_NUMBER}"
           $tag = "libs-build.$buildStamp"
 
           "timestamp=$timestamp" >> $env:GITHUB_OUTPUT
