@@ -8,6 +8,8 @@
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Version>3.0.0</Version>
+    <PackageId>CodeLogic.NetUtils</PackageId>
+    <PackageTags>dns;dnsbl;geoip;geolocation</PackageTags>
     <Authors>Media2A</Authors>
     <Description>DNSBL blacklist checking and IP geolocation services for CodeLogic 3 applications</Description>
     <NoWarn>CS1591</NoWarn>

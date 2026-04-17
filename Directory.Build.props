@@ -1,0 +1,35 @@
+<Project>
+  <!-- Shared NuGet metadata for all CL.* libraries -->
+  <PropertyGroup>
+    <Authors>Media2A</Authors>
+    <Copyright>Copyright © 2026 Media2A</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Media2A/CodeLogic.Libs</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Media2A/CodeLogic.Libs</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <!-- Include the repo-level LICENSE in every package -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!--
+    ProjectReference → PackageReference swap for NuGet packing.
+    When 'dotnet pack' runs, we need the .nupkg to declare a dependency on
+    the CodeLogic NuGet package, not embed the DLL from the local clone.
+    The CI clones CodeLogic locally so 'dotnet build' works, but 'dotnet pack'
+    must produce a correct package dependency.
+
+    How it works: when IsPackable and the pack target runs, MSBuild sees
+    SuppressDependenciesWhenPacking=false (default) and converts
+    ProjectReferences into package dependencies using the referenced
+    project's PackageId + Version. CodeLogic.csproj declares
+    <PackageId>CodeLogic</PackageId> and <Version>3.0.0</Version>,
+    so the generated .nuspec will contain:
+      <dependency id="CodeLogic" version="3.0.0" />
+
+    This works out of the box as long as the referenced project has a
+    PackageId set — which we just added to CodeLogic.csproj.
+  -->
+</Project>

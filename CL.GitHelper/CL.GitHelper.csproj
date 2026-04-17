@@ -8,6 +8,8 @@
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Version>3.0.0</Version>
+    <PackageId>CodeLogic.GitHelper</PackageId>
+    <PackageTags>git;repository;libgit2</PackageTags>
     <Authors>Media2A</Authors>
     <Description>Git repository management library for CodeLogic 3 applications</Description>
   </PropertyGroup>

@@ -8,6 +8,8 @@
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Version>3.0.0</Version>
+    <PackageId>CodeLogic.GameNetQuery</PackageId>
+    <PackageTags>gameserver;valve;source;minecraft;rcon;query</PackageTags>
     <Authors>Media2A</Authors>
     <Description>Game server query library — Valve Source Engine (CSS/CS2), Minecraft UDP/RCON queries</Description>
   </PropertyGroup>

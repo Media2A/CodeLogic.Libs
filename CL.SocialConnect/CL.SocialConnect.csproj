@@ -11,6 +11,8 @@
     <Product>CL.SocialConnect</Product>
     <Description>Social platform integrations (Discord, Steam) for the CodeLogic3 framework</Description>
     <Version>3.0.0</Version>
+    <PackageId>CodeLogic.SocialConnect</PackageId>
+    <PackageTags>discord;steam;webhook;social</PackageTags>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />

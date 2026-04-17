@@ -14,6 +14,8 @@
     <Product>CL.SystemStats</Product>
     <Description>Cross-platform system statistics for CodeLogic3 (Windows and Linux)</Description>
     <Version>3.0.0</Version>
+    <PackageId>CodeLogic.SystemStats</PackageId>
+    <PackageTags>cpu;memory;process;monitoring;cross-platform</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
