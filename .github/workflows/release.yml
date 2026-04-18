@@ -179,6 +179,31 @@ jobs:
 
           $versionLines | Set-Content 'artifacts/package-versions.txt'
 
+          # NuGet normalizes PackageReference ranges to use the restored version as
+          # the lower bound. For libs to keep accepting older CodeLogic versions,
+          # rewrite each nupkg's .nuspec to use the literal range "[3.2.0, 3.3.0)".
+          $targetRange = '[3.2.0, 3.3.0)'
+          foreach ($nupkg in Get-ChildItem artifacts -Filter '*.nupkg') {
+            $tmp = "$env:RUNNER_TEMP/nupkg-$([Guid]::NewGuid())"
+            New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+            Expand-Archive $nupkg.FullName -DestinationPath $tmp -Force
+            $nuspec = Get-ChildItem $tmp -Filter '*.nuspec' | Select-Object -First 1
+            if (-not $nuspec) { Remove-Item $tmp -Recurse -Force; continue }
+            [xml]$doc = Get-Content $nuspec.FullName
+            $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+            $ns.AddNamespace('n', $doc.DocumentElement.NamespaceURI)
+            $deps = $doc.SelectNodes('//n:dependency[@id="CodeLogic"]', $ns)
+            if ($deps.Count -gt 0) {
+              foreach ($d in $deps) { $d.version = $targetRange }
+              $doc.Save($nuspec.FullName)
+              # Repack — zip contents (nuspec must be at root)
+              Remove-Item $nupkg.FullName
+              Compress-Archive -Path "$tmp/*" -DestinationPath $nupkg.FullName
+              Write-Host "Rewrote CodeLogic dependency → $targetRange in $($nupkg.Name)"
+            }
+            Remove-Item $tmp -Recurse -Force
+          }
+
           $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm UTC'
           @"
           ## CodeLogic.Libs release

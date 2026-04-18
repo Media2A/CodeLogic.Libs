@@ -1,13 +1,17 @@
 <Project>
   <!--
-    Swap ProjectReference → PackageReference for CodeLogic so packed libraries
-    declare a floating "3.2.*" dependency instead of an exact pin. If the local
-    CodeLogic source clone is present (CI + monorepo dev), uses ProjectReference
-    for live builds. Otherwise uses PackageReference so consumers can restore
-    from NuGet without a local clone.
+    Swap ProjectReference → PackageReference for CodeLogic. When
+    CodeLogicFromNuGet=true (set in CI or auto-detected when the sibling
+    clone is missing), CL.* libraries reference CodeLogic as a NuGet
+    package instead of a local project. Consumers can then restore from
+    NuGet without needing the CodeLogic source tree.
 
-    CI sets CodeLogicFromNuGet=true at pack time to force PackageReference mode
-    regardless of local files, so the nuspec always gets the floating range.
+    NOTE: NuGet's `dotnet pack` normalizes the PackageReference version
+    range by collapsing the lower bound to whatever version was resolved
+    during restore. That means `Version="[3.2.0, 3.3.0)"` can come out as
+    `[3.2.8, 3.3.0)` in the nuspec if the latest published CodeLogic was
+    3.2.8 at restore time. We rewrite the nuspec after pack (in
+    release.yml) to force the literal CodeLogicPackageVersion range.
   -->
 
   <PropertyGroup>
@@ -16,7 +20,6 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(CodeLogicFromNuGet)' == 'true'">
-    <!-- Remove any local ProjectReference to CodeLogic and replace with a NuGet reference. -->
     <ProjectReference Remove="@(ProjectReference)"
                       Condition="$([System.String]::new('%(ProjectReference.Identity)').Contains('CodeLogic.csproj'))" />
     <PackageReference Include="CodeLogic" Version="$(CodeLogicPackageVersion)" />
