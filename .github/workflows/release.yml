@@ -63,14 +63,20 @@ jobs:
             $changedFiles = git diff --name-only "$lastTag..HEAD" 2>$null
             if (-not $changedFiles) { $changedFiles = @() }
 
+            # Exclude csproj files from the change detection — they're bumped by this
+            # same workflow on every release, which would otherwise cascade forever.
+            # A lib only counts as "changed" if its SOURCE files (src/, README, etc.)
+            # were touched since the last tag.
             $changedProjects = @()
             foreach ($project in $allProjects) {
-              $hasChange = $changedFiles | Where-Object { $_ -like "$project/*" }
-              if ($hasChange) { $changedProjects += $project }
+              $hasRealChange = $changedFiles | Where-Object {
+                $_ -like "$project/*" -and $_ -notlike "*.csproj"
+              }
+              if ($hasRealChange) { $changedProjects += $project }
             }
 
             if ($changedProjects.Count -eq 0) {
-              Write-Host "No library changes since $lastTag — nothing to release"
+              Write-Host "No library source changes since $lastTag — nothing to release"
               "has_changes=False" >> $env:GITHUB_OUTPUT
               "projects=" >> $env:GITHUB_OUTPUT
               exit 0
