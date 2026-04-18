@@ -8,7 +8,7 @@
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>CS1591</NoWarn>
-    <Version>3.2.6</Version>
+    <Version>3.2.7</Version>
     <PackageId>CodeLogic.PostgreSQL</PackageId>
     <PackageTags>postgresql;database;orm;linq</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
