@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CL.MySQL2.Configuration;
 using CL.MySQL2.Core;
 using CL.MySQL2.Events;
 using CL.MySQL2.Models;
@@ -22,16 +23,23 @@ public sealed class TableSyncService
     private readonly SchemaAnalyzer _analyzer;
     private readonly MigrationTracker _migrationTracker;
     private readonly BackupManager _backupManager;
+    private readonly Func<string, MySqlDatabaseConfig?>? _configLookup;
 
     /// <param name="connectionManager">The connection manager to use for database access.</param>
     /// <param name="dataDirectory">Base data directory (for backup and migration storage).</param>
     /// <param name="logger">Optional logger.</param>
     /// <param name="events">Optional event bus for publishing sync events.</param>
+    /// <param name="configLookup">
+    /// Optional delegate resolving per-connection config so the service can read
+    /// <see cref="MySqlDatabaseConfig.SchemaSyncLevel"/>. When null, sync operates at
+    /// <see cref="SchemaSyncLevel.Safe"/>.
+    /// </param>
     public TableSyncService(
         ConnectionManager connectionManager,
         string dataDirectory,
         ILogger? logger = null,
-        IEventBus? events = null)
+        IEventBus? events = null,
+        Func<string, MySqlDatabaseConfig?>? configLookup = null)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _dataDirectory = dataDirectory ?? throw new ArgumentNullException(nameof(dataDirectory));
@@ -40,7 +48,11 @@ public sealed class TableSyncService
         _analyzer = new SchemaAnalyzer(logger);
         _migrationTracker = new MigrationTracker(connectionManager, logger);
         _backupManager = new BackupManager(connectionManager, dataDirectory, logger);
+        _configLookup = configLookup;
     }
+
+    private SchemaSyncLevel ResolveLevel(string connectionId) =>
+        _configLookup?.Invoke(connectionId)?.EffectiveSyncLevel ?? SchemaSyncLevel.Safe;
 
     /// <summary>
     /// Synchronizes the table schema for entity type <typeparamref name="T"/>.
@@ -59,21 +71,31 @@ public sealed class TableSyncService
         var sw = Stopwatch.StartNew();
         var operations = new List<string>();
         var errors = new List<string>();
+        var level = ResolveLevel(connectionId);
 
-        _logger?.Info($"[MySQL2] Syncing table `{tableName}`...");
+        _logger?.Info($"[MySQL2] Syncing table `{tableName}` (level: {level})");
 
         try
         {
+            if (level == SchemaSyncLevel.None)
+            {
+                operations.Add($"-- sync skipped (SchemaSyncLevel.None) for `{tableName}`");
+                sw.Stop();
+                return Result<SyncResult>.Success(new SyncResult
+                {
+                    Success = true,
+                    TableName = tableName,
+                    Operations = operations,
+                    Errors = errors,
+                    Duration = sw.Elapsed
+                });
+            }
+
             var tableExists = await TableExistsAsync(tableName, connectionId, ct).ConfigureAwait(false);
 
             if (!tableExists)
             {
                 // CREATE TABLE
-                if (createBackup)
-                {
-                    // No existing table to back up
-                }
-
                 var createSql = _analyzer.GenerateCreateTable(entityType);
                 await ExecuteSqlAsync(createSql, connectionId, ct).ConfigureAwait(false);
                 operations.Add($"CREATE TABLE `{tableName}`");
@@ -93,7 +115,7 @@ public sealed class TableSyncService
                 // ALTER TABLE as needed
                 var alterStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
                 {
-                    return await _analyzer.GenerateAlterStatementsAsync(entityType, conn, ct)
+                    return await _analyzer.GenerateAlterStatementsAsync(entityType, conn, level, ct)
                         .ConfigureAwait(false);
                 }, connectionId, ct).ConfigureAwait(false);
 

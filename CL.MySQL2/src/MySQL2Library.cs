@@ -100,7 +100,8 @@ public sealed class MySQL2Library : ILibrary
             _connectionManager,
             context.DataDirectory,
             context.Logger,
-            context.Events);
+            context.Events,
+            connectionId => config.Databases.TryGetValue(connectionId, out var cfg) ? cfg : null);
 
         foreach (var kvp in enabledDbs)
         {

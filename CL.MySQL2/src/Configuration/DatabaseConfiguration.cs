@@ -1,3 +1,4 @@
+using CL.MySQL2.Models;
 using CodeLogic.Core.Configuration;
 using MySqlConnector;
 
@@ -98,10 +99,31 @@ public sealed class MySqlDatabaseConfig
     public string Collation { get; set; } = "utf8mb4_unicode_ci";
 
     /// <summary>
-    /// When false (default), the table sync will never DROP or TRUNCATE existing data.
-    /// Set to true only in development environments.
+    /// Controls how aggressively the table sync service reconciles the database
+    /// schema with entity definitions. See <see cref="Models.SchemaSyncLevel"/>.
+    /// Default: <see cref="Models.SchemaSyncLevel.Safe"/>.
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    ///   <item><b>None</b> — no sync at all.</item>
+    ///   <item><b>Safe</b> — add missing columns/indexes/FKs + modify existing columns (grow VARCHAR, change default, toggle NULL). Never drops.</item>
+    ///   <item><b>Additive</b> — Safe + drop indexes and foreign keys no longer in the model.</item>
+    ///   <item><b>Full</b> — Additive + drop columns no longer in the model, and allow DROP TABLE rebuild. Development only.</item>
+    /// </list>
+    /// </remarks>
+    public SchemaSyncLevel SchemaSyncLevel { get; set; } = SchemaSyncLevel.Safe;
+
+    /// <summary>
+    /// Legacy flag. When true, sync operates at <see cref="Models.SchemaSyncLevel.Full"/>
+    /// regardless of <see cref="SchemaSyncLevel"/>. Prefer setting SchemaSyncLevel directly.
     /// </summary>
     public bool AllowDestructiveSync { get; set; } = false;
+
+    /// <summary>
+    /// Effective sync level, resolving the legacy <see cref="AllowDestructiveSync"/> flag.
+    /// </summary>
+    public SchemaSyncLevel EffectiveSyncLevel =>
+        AllowDestructiveSync ? SchemaSyncLevel.Full : SchemaSyncLevel;
 
     /// <summary>
     /// Directory for schema backup files.
