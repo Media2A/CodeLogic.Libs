@@ -37,8 +37,8 @@
     use this property to override the auto-generated dependency in packed nuspec.
   -->
   <PropertyGroup>
-    <!-- Range syntax: "[3.2.0, 4.0.0)" means ">= 3.2.0, < 4.0.0" — lets libs work
-         with any 3.x CodeLogic, so minor bumps (3.3, 3.4, …) don't force a lib re-release. -->
-    <CodeLogicPackageVersion Condition="'$(CodeLogicPackageVersion)' == ''">[3.2.0, 4.0.0)</CodeLogicPackageVersion>
+    <!-- Range syntax: "[3.2.0, 5.0.0)" means ">= 3.2.0, < 5.0.0" — lets libs work
+         with any 3.x or 4.x CodeLogic, so minor/major bumps don't force a lib re-release. -->
+    <CodeLogicPackageVersion Condition="'$(CodeLogicPackageVersion)' == ''">[3.2.0, 5.0.0)</CodeLogicPackageVersion>
   </PropertyGroup>
 </Project>
