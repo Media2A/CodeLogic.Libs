@@ -15,30 +15,11 @@
   </ItemGroup>
 
   <!--
-    ProjectReference → PackageReference swap for NuGet packing.
-    CI clones CodeLogic locally so 'dotnet build' works, but 'dotnet pack'
-    must produce a correct package dependency.
-
-    By default, the packed .nuspec pins the *exact* referenced version
-    (e.g. CodeLogic=3.2.4), which forces every lib to re-release each time
-    CodeLogic bumps. We override that to a floating range using a
-    wildcard so libs declare "CodeLogic 3.2.*" and keep working across
-    patch bumps without needing a new lib release.
+    Floating dependency range for CodeLogic. Targets in Directory.Build.targets
+    use this property to override the auto-generated dependency in packed nuspec.
   -->
   <PropertyGroup>
-    <CodeLogicPackageVersion Condition="'$(CodeLogicPackageVersion)' == ''">3.2.*</CodeLogicPackageVersion>
+    <!-- Range syntax: "[3.2.0, 3.3.0)" means ">= 3.2.0, < 3.3.0" -->
+    <CodeLogicPackageVersion Condition="'$(CodeLogicPackageVersion)' == ''">[3.2.0, 3.3.0)</CodeLogicPackageVersion>
   </PropertyGroup>
-
-  <!-- Rewrite the ProjectReference version during pack so the .nuspec
-       gets a floating 3.2.* dependency on CodeLogic instead of an exact
-       pin to whatever version the workspace happens to have locally. -->
-  <Target Name="OverrideCodeLogicPackageVersion"
-          BeforeTargets="_GetProjectReferenceVersions">
-    <ItemGroup>
-      <_ProjectReferencesWithVersions
-        Condition="'%(_ProjectReferencesWithVersions.PackageId)' == 'CodeLogic'">
-        <ProjectVersion>$(CodeLogicPackageVersion)</ProjectVersion>
-      </_ProjectReferencesWithVersions>
-    </ItemGroup>
-  </Target>
 </Project>

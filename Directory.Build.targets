@@ -1,0 +1,24 @@
+<Project>
+  <!--
+    Swap ProjectReference → PackageReference for CodeLogic so packed libraries
+    declare a floating "3.2.*" dependency instead of an exact pin. If the local
+    CodeLogic source clone is present (CI + monorepo dev), uses ProjectReference
+    for live builds. Otherwise uses PackageReference so consumers can restore
+    from NuGet without a local clone.
+
+    CI sets CodeLogicFromNuGet=true at pack time to force PackageReference mode
+    regardless of local files, so the nuspec always gets the floating range.
+  -->
+
+  <PropertyGroup>
+    <_CodeLogicLocalPath>$(MSBuildThisFileDirectory)../CodeLogic/src/CodeLogic.csproj</_CodeLogicLocalPath>
+    <CodeLogicFromNuGet Condition="'$(CodeLogicFromNuGet)' == '' And !Exists('$(_CodeLogicLocalPath)')">true</CodeLogicFromNuGet>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(CodeLogicFromNuGet)' == 'true'">
+    <!-- Remove any local ProjectReference to CodeLogic and replace with a NuGet reference. -->
+    <ProjectReference Remove="@(ProjectReference)"
+                      Condition="$([System.String]::new('%(ProjectReference.Identity)').Contains('CodeLogic.csproj'))" />
+    <PackageReference Include="CodeLogic" Version="$(CodeLogicPackageVersion)" />
+  </ItemGroup>
+</Project>
