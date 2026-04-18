@@ -10,21 +10,34 @@ namespace CL.TwoFactorAuth.Models;
 public class TwoFactorAuthConfig : ConfigModelBase
 {
     /// <summary>Whether the TwoFactorAuth library is enabled.</summary>
+    [ConfigField(Label = "Enabled", Group = "General", Order = 0)]
     public bool Enabled { get; set; } = true;
 
     /// <summary>Time step in seconds for TOTP generation. Default: 30.</summary>
+    [ConfigField(Label = "Time Step (s)", Min = 1, Max = 300,
+        Description = "TOTP time step — must match the authenticator app (standard is 30).",
+        Group = "TOTP", Order = 10)]
     public int TimeStepSeconds { get; set; } = 30;
 
     /// <summary>
     /// Validation window size (number of time steps to check before and after current).
     /// Default: 1 (allows ±30 seconds of clock drift).
     /// </summary>
+    [ConfigField(Label = "Window Size", Min = 0, Max = 10,
+        Description = "How many steps before/after the current window to accept. 1 = ±30s drift tolerance.",
+        Group = "TOTP", Order = 11)]
     public int WindowSize { get; set; } = 1;
 
     /// <summary>Pixel size of each QR code module (square). Default: 20.</summary>
+    [ConfigField(Label = "QR Module Size (px)", Min = 1, Max = 100,
+        Description = "Size of each QR dot. Larger = bigger image.",
+        Group = "QR Code", Order = 20, Collapsed = true)]
     public int QrCodeModuleSize { get; set; } = 20;
 
     /// <summary>Error correction level for generated QR codes. Default: Q.</summary>
+    [ConfigField(Label = "QR Error Correction",
+        Description = "L=~7%  M=~15%  Q=~25%  H=~30% damage tolerance.",
+        Group = "QR Code", Order = 21, Collapsed = true)]
     public QrErrorCorrectionLevel ErrorCorrectionLevel { get; set; } = QrErrorCorrectionLevel.Q;
 
     /// <inheritdoc/>

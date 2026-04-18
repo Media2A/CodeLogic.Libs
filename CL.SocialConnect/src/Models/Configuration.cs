@@ -10,6 +10,8 @@ namespace CL.SocialConnect.Models;
 public class SocialConnectConfig : ConfigModelBase
 {
     /// <summary>Whether the SocialConnect library is enabled.</summary>
+    [ConfigField(Label = "Enabled", Description = "Master switch for Discord + Steam integrations.",
+        Group = "General", Order = 0)]
     public bool Enabled { get; set; } = true;
 
     /// <summary>Discord integration configuration.</summary>
@@ -44,21 +46,31 @@ public class SocialConnectConfig : ConfigModelBase
 public class DiscordConfig
 {
     /// <summary>Whether Discord integration is enabled.</summary>
+    [ConfigField(Label = "Discord Enabled", Group = "Discord", Order = 10)]
     public bool Enabled { get; set; } = true;
 
     /// <summary>
     /// Default webhook URL used when no URL is specified in individual send calls.
     /// Format: <c>https://discord.com/api/webhooks/{id}/{token}</c>
     /// </summary>
+    [ConfigField(Label = "Default Webhook URL", InputType = ConfigInputType.Url, Secret = true,
+        Description = "https://discord.com/api/webhooks/{id}/{token}",
+        Placeholder = "https://discord.com/api/webhooks/…", Group = "Discord", Order = 11)]
     public string DefaultWebhookUrl { get; set; } = string.Empty;
 
     /// <summary>HTTP request timeout in seconds for webhook calls.</summary>
+    [ConfigField(Label = "Timeout (s)", Min = 1, Max = 120,
+        Group = "Discord", Order = 12, Collapsed = true)]
     public int TimeoutSeconds { get; set; } = 10;
 
     /// <summary>Default username displayed for webhook messages (overrides Discord server setting).</summary>
+    [ConfigField(Label = "Default Username", Description = "Shown as the sender on webhook messages.",
+        Group = "Discord", Order = 13, Collapsed = true)]
     public string DefaultUsername { get; set; } = string.Empty;
 
     /// <summary>Default avatar URL for webhook messages.</summary>
+    [ConfigField(Label = "Default Avatar URL", InputType = ConfigInputType.Url,
+        Group = "Discord", Order = 14, Collapsed = true)]
     public string DefaultAvatarUrl { get; set; } = string.Empty;
 }
 
@@ -68,28 +80,45 @@ public class DiscordConfig
 public class SteamConfig
 {
     /// <summary>Whether Steam integration is enabled.</summary>
+    [ConfigField(Label = "Steam Enabled", Group = "Steam", Order = 20)]
     public bool Enabled { get; set; } = false;
 
     /// <summary>
     /// Steam Web API key. Required when <see cref="Enabled"/> is <c>true</c>.
     /// Obtain from <c>https://steamcommunity.com/dev/apikey</c>.
     /// </summary>
+    [ConfigField(Label = "Steam API Key", InputType = ConfigInputType.Password, Secret = true,
+        Description = "Get one at https://steamcommunity.com/dev/apikey",
+        Group = "Steam", Order = 21)]
     public string ApiKey { get; set; } = string.Empty;
 
     /// <summary>Whether Steam authentication (ticket validation) is enabled.</summary>
+    [ConfigField(Label = "Steam Auth Enabled", Description = "Validate Steam login tickets.",
+        Group = "Steam", Order = 22)]
     public bool AuthEnabled { get; set; } = false;
 
     /// <summary>
     /// Steam App ID for authentication. Required when <see cref="AuthEnabled"/> is <c>true</c>.
     /// </summary>
+    [ConfigField(Label = "Steam App ID", Placeholder = "480",
+        Description = "Your game's Steam App ID. Required for auth.",
+        Group = "Steam", Order = 23)]
     public string AppId { get; set; } = string.Empty;
 
     /// <summary>How long (in seconds) to cache Steam profile data. Default: 300 (5 minutes).</summary>
+    [ConfigField(Label = "Cache TTL (s)", Min = 1,
+        Description = "Profile data cache duration.",
+        Group = "Steam", Order = 24, Collapsed = true)]
     public int CacheTtlSeconds { get; set; } = 300;
 
     /// <summary>HTTP request timeout in seconds for Steam API calls.</summary>
+    [ConfigField(Label = "Timeout (s)", Min = 1, Max = 120,
+        Group = "Steam", Order = 25, Collapsed = true)]
     public int TimeoutSeconds { get; set; } = 15;
 
     /// <summary>Base URL for the Steam Web API. Typically not changed.</summary>
+    [ConfigField(Label = "API Base URL", InputType = ConfigInputType.Url,
+        Description = "Rarely changed.",
+        Group = "Steam", Order = 26, Collapsed = true)]
     public string ApiBaseUrl { get; set; } = "https://api.steampowered.com";
 }

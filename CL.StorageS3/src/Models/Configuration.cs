@@ -12,6 +12,7 @@ namespace CL.StorageS3.Models;
 public class StorageS3Config : ConfigModelBase
 {
     /// <summary>Whether the StorageS3 library is enabled.</summary>
+    [ConfigField(Label = "Enabled", Description = "Master switch for S3/MinIO storage.", Group = "General", Order = 0)]
     public bool Enabled { get; set; } = true;
 
     /// <summary>One or more S3/MinIO connection configurations.</summary>
@@ -54,45 +55,69 @@ public class StorageS3Config : ConfigModelBase
 public class S3ConnectionConfig
 {
     /// <summary>Unique identifier for this connection. Used to look it up via the connection manager.</summary>
+    [ConfigField(Label = "Connection ID", Required = true, Description = "Unique identifier used to look up this connection.",
+        RequiresRestart = true, Group = "Connection", Order = 10)]
     public string ConnectionId { get; set; } = "Default";
 
     /// <summary>AWS / MinIO access key ID.</summary>
+    [ConfigField(Label = "Access Key", Required = true, Secret = true,
+        Description = "AWS / MinIO / R2 access key ID.",
+        RequiresRestart = true, Group = "Credentials", Order = 11)]
     public string AccessKey { get; set; } = "";
 
     /// <summary>AWS / MinIO secret access key.</summary>
+    [ConfigField(Label = "Secret Key", InputType = ConfigInputType.Password, Secret = true,
+        Required = true, Description = "AWS / MinIO / R2 secret access key.",
+        RequiresRestart = true, Group = "Credentials", Order = 12)]
     public string SecretKey { get; set; } = "";
 
     /// <summary>
     /// S3 service endpoint URL.
     /// Use <c>https://s3.amazonaws.com</c> for AWS or a MinIO URL such as <c>http://localhost:9000</c>.
     /// </summary>
+    [ConfigField(Label = "Service URL", InputType = ConfigInputType.Url, Required = true,
+        Description = "AWS: https://s3.amazonaws.com — MinIO: http://host:9000 — R2: https://<account>.r2.cloudflarestorage.com",
+        Placeholder = "https://s3.amazonaws.com", RequiresRestart = true, Group = "Connection", Order = 13)]
     public string ServiceUrl { get; set; } = "";
 
     /// <summary>
     /// Public-facing base URL used to build object URLs, e.g. <c>https://cdn.example.com</c>.
     /// When empty, object public URLs are not generated.
     /// </summary>
+    [ConfigField(Label = "Public URL", InputType = ConfigInputType.Url,
+        Description = "Base URL used when generating public object links. Leave blank if private.",
+        Placeholder = "https://cdn.example.com", Group = "Connection", Order = 14)]
     public string PublicUrl { get; set; } = "";
 
     /// <summary>AWS region name (e.g. <c>us-east-1</c>). Defaults to <c>us-east-1</c>.</summary>
+    [ConfigField(Label = "Region", Description = "AWS region name (ignored when Service URL is set).",
+        RequiresRestart = true, Group = "Connection", Order = 15)]
     public string Region { get; set; } = "us-east-1";
 
     /// <summary>Default bucket name used when no bucket is specified in an operation.</summary>
+    [ConfigField(Label = "Default Bucket", Placeholder = "my-app-assets",
+        Description = "Used when code doesn't specify a bucket explicitly.",
+        Group = "Connection", Order = 16)]
     public string DefaultBucket { get; set; } = "";
 
     /// <summary>
     /// Whether to use path-style addressing (<c>http://host/bucket/key</c> instead of <c>http://bucket.host/key</c>).
     /// Required for MinIO and most non-AWS S3-compatible services.
     /// </summary>
+    [ConfigField(Label = "Force Path Style", Description = "Required for MinIO and most non-AWS services.",
+        RequiresRestart = true, Group = "Advanced", Order = 30, Collapsed = true)]
     public bool ForcePathStyle { get; set; } = true;
 
     /// <summary>Whether to use HTTPS for the connection.</summary>
+    [ConfigField(Label = "Use HTTPS", RequiresRestart = true, Group = "Advanced", Order = 31, Collapsed = true)]
     public bool UseHttps { get; set; } = true;
 
     /// <summary>HTTP request timeout in seconds.</summary>
+    [ConfigField(Label = "Timeout (s)", Min = 1, Max = 600, Group = "Advanced", Order = 32, Collapsed = true)]
     public int TimeoutSeconds { get; set; } = 30;
 
     /// <summary>Maximum number of retry attempts on transient failures.</summary>
+    [ConfigField(Label = "Max Retries", Min = 0, Max = 20, Group = "Advanced", Order = 33, Collapsed = true)]
     public int MaxRetries { get; set; } = 3;
 
     /// <summary>
@@ -100,6 +125,8 @@ public class S3ConnectionConfig
     /// Required for Cloudflare R2 and some other S3-compatible services that don't
     /// support the streaming signature format. Default: false (AWS/MinIO compatible).
     /// </summary>
+    [ConfigField(Label = "Disable Payload Signing", Description = "Enable for Cloudflare R2 — disables STREAMING-AWS4 payload signing.",
+        RequiresRestart = true, Group = "Advanced", Order = 34, Collapsed = true)]
     public bool DisablePayloadSigning { get; set; }
 
     /// <summary>
