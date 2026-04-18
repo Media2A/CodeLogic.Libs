@@ -171,9 +171,10 @@ jobs:
 
             $versionLines.Add("$project=$version")
 
-            dotnet restore $csproj
+            dotnet restore $csproj /p:CodeLogicFromNuGet=true
             dotnet pack $csproj --configuration Release --no-restore --output artifacts `
-              /p:PackageVersion=$version /p:Version=$version /p:InformationalVersion=$version
+              /p:PackageVersion=$version /p:Version=$version /p:InformationalVersion=$version `
+              /p:CodeLogicFromNuGet=true
           }
 
           $versionLines | Set-Content 'artifacts/package-versions.txt'
