@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>3.2.8</Version>
+    <Version>3.2.9</Version>
     <PackageId>CodeLogic.NetUtils</PackageId>
     <PackageTags>dns;dnsbl;geoip;geolocation</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
