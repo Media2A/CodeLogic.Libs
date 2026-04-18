@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>3.2.9</Version>
+    <Version>3.2.10</Version>
     <PackageId>CodeLogic.Common</PackageId>
     <PackageTags>utilities;imaging;caching;hashing;compression</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
