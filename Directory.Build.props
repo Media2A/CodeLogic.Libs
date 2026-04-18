@@ -9,6 +9,24 @@
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
+  <!--
+    Stable assembly binding across patches. NuGet `<Version>` bumps each
+    release (3.2.9 → 3.2.10 → …) so consumers can track updates, but the
+    CLR assembly binding must stay fixed per minor version so transitive
+    dependencies don't demand an exact patch match at load time.
+
+    AssemblyVersion = binding identity. Pinned to <Major>.<Minor>.0.0 so
+      every 3.2.x patch loads interchangeably.
+    FileVersion     = deploy fingerprint. Mirrors <Version> so file hash
+      checks can still tell patches apart on disk.
+    InformationalVersion = display string. Also mirrors <Version>.
+  -->
+  <PropertyGroup>
+    <AssemblyVersion>3.2.0.0</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+  </PropertyGroup>
+
   <!-- Include the repo-level LICENSE in every package -->
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="/" />
