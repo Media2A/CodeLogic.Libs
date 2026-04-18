@@ -70,8 +70,10 @@ jobs:
             }
 
             if ($changedProjects.Count -eq 0) {
-              Write-Host "No library changes since $lastTag — building all as fallback"
-              $changedProjects = $allProjects
+              Write-Host "No library changes since $lastTag — nothing to release"
+              "has_changes=False" >> $env:GITHUB_OUTPUT
+              "projects=" >> $env:GITHUB_OUTPUT
+              exit 0
             }
           }
 

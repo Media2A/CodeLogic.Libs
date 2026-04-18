@@ -16,20 +16,29 @@
 
   <!--
     ProjectReference → PackageReference swap for NuGet packing.
-    When 'dotnet pack' runs, we need the .nupkg to declare a dependency on
-    the CodeLogic NuGet package, not embed the DLL from the local clone.
-    The CI clones CodeLogic locally so 'dotnet build' works, but 'dotnet pack'
+    CI clones CodeLogic locally so 'dotnet build' works, but 'dotnet pack'
     must produce a correct package dependency.
 
-    How it works: when IsPackable and the pack target runs, MSBuild sees
-    SuppressDependenciesWhenPacking=false (default) and converts
-    ProjectReferences into package dependencies using the referenced
-    project's PackageId + Version. CodeLogic.csproj declares
-    <PackageId>CodeLogic</PackageId> and <Version>3.0.0</Version>,
-    so the generated .nuspec will contain:
-      <dependency id="CodeLogic" version="3.0.0" />
-
-    This works out of the box as long as the referenced project has a
-    PackageId set — which we just added to CodeLogic.csproj.
+    By default, the packed .nuspec pins the *exact* referenced version
+    (e.g. CodeLogic=3.2.4), which forces every lib to re-release each time
+    CodeLogic bumps. We override that to a floating range using a
+    wildcard so libs declare "CodeLogic 3.2.*" and keep working across
+    patch bumps without needing a new lib release.
   -->
+  <PropertyGroup>
+    <CodeLogicPackageVersion Condition="'$(CodeLogicPackageVersion)' == ''">3.2.*</CodeLogicPackageVersion>
+  </PropertyGroup>
+
+  <!-- Rewrite the ProjectReference version during pack so the .nuspec
+       gets a floating 3.2.* dependency on CodeLogic instead of an exact
+       pin to whatever version the workspace happens to have locally. -->
+  <Target Name="OverrideCodeLogicPackageVersion"
+          BeforeTargets="_GetProjectReferenceVersions">
+    <ItemGroup>
+      <_ProjectReferencesWithVersions
+        Condition="'%(_ProjectReferencesWithVersions.PackageId)' == 'CodeLogic'">
+        <ProjectVersion>$(CodeLogicPackageVersion)</ProjectVersion>
+      </_ProjectReferencesWithVersions>
+    </ItemGroup>
+  </Target>
 </Project>
