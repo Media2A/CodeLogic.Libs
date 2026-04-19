@@ -1,11 +1,7 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq.Expressions;
-using System.Reflection;
 using CL.MySQL2.Core;
-using CL.MySQL2.Models;
 using CodeLogic;
-using CodeLogic.Core.Events;
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
 using MySqlConnector;
@@ -13,8 +9,8 @@ using MySqlConnector;
 namespace CL.MySQL2.Services;
 
 /// <summary>
-/// Generic repository providing CRUD and query operations for entity type <typeparamref name="T"/>.
-/// Uses reflection with a static per-type cache for performance.
+/// Generic repository providing CRUD for entity type <typeparamref name="T"/>.
+/// Uses compiled materializers via <see cref="EntityMetadata{T}"/> — no per-row reflection.
 /// </summary>
 public sealed class Repository<T> where T : class, new()
 {
@@ -22,60 +18,52 @@ public sealed class Repository<T> where T : class, new()
     private readonly ILogger? _logger;
     private readonly string _connectionId;
     private readonly int _slowQueryThresholdMs;
+    private readonly int _maxBatchInsertSize;
     private readonly TransactionScope? _transactionScope;
-
-    // Static property cache — populated once per entity type
-    private static readonly ConcurrentDictionary<Type, PropertyInfo[]> _cachedProperties = new();
-
-    // Static column-name whitelist cache (case-insensitive) — defends against SQL injection
-    // when a column name is passed as a string parameter (e.g., GetByColumnAsync, GetPagedAsync).
-    private static readonly ConcurrentDictionary<Type, HashSet<string>> _cachedColumnNames = new();
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Creates a repository using the given connection manager and connection ID.
-    /// </summary>
     public Repository(
         ConnectionManager connectionManager,
         ILogger? logger = null,
         string connectionId = "Default",
-        int slowQueryThresholdMs = 1000)
+        int slowQueryThresholdMs = 1000,
+        int maxBatchInsertSize = 500)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _logger = logger;
         _connectionId = connectionId;
         _slowQueryThresholdMs = slowQueryThresholdMs;
+        _maxBatchInsertSize = maxBatchInsertSize;
     }
 
-    /// <summary>
-    /// Creates a repository that participates in an existing transaction scope.
-    /// </summary>
     public Repository(
         ConnectionManager connectionManager,
         ILogger? logger,
         TransactionScope transactionScope,
-        int slowQueryThresholdMs = 1000)
+        int slowQueryThresholdMs = 1000,
+        int maxBatchInsertSize = 500)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _logger = logger;
         _transactionScope = transactionScope ?? throw new ArgumentNullException(nameof(transactionScope));
         _connectionId = transactionScope.ConnectionId;
         _slowQueryThresholdMs = slowQueryThresholdMs;
+        _maxBatchInsertSize = maxBatchInsertSize;
     }
 
     // ── CRUD ──────────────────────────────────────────────────────────────────
 
-    /// <summary>Inserts a single entity and returns the inserted entity (with auto-generated ID if applicable).</summary>
+    /// <summary>Inserts a single entity and returns it (with auto-generated PK populated).</summary>
     public async Task<Result<T>> InsertAsync(T entity, CancellationToken ct = default)
     {
         try
         {
-            var tableName = GetTableName();
-            var parameters = BuildInsertParameters(entity);
-            var columns = string.Join(", ", parameters.Keys.Select(k => $"`{k}`"));
-            var paramNames = string.Join(", ", parameters.Keys.Select(k => $"@{k}"));
-            var sql = $"INSERT INTO `{tableName}` ({columns}) VALUES ({paramNames}); SELECT LAST_INSERT_ID();";
+            var table = EntityMetadata<T>.TableName;
+            var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
+            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
+            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}); SELECT LAST_INSERT_ID();";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -85,24 +73,22 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                foreach (var kv in parameters)
-                    cmd.Parameters.AddWithValue($"@{kv.Key}", TypeConverter.ToDbValue(kv.Value) ?? DBNull.Value);
+                foreach (var col in insertCols)
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity)) ?? DBNull.Value);
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
 
-            // Set auto-increment PK if applicable
-            var pkProp = TryGetPrimaryKeyProperty();
-            if (pkProp is not null && pkProp.GetCustomAttribute<ColumnAttribute>()?.AutoIncrement == true && lastId is not null)
+            var pk = EntityMetadata<T>.PrimaryKey;
+            if (pk is not null && pk.IsAutoIncrement && lastId is not null && lastId is not DBNull)
             {
-                var converted = Convert.ChangeType(lastId, pkProp.PropertyType);
-                pkProp.SetValue(entity, converted);
+                var converted = Convert.ChangeType(lastId, pk.Property.PropertyType);
+                pk.Set(entity, converted);
             }
 
-            _logger?.Debug($"[MySQL2] Inserted into `{tableName}`");
-            QueryCache.Invalidate(tableName);
+            QueryCache.Invalidate(table);
             return Result<T>.Success(entity);
         }
         catch (Exception ex)
@@ -112,26 +98,60 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
-    /// <summary>Bulk-inserts a collection of entities and returns the count inserted.</summary>
+    /// <summary>
+    /// Bulk-inserts a collection of entities using real batched INSERT statements.
+    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// </summary>
     public async Task<Result<int>> InsertManyAsync(IEnumerable<T> entities, CancellationToken ct = default)
     {
-        var list = entities.ToList();
+        var list = entities as IList<T> ?? entities.ToList();
         if (list.Count == 0) return Result<int>.Success(0);
 
         try
         {
-            var count = 0;
-            foreach (var entity in list)
-            {
-                var result = await InsertAsync(entity, ct).ConfigureAwait(false);
-                if (result.IsFailure) return Result<int>.Failure(result.Error!);
-                count++;
-            }
+            var table = EntityMetadata<T>.TableName;
+            var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
+            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
 
-            var tableName = GetTableName();
-            _logger?.Debug($"[MySQL2] Bulk-inserted {count} records into `{tableName}`");
-            QueryCache.Invalidate(tableName);
-            return Result<int>.Success(count);
+            var inserted = 0;
+            var sw = Stopwatch.StartNew();
+
+            await ExecuteAsync<int>(async conn =>
+            {
+                for (var start = 0; start < list.Count; start += _maxBatchInsertSize)
+                {
+                    var end = Math.Min(start + _maxBatchInsertSize, list.Count);
+                    var count = end - start;
+
+                    await using var cmd = conn.CreateCommand();
+                    if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+
+                    var valueTuples = new string[count];
+                    for (var i = 0; i < count; i++)
+                    {
+                        var entity = list[start + i];
+                        var tupleParts = new string[insertCols.Length];
+                        for (var j = 0; j < insertCols.Length; j++)
+                        {
+                            var paramName = $"@p_{i}_{j}";
+                            tupleParts[j] = paramName;
+                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!)) ?? DBNull.Value);
+                        }
+                        valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
+                    }
+
+                    cmd.CommandText = $"INSERT INTO `{table}` ({columnList}) VALUES {string.Join(", ", valueTuples)};";
+                    LogQuery(cmd.CommandText);
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    inserted += count;
+                }
+                return inserted;
+            }).ConfigureAwait(false);
+
+            sw.Stop();
+            _logger?.Debug($"[MySQL2] Bulk-inserted {inserted} records into `{table}` in {sw.ElapsedMilliseconds}ms");
+            QueryCache.Invalidate(table);
+            return Result<int>.Success(inserted);
         }
         catch (Exception ex)
         {
@@ -145,10 +165,9 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
-            var tableName = GetTableName();
-            var pkProp = GetPrimaryKeyProperty();
-            var pkCol = GetColumnName(pkProp);
-            var sql = $"SELECT * FROM `{tableName}` WHERE `{pkCol}` = @id LIMIT 1";
+            var table = EntityMetadata<T>.TableName;
+            var pk = EntityMetadata<T>.RequirePrimaryKey();
+            var sql = $"SELECT * FROM `{table}` WHERE `{pk.ColumnName}` = @id LIMIT 1";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -160,14 +179,13 @@ public sealed class Repository<T> where T : class, new()
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@id", id);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                return await reader.ReadAsync(ct).ConfigureAwait(false)
-                    ? MapReaderToEntity(reader)
-                    : null;
+                if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+                var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+                return map(reader);
             }).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
-
             return Result<T?>.Success(result);
         }
         catch (Exception ex)
@@ -182,9 +200,9 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
-            EnsureValidColumn(column);
-            var tableName = GetTableName();
-            var sql = $"SELECT * FROM `{tableName}` WHERE `{column}` = @val";
+            var col = EntityMetadata<T>.RequireColumn(column);
+            var table = EntityMetadata<T>.TableName;
+            var sql = $"SELECT * FROM `{table}` WHERE `{col.ColumnName}` = @val";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -196,9 +214,9 @@ public sealed class Repository<T> where T : class, new()
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@val", TypeConverter.ToDbValue(value) ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 var items = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    items.Add(MapReaderToEntity(reader));
+                while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
             }).ConfigureAwait(false);
 
@@ -218,8 +236,8 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
-            var tableName = GetTableName();
-            var sql = $"SELECT * FROM `{tableName}`";
+            var table = EntityMetadata<T>.TableName;
+            var sql = $"SELECT * FROM `{table}`";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -230,9 +248,9 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 var items = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    items.Add(MapReaderToEntity(reader));
+                while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
             }).ConfigureAwait(false);
 
@@ -248,7 +266,7 @@ public sealed class Repository<T> where T : class, new()
     }
 
     /// <summary>Retrieves a paged result set.</summary>
-    public async Task<Result<PagedResult<T>>> GetPagedAsync(
+    public async Task<Result<Models.PagedResult<T>>> GetPagedAsync(
         int page,
         int pageSize,
         string? orderByColumn = null,
@@ -257,15 +275,18 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
-            if (orderByColumn is not null) EnsureValidColumn(orderByColumn);
-            var tableName = GetTableName();
+            var orderCol = orderByColumn is not null
+                ? EntityMetadata<T>.RequireColumn(orderByColumn).ColumnName
+                : null;
+
+            var table = EntityMetadata<T>.TableName;
             var offset = (page - 1) * pageSize;
-            var orderClause = orderByColumn is not null
-                ? $" ORDER BY `{orderByColumn}` {(descending ? "DESC" : "ASC")}"
+            var orderClause = orderCol is not null
+                ? $" ORDER BY `{orderCol}` {(descending ? "DESC" : "ASC")}"
                 : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM `{tableName}`";
-            var dataSql = $"SELECT * FROM `{tableName}`{orderClause} LIMIT {pageSize} OFFSET {offset}";
+            var countSql = $"SELECT COUNT(*) FROM `{table}`";
+            var dataSql = $"SELECT * FROM `{table}`{orderClause} LIMIT {pageSize} OFFSET {offset}";
 
             LogQuery(dataSql);
             var sw = Stopwatch.StartNew();
@@ -281,17 +302,16 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = dataSql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 var entities = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    entities.Add(MapReaderToEntity(reader));
-
+                while (await reader.ReadAsync(ct).ConfigureAwait(false)) entities.Add(map(reader));
                 return (entities, totalCount);
             }).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
 
-            return Result<PagedResult<T>>.Success(new PagedResult<T>
+            return Result<Models.PagedResult<T>>.Success(new Models.PagedResult<T>
             {
                 Items = items,
                 PageNumber = page,
@@ -302,7 +322,7 @@ public sealed class Repository<T> where T : class, new()
         catch (Exception ex)
         {
             _logger?.Error($"[MySQL2] GetPagedAsync failed: {ex.Message}", ex);
-            return Result<PagedResult<T>>.Failure(Error.FromException(ex, "mysql.get_failed"));
+            return Result<Models.PagedResult<T>>.Failure(Error.FromException(ex, "mysql.get_failed"));
         }
     }
 
@@ -311,8 +331,8 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
-            var tableName = GetTableName();
-            var sql = $"SELECT COUNT(*) FROM `{tableName}`";
+            var table = EntityMetadata<T>.TableName;
+            var sql = $"SELECT COUNT(*) FROM `{table}`";
             LogQuery(sql);
 
             var count = await ExecuteAsync(async conn =>
@@ -332,18 +352,16 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
-    /// <summary>Updates an existing entity and returns the updated entity.</summary>
+    /// <summary>Updates an existing entity by PK.</summary>
     public async Task<Result<T>> UpdateAsync(T entity, CancellationToken ct = default)
     {
         try
         {
-            var tableName = GetTableName();
-            var pkProp = GetPrimaryKeyProperty();
-            var pkCol = GetColumnName(pkProp);
-            var parameters = BuildUpdateParameters(entity);
-
-            var setClauses = string.Join(", ", parameters.Keys.Select(k => $"`{k}` = @{k}"));
-            var sql = $"UPDATE `{tableName}` SET {setClauses} WHERE `{pkCol}` = @__pk";
+            var table = EntityMetadata<T>.TableName;
+            var pk = EntityMetadata<T>.RequirePrimaryKey();
+            var setCols = EntityMetadata<T>.Columns.Where(c => c != pk).ToArray();
+            var setClauses = string.Join(", ", setCols.Select(c => $"`{c.ColumnName}` = @{c.ColumnName}"));
+            var sql = $"UPDATE `{table}` SET {setClauses} WHERE `{pk.ColumnName}` = @__pk";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -353,16 +371,15 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                foreach (var kv in parameters)
-                    cmd.Parameters.AddWithValue($"@{kv.Key}", TypeConverter.ToDbValue(kv.Value) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@__pk", pkProp.GetValue(entity));
+                foreach (var col in setCols)
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity)) ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@__pk", pk.Get(entity));
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
-            _logger?.Debug($"[MySQL2] Updated record in `{tableName}`");
-            QueryCache.Invalidate(tableName);
+            QueryCache.Invalidate(table);
             return Result<T>.Success(entity);
         }
         catch (Exception ex)
@@ -377,14 +394,11 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
-            var tableName = GetTableName();
-            var pkProp = GetPrimaryKeyProperty();
-            var pkCol = GetColumnName(pkProp);
-            var sql = $"DELETE FROM `{tableName}` WHERE `{pkCol}` = @id";
+            var table = EntityMetadata<T>.TableName;
+            var pk = EntityMetadata<T>.RequirePrimaryKey();
+            var sql = $"DELETE FROM `{table}` WHERE `{pk.ColumnName}` = @id";
 
             LogQuery(sql);
-            var sw = Stopwatch.StartNew();
-
             var affected = await ExecuteAsync(async conn =>
             {
                 await using var cmd = conn.CreateCommand();
@@ -394,10 +408,7 @@ public sealed class Repository<T> where T : class, new()
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
-            sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
-            _logger?.Debug($"[MySQL2] Deleted record from `{tableName}`");
-            QueryCache.Invalidate(tableName);
+            QueryCache.Invalidate(table);
             return Result<bool>.Success(affected > 0);
         }
         catch (Exception ex)
@@ -407,20 +418,21 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
-    /// <summary>Atomically increments a numeric property by the given amount.</summary>
-    public async Task<Result<int>> IncrementAsync<TProperty>(
+    /// <summary>
+    /// Atomically adjusts a numeric column by <paramref name="delta"/>. Negative for decrement.
+    /// </summary>
+    public async Task<Result<int>> AdjustAsync<TProperty>(
         object id,
         Expression<Func<T, TProperty>> propertySelector,
-        TProperty amount,
+        TProperty delta,
         CancellationToken ct = default)
     {
         try
         {
-            var tableName = GetTableName();
-            var pkProp = GetPrimaryKeyProperty();
-            var pkCol = GetColumnName(pkProp);
+            var table = EntityMetadata<T>.TableName;
+            var pk = EntityMetadata<T>.RequirePrimaryKey();
             var colName = MySqlExpressionVisitor.TranslateSelector(propertySelector);
-            var sql = $"UPDATE `{tableName}` SET `{colName}` = `{colName}` + @amount WHERE `{pkCol}` = @id";
+            var sql = $"UPDATE `{table}` SET `{colName}` = `{colName}` + @delta WHERE `{pk.ColumnName}` = @id";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -428,55 +440,39 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@amount", amount);
+                cmd.Parameters.AddWithValue("@delta", delta);
                 cmd.Parameters.AddWithValue("@id", id);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
-            QueryCache.Invalidate(tableName);
+            QueryCache.Invalidate(table);
             return Result<int>.Success(affected);
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] IncrementAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] AdjustAsync failed: {ex.Message}", ex);
             return Result<int>.Failure(Error.FromException(ex, "mysql.update_failed"));
         }
     }
 
-    /// <summary>Atomically decrements a numeric property by the given amount.</summary>
-    public async Task<Result<int>> DecrementAsync<TProperty>(
+    /// <summary>Increment a numeric column by <paramref name="amount"/>.</summary>
+    public Task<Result<int>> IncrementAsync<TProperty>(
+        object id,
+        Expression<Func<T, TProperty>> propertySelector,
+        TProperty amount,
+        CancellationToken ct = default)
+        => AdjustAsync(id, propertySelector, amount, ct);
+
+    /// <summary>Decrement a numeric column by <paramref name="amount"/>.</summary>
+    public Task<Result<int>> DecrementAsync<TProperty>(
         object id,
         Expression<Func<T, TProperty>> propertySelector,
         TProperty amount,
         CancellationToken ct = default)
     {
-        try
-        {
-            var tableName = GetTableName();
-            var pkProp = GetPrimaryKeyProperty();
-            var pkCol = GetColumnName(pkProp);
-            var colName = MySqlExpressionVisitor.TranslateSelector(propertySelector);
-            var sql = $"UPDATE `{tableName}` SET `{colName}` = `{colName}` - @amount WHERE `{pkCol}` = @id";
-
-            LogQuery(sql);
-            var affected = await ExecuteAsync(async conn =>
-            {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
-                cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@amount", amount);
-                cmd.Parameters.AddWithValue("@id", id);
-                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
-
-            QueryCache.Invalidate(tableName);
-            return Result<int>.Success(affected);
-        }
-        catch (Exception ex)
-        {
-            _logger?.Error($"[MySQL2] DecrementAsync failed: {ex.Message}", ex);
-            return Result<int>.Failure(Error.FromException(ex, "mysql.update_failed"));
-        }
+        // Negate via dynamic since TProperty is an unconstrained numeric.
+        dynamic d = amount!;
+        return AdjustAsync(id, propertySelector, (TProperty)(-d), ct);
     }
 
     /// <summary>Returns all entities matching the given LINQ predicate.</summary>
@@ -484,9 +480,9 @@ public sealed class Repository<T> where T : class, new()
     {
         try
         {
-            var tableName = GetTableName();
+            var table = EntityMetadata<T>.TableName;
             var (whereClause, parameters) = MySqlExpressionVisitor.Translate(predicate);
-            var sql = $"SELECT * FROM `{tableName}` WHERE {whereClause}";
+            var sql = $"SELECT * FROM `{table}` WHERE {whereClause}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -499,9 +495,9 @@ public sealed class Repository<T> where T : class, new()
                 foreach (var kv in parameters)
                     cmd.Parameters.AddWithValue(kv.Key, TypeConverter.ToDbValue(kv.Value) ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 var items = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    items.Add(MapReaderToEntity(reader));
+                while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
             }).ConfigureAwait(false);
 
@@ -526,112 +522,10 @@ public sealed class Repository<T> where T : class, new()
         return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
     }
 
-    private T MapReaderToEntity(MySqlDataReader reader)
-    {
-        var entity = new T();
-        var props = GetCachedProperties();
-
-        for (int i = 0; i < reader.FieldCount; i++)
-        {
-            var colName = reader.GetName(i);
-            var prop = props.FirstOrDefault(p =>
-            {
-                var attr = p.GetCustomAttribute<ColumnAttribute>();
-                var mappedName = !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : p.Name;
-                return string.Equals(mappedName, colName, StringComparison.OrdinalIgnoreCase);
-            });
-
-            if (prop is null || !prop.CanWrite) continue;
-
-            var rawValue = reader.IsDBNull(i) ? null : reader.GetValue(i);
-            var converted = TypeConverter.FromDbValue(rawValue, prop.PropertyType);
-            prop.SetValue(entity, converted);
-        }
-
-        return entity;
-    }
-
-    private Dictionary<string, object?> BuildInsertParameters(T entity)
-    {
-        var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var prop in GetCachedProperties())
-        {
-            var colAttr = prop.GetCustomAttribute<ColumnAttribute>();
-            if (colAttr?.AutoIncrement == true) continue; // skip AI columns on insert
-
-            var colName = !string.IsNullOrEmpty(colAttr?.Name) ? colAttr.Name! : prop.Name;
-            result[colName] = prop.GetValue(entity);
-        }
-        return result;
-    }
-
-    private Dictionary<string, object?> BuildUpdateParameters(T entity)
-    {
-        var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        var pkProp = GetPrimaryKeyProperty();
-        foreach (var prop in GetCachedProperties())
-        {
-            if (prop == pkProp) continue; // exclude PK from SET clause
-            var colAttr = prop.GetCustomAttribute<ColumnAttribute>();
-            var colName = !string.IsNullOrEmpty(colAttr?.Name) ? colAttr.Name! : prop.Name;
-            result[colName] = prop.GetValue(entity);
-        }
-        return result;
-    }
-
-    private PropertyInfo GetPrimaryKeyProperty()
-    {
-        var pk = TryGetPrimaryKeyProperty();
-        if (pk is null)
-            throw new InvalidOperationException(
-                $"Entity '{typeof(T).Name}' has no property marked with [Column(Primary = true)].");
-        return pk;
-    }
-
-    private PropertyInfo? TryGetPrimaryKeyProperty() =>
-        GetCachedProperties()
-            .FirstOrDefault(p => p.GetCustomAttribute<ColumnAttribute>()?.Primary == true);
-
-    private static string GetColumnName(PropertyInfo prop)
-    {
-        var attr = prop.GetCustomAttribute<ColumnAttribute>();
-        return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : prop.Name;
-    }
-
-    private static string GetTableName()
-    {
-        var attr = typeof(T).GetCustomAttribute<TableAttribute>();
-        return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : typeof(T).Name;
-    }
-
-    private static PropertyInfo[] GetCachedProperties() =>
-        _cachedProperties.GetOrAdd(typeof(T), t =>
-            t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-             .Where(p => p.CanRead && p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)
-             .ToArray());
-
-    /// <summary>
-    /// Throws ArgumentException if <paramref name="column"/> is not a known column on <typeparamref name="T"/>.
-    /// Used by APIs that accept a column name as a string (e.g., GetByColumnAsync, GetPagedAsync)
-    /// to prevent SQL injection via the column-name parameter.
-    /// </summary>
-    private static void EnsureValidColumn(string column)
-    {
-        if (string.IsNullOrEmpty(column))
-            throw new ArgumentException("Column name cannot be null or empty.", nameof(column));
-
-        var allowed = _cachedColumnNames.GetOrAdd(typeof(T), _ =>
-            new HashSet<string>(GetCachedProperties().Select(GetColumnName), StringComparer.OrdinalIgnoreCase));
-
-        if (!allowed.Contains(column))
-            throw new ArgumentException(
-                $"Column '{column}' is not defined on entity '{typeof(T).Name}'.", nameof(column));
-    }
-
     private void LogSlowQuery(string sql, long elapsedMs)
     {
         if (elapsedMs >= _slowQueryThresholdMs)
-            _logger?.Warning($"[MySQL2] Slow query ({elapsedMs}ms): {sql}");
+            _logger?.Warning($"[MySQL2] [{_connectionId}] Slow query ({elapsedMs}ms): {sql}");
     }
 
     private void LogQuery(string sql)

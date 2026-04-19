@@ -36,10 +36,6 @@ public sealed class QueryBuilder<T> where T : class, new()
     private int _paramCounter;
     private TimeSpan? _cacheTtl;
 
-    // Static column-name whitelist cache (case-insensitive) — defends against SQL injection
-    // when column names are passed as strings (e.g., UpdateAsync dictionary keys).
-    private static readonly ConcurrentDictionary<Type, HashSet<string>> _cachedColumnNames = new();
-
     // ── Constructors ──────────────────────────────────────────────────────────
 
     public QueryBuilder(
@@ -190,9 +186,10 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             await using var cmd = BuildCommand(conn, sql, parms);
             await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
             var items = new List<T>();
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                items.Add(MapReader(reader));
+                items.Add(map(reader));
             return items;
         }).ConfigureAwait(false);
 
@@ -232,7 +229,9 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             await using var cmd = BuildCommand(conn, sql, parms);
             await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapReader(reader) : null;
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+            return map(reader);
         }).ConfigureAwait(false);
 
         sw.Stop();
@@ -286,9 +285,10 @@ public sealed class QueryBuilder<T> where T : class, new()
             var (dSql, dParms) = BuildSelectSql(page, pageSize);
             await using var cmd = BuildCommand(conn, dSql, dParms);
             await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
             var entities = new List<T>();
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                entities.Add(MapReader(reader));
+                entities.Add(map(reader));
 
             return (entities, totalCount);
         }).ConfigureAwait(false);
@@ -498,31 +498,6 @@ public sealed class QueryBuilder<T> where T : class, new()
         return cmd;
     }
 
-    private static T MapReader(MySqlDataReader reader)
-    {
-        var entity = new T();
-        var props = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)
-            .ToArray();
-
-        for (int i = 0; i < reader.FieldCount; i++)
-        {
-            var colName = reader.GetName(i);
-            var prop = props.FirstOrDefault(p =>
-            {
-                var attr = p.GetCustomAttribute<ColumnAttribute>();
-                var mapped = !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : p.Name;
-                return string.Equals(mapped, colName, StringComparison.OrdinalIgnoreCase);
-            });
-
-            if (prop is null || !prop.CanWrite) continue;
-            var raw = reader.IsDBNull(i) ? null : reader.GetValue(i);
-            prop.SetValue(entity, TypeConverter.FromDbValue(raw, prop.PropertyType));
-        }
-
-        return entity;
-    }
-
     private async Task<Result<TResult>> ExecuteAggregateAsync<TResult>(
         string func,
         Expression<Func<T, TResult>> selector,
@@ -553,11 +528,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
-    private static string GetTableName()
-    {
-        var attr = typeof(T).GetCustomAttribute<TableAttribute>();
-        return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : typeof(T).Name;
-    }
+    private static string GetTableName() => EntityMetadata<T>.TableName;
 
     private static string GetColumnName(MemberInfo member)
     {
@@ -565,31 +536,13 @@ public sealed class QueryBuilder<T> where T : class, new()
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : member.Name;
     }
 
-    /// <summary>
-    /// Throws ArgumentException if <paramref name="column"/> is not a known column on <typeparamref name="T"/>.
-    /// </summary>
-    private static void EnsureValidColumn(string column)
-    {
-        if (string.IsNullOrEmpty(column))
-            throw new ArgumentException("Column name cannot be null or empty.", nameof(column));
-
-        var allowed = _cachedColumnNames.GetOrAdd(typeof(T), t =>
-        {
-            var names = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                .Where(p => p.CanRead && p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)
-                .Select(GetColumnName);
-            return new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
-        });
-
-        if (!allowed.Contains(column))
-            throw new ArgumentException(
-                $"Column '{column}' is not defined on entity '{typeof(T).Name}'.", nameof(column));
-    }
+    private static void EnsureValidColumn(string column) =>
+        _ = EntityMetadata<T>.RequireColumn(column);
 
     private void LogSlowQuery(string sql, long elapsedMs)
     {
         if (elapsedMs >= _slowQueryThresholdMs)
-            _logger?.Warning($"[MySQL2] Slow query ({elapsedMs}ms): {sql}");
+            _logger?.Warning($"[MySQL2] [{_connectionId}] Slow query ({elapsedMs}ms): {sql}");
     }
 
     private void LogQuery(string sql)
