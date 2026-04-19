@@ -7,12 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>3.3.1</Version>
+    <Version>4.0.0</Version>
     <PackageId>CodeLogic.Mail</PackageId>
     <PackageTags>smtp;imap;email;template</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
-    <Description>SMTP/IMAP email library with template engine for CodeLogic 3 applications</Description>
+    <Description>SMTP/IMAP email library with template engine for CodeLogic 4 applications</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MailKit" Version="4.*" />

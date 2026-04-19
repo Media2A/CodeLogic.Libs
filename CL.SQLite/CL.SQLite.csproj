@@ -7,12 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>3.3.1</Version>
+    <Version>4.0.0</Version>
     <PackageId>CodeLogic.SQLite</PackageId>
     <PackageTags>sqlite;database;orm;linq</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
-    <Description>SQLite database library with connection pooling, LINQ queries, and table sync for CodeLogic 3</Description>
+    <Description>SQLite database library with connection pooling, LINQ queries, and table sync for CodeLogic 4</Description>
     <NoWarn>CS1591</NoWarn>
   </PropertyGroup>
   <ItemGroup>

@@ -4,13 +4,13 @@ _layout: landing
 
 # CodeLogic Libraries
 
-**CodeLogic Libraries** (`CL.*`) is a suite of 12 production-ready .NET 10 libraries designed to integrate seamlessly with the [CodeLogic 3 framework](https://media2a.github.io/CodeLogic). Each library is a self-contained CodeLogic library that manages its own configuration, lifecycle, and health checks.
+**CodeLogic Libraries** (`CL.*`) is a suite of 12 production-ready .NET 10 libraries designed to integrate seamlessly with the [CodeLogic 4 framework](https://media2a.github.io/CodeLogic). Each library is a self-contained CodeLogic library that manages its own configuration, lifecycle, and health checks.
 
 ---
 
 ## What are CL.* Libraries?
 
-Each `CL.*` package is a `ILibrary` implementation that plugs directly into the CodeLogic 3 boot sequence. You register it with `Libraries.LoadAsync<T>()`, configure it via the auto-generated JSON config file, and the framework handles initialization, dependency ordering, and graceful shutdown.
+Each `CL.*` package is a `ILibrary` implementation that plugs directly into the CodeLogic 4 boot sequence. You register it with `Libraries.LoadAsync<T>()`, configure it via the auto-generated JSON config file, and the framework handles initialization, dependency ordering, and graceful shutdown.
 
 ```csharp
 // Program.cs

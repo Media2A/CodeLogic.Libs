@@ -10,7 +10,7 @@
     <Company>Media2A</Company>
     <Product>CL.TwoFactorAuth</Product>
     <Description>TOTP 2FA with QR code generation for CodeLogic3</Description>
-    <Version>3.3.1</Version>
+    <Version>4.0.0</Version>
     <PackageId>CodeLogic.TwoFactorAuth</PackageId>
     <PackageTags>2fa;totp;qrcode;authentication</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>

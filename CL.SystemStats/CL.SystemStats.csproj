@@ -12,8 +12,8 @@
     <Authors>Media2A</Authors>
     <Company>Media2A</Company>
     <Product>CL.SystemStats</Product>
-    <Description>Cross-platform system statistics (CPU, memory, processes, uptime) for CodeLogic 3 — Windows and Linux via /proc</Description>
-    <Version>3.3.1</Version>
+    <Description>Cross-platform system statistics (CPU, memory, processes, uptime) for CodeLogic 4 — Windows and Linux via /proc</Description>
+    <Version>4.0.0</Version>
     <PackageId>CodeLogic.SystemStats</PackageId>
     <PackageTags>cpu;memory;process;monitoring;cross-platform</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>

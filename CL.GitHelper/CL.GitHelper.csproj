@@ -7,12 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>3.3.1</Version>
+    <Version>4.0.0</Version>
     <PackageId>CodeLogic.GitHelper</PackageId>
     <PackageTags>git;repository;libgit2</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
-    <Description>Git repository management library for CodeLogic 3 applications</Description>
+    <Description>Git repository management library for CodeLogic 4 applications</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="LibGit2Sharp" Version="0.30.*" />

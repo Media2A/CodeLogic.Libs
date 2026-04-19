@@ -1,12 +1,12 @@
 # Getting Started with CL.* Libraries
 
-This guide explains how to reference a `CL.*` library, register it with the CodeLogic 3 framework, configure it, and use it from your application.
+This guide explains how to reference a `CL.*` library, register it with the CodeLogic 4 framework, configure it, and use it from your application.
 
 ---
 
 ## Prerequisites
 
-- [CodeLogic 3 framework](https://media2a.github.io/CodeLogic) set up in your project
+- [CodeLogic 4 framework](https://media2a.github.io/CodeLogic) set up in your project
 - .NET 10 SDK
 
 ---

@@ -8,12 +8,12 @@
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>CS1591</NoWarn>
-    <Version>3.3.1</Version>
+    <Version>4.0.0</Version>
     <PackageId>CodeLogic.PostgreSQL</PackageId>
     <PackageTags>postgresql;database;orm;linq</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
-    <Description>PostgreSQL database access with multi-database support, LINQ query builder, table sync, and migrations for CodeLogic 3 applications</Description>
+    <Description>PostgreSQL database access with multi-database support, LINQ query builder, table sync, and migrations for CodeLogic 4 applications</Description>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Npgsql" Version="9.*" />

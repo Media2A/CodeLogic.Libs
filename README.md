@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
 </p>
 
-<p align="center">Production-ready .NET 10 library integrations for <a href="https://github.com/Media2A/CodeLogic">CodeLogic 3</a>. Each library is a self-contained <code>ILibrary</code> implementation with auto-generated configuration, health checks, and lifecycle management.</p>
+<p align="center">Production-ready .NET 10 library integrations for <a href="https://github.com/Media2A/CodeLogic">CodeLogic 4</a>. Each library is a self-contained <code>ILibrary</code> implementation with auto-generated configuration, health checks, and lifecycle management.</p>
 
 ## Libraries
 
@@ -27,7 +27,7 @@
 | [CodeLogic.GitHelper](CL.GitHelper/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.GitHelper?label=)](https://www.nuget.org/packages/CodeLogic.GitHelper) | Git repository management via libgit2 |
 | [CodeLogic.TwoFactorAuth](CL.TwoFactorAuth/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.TwoFactorAuth?label=)](https://www.nuget.org/packages/CodeLogic.TwoFactorAuth) | TOTP 2FA with QR code generation |
 
-All packages target **.NET 10** and depend on **CodeLogic 3.x**.
+All packages target **.NET 10** and depend on **CodeLogic 3.x or 4.x** (range `[3.2.0, 5.0.0)`).
 
 ## Quick Start
 
@@ -124,7 +124,7 @@ var repo = mysql.GetRepository<UserRecord>();
 
 ## Requirements
 
-- [CodeLogic 3.x](https://github.com/Media2A/CodeLogic)
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
 - .NET 10 SDK or later
 
 ## License
