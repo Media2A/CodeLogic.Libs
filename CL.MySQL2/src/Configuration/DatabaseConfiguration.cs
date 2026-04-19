@@ -169,6 +169,69 @@ public sealed class MySqlDatabaseConfig
     public int SlowQueryThresholdMs { get; set; } = 1000;
 
     /// <summary>
+    /// Per-database override for the global cache switch. Null = inherit global
+    /// <see cref="CacheConfiguration.Enabled"/>; true/false forces on/off for this DB.
+    /// </summary>
+    [ConfigField(Label = "Cache Enabled Override",
+        Description = "Override the global cache switch for this database only. Leave empty to inherit.",
+        Group = "Cache", Order = 70, Collapsed = true)]
+    public bool? CacheEnabledOverride { get; set; } = null;
+
+    /// <summary>
+    /// Default per-query timeout in milliseconds. Maps to MySqlConnector's command timeout
+    /// when it's finer than <see cref="CommandTimeout"/> (which is in seconds).
+    /// </summary>
+    [ConfigField(Label = "Query Timeout (ms)", Min = 0,
+        Description = "Default per-query timeout in ms. Used when no .WithTimeout() override is set.",
+        Group = "Timeouts", Order = 32, Collapsed = true)]
+    public int QueryTimeoutMs { get; set; } = 30_000;
+
+    /// <summary>Chunk size used by <c>InsertManyAsync</c> when emitting batched INSERTs.</summary>
+    [ConfigField(Label = "Max Batch Insert Size", Min = 1, Max = 10_000,
+        Description = "Number of rows per batched INSERT statement.",
+        Group = "Performance", Order = 80, Collapsed = true)]
+    public int MaxBatchInsertSize { get; set; } = 500;
+
+    /// <summary>Maximum number of values allowed in a parameterized IN (...) clause.</summary>
+    [ConfigField(Label = "Max IN-Clause Values", Min = 1, Max = 65_000,
+        Description = "Above this, IN-clause queries auto-chunk or fall back to a temp table.",
+        Group = "Performance", Order = 81, Collapsed = true)]
+    public int MaxInClauseValues { get; set; } = 1_000;
+
+    /// <summary>Per-connection prepared statement cache size.</summary>
+    [ConfigField(Label = "Prepared Statement Cache Size", Min = 0,
+        Description = "Number of prepared statements kept per connection.",
+        Group = "Performance", Order = 82, Collapsed = true)]
+    public int PreparedStatementCacheSize { get; set; } = 256;
+
+    /// <summary>
+    /// Warn when the same query template fires this many times inside a single request
+    /// scope (AsyncLocal). 0 disables the detector.
+    /// </summary>
+    [ConfigField(Label = "N+1 Detector Threshold", Min = 0,
+        Description = "Warn when the same query template fires N times in one request scope. 0 disables.",
+        Group = "Observability", Order = 90, Collapsed = true)]
+    public int N1DetectorThreshold { get; set; } = 0;
+
+    /// <summary>
+    /// When a slow query is detected, automatically capture <c>EXPLAIN FORMAT=JSON</c>
+    /// and attach it to the <c>SlowQueryEvent</c>.
+    /// </summary>
+    [ConfigField(Label = "Capture EXPLAIN On Slow",
+        Description = "On slow query, run EXPLAIN FORMAT=JSON and attach to the event.",
+        Group = "Observability", Order = 91, Collapsed = true)]
+    public bool CaptureExplainOnSlowQuery { get; set; } = true;
+
+    /// <summary>
+    /// Default VARCHAR length when a string property has no explicit
+    /// <c>[Column(Size = …)]</c>. Default: 255.
+    /// </summary>
+    [ConfigField(Label = "Default String Size", Min = 1, Max = 65_535,
+        Description = "Default VARCHAR length for string columns without an explicit Size.",
+        Group = "Schema Sync", Order = 63, Collapsed = true)]
+    public int DefaultStringSize { get; set; } = 255;
+
+    /// <summary>
     /// Builds and returns the MySqlConnector connection string from the current configuration.
     /// </summary>
     public string BuildConnectionString()

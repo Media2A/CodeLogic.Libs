@@ -26,7 +26,7 @@ internal static class EntityMetadata<T> where T : class
     /// <summary>
     /// Compiled row materializer: reads a <see cref="MySqlDataReader"/> positioned on a row
     /// and returns a fully hydrated <typeparamref name="T"/>. Uses column ordinals resolved
-    /// once per query (see <see cref="Materializer.CompileForReader"/>).
+    /// once per query (see <see cref="Materializer{T}.CompileForReader"/>).
     /// </summary>
     public static readonly Materializer<T> Materializer;
 

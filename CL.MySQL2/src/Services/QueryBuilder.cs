@@ -164,7 +164,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             if (ShouldCache)
             {
-                var cacheKey = QueryCache.BuildCacheKey(_connectionId, sql, parms);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
                 return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteToList(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
             }
 
@@ -207,7 +207,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             if (ShouldCache)
             {
-                var cacheKey = QueryCache.BuildCacheKey(_connectionId, sql, parms);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
                 return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteFirstOrDefault(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
             }
 
@@ -256,7 +256,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             if (ShouldCache)
             {
-                var cacheKey = QueryCache.BuildCacheKey(_connectionId, dataSql, parms);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), dataSql, parms);
                 return await QueryCache.GetOrSetAsync(cacheKey, tblName,
                     () => ExecutePagedList(countSql, page, pageSize, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
             }
@@ -316,7 +316,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             if (ShouldCache)
             {
-                var cacheKey = QueryCache.BuildCacheKey(_connectionId, sql, parms);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
                 return await QueryCache.GetOrSetAsync(cacheKey, tblName, () => ExecuteCount(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
             }
 

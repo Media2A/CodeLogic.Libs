@@ -50,6 +50,7 @@ public sealed class MySQL2Library : ILibrary
         context.Logger.Info($"Configuring {Manifest.Name} v{Manifest.Version}");
 
         context.Configuration.Register<DatabaseConfiguration>("mysql");
+        context.Configuration.Register<CacheConfiguration>("mysql.cache");
         context.Localization.Register<MySQL2Strings>();
 
         return Task.CompletedTask;
@@ -121,6 +122,13 @@ public sealed class MySQL2Library : ILibrary
                     kvp.Key));
             }
         }
+
+        // Apply cache configuration so queries see the right knobs from the first call.
+        var cacheConfig = context.Configuration.Get<CacheConfiguration>();
+        QueryCache.Configure(
+            enabled: cacheConfig.Enabled,
+            maxEntries: cacheConfig.MaxEntries,
+            timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds);
 
         context.Logger.Info(_strings?.LibraryInitialized ?? "MySQL2 library initialized");
     }

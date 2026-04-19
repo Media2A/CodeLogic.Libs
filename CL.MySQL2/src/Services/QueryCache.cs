@@ -7,148 +7,135 @@ using CL.MySQL2.Models;
 namespace CL.MySQL2.Services;
 
 /// <summary>
-/// Process-local, thread-safe query result cache with TTL-based expiry and table-level
-/// invalidation. Opt-in via <see cref="QueryBuilder{T}.WithCache"/> — queries without it
-/// execute exactly as before with zero overhead.
-/// <para>
-/// Also usable as a standalone generic cache via <see cref="GetOrSetAsync{T}"/> for any
-/// expensive computation keyed by a string.
-/// </para>
+/// Facade over <see cref="ICacheStore"/> providing query-result caching with two key
+/// properties:
+/// <list type="bullet">
+///   <item><b>Time-quantized keys</b> — DateTime parameters derived from <c>UtcNow</c>
+///     are rounded to a configurable window before hashing, so
+///     <c>.Where(x =&gt; x.At &gt;= UtcNow.AddDays(-30))</c> no longer produces a unique key per call.</item>
+///   <item><b>Table-version invalidation</b> — mutations bump a per-table version counter
+///     that participates in the cache key; prior entries simply become un-hittable and
+///     are swept on eviction. No need to track-and-evict individual keys.</item>
+/// </list>
+/// Keeps a static facade so existing callers (<c>QueryBuilder</c>, <c>Repository</c>)
+/// compile unchanged.
 /// </summary>
 public static class QueryCache
 {
-    private static readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
-    private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _tableIndex = new();
-    private static int _maxEntries = 1000;
-    private static int _evicting;
+    private static ICacheStore _store = new InProcessCacheStore();
+    private static readonly ConcurrentDictionary<string, long> _tableVersions =
+        new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Total number of cached entries.</summary>
-    public static int Count => _cache.Count;
+    /// <summary>How far from <c>UtcNow</c> a DateTime parameter must be to qualify for
+    /// quantization. 30 days covers typical "last N days" windows without catching
+    /// far-future / far-past absolute dates.</summary>
+    private static readonly TimeSpan QuantizeRelevance = TimeSpan.FromDays(365);
 
-    /// <summary>Number of tracked tables with at least one cached entry.</summary>
-    public static int TableCount => _tableIndex.Count;
+    /// <summary>Current quantization window. 0 = off.</summary>
+    internal static int TimeQuantizeSeconds { get; private set; } = 60;
 
-    /// <summary>Number of cached entries associated with a specific table.</summary>
-    public static int CountForTable(string tableName) =>
-        _tableIndex.TryGetValue(tableName, out var keys) ? keys.Count : 0;
+    /// <summary>Whether the cache is enabled globally.</summary>
+    internal static bool Enabled { get; private set; } = true;
 
-    /// <summary>Returns the names of all tables that currently have cached entries.</summary>
-    public static IReadOnlyCollection<string> CachedTables =>
-        _tableIndex.Keys.ToArray();
+    /// <summary>Replace the underlying store (e.g. with a Redis adapter).</summary>
+    public static void UseStore(ICacheStore store) =>
+        _store = store ?? throw new ArgumentNullException(nameof(store));
 
-    /// <summary>Set the maximum number of cache entries (default 1000). Soft cap — enforced lazily on add.</summary>
-    public static void Configure(int maxEntries) => _maxEntries = Math.Max(1, maxEntries);
+    /// <summary>Apply runtime configuration from <see cref="Configuration.CacheConfiguration"/>.</summary>
+    public static void Configure(bool enabled, int maxEntries, int timeQuantizeSeconds)
+    {
+        Enabled = enabled;
+        TimeQuantizeSeconds = Math.Max(0, timeQuantizeSeconds);
+        if (_store is InProcessCacheStore inProc) inProc.Configure(maxEntries);
+    }
+
+    /// <summary>Total cached entries (best-effort).</summary>
+    public static int Count => _store.Count;
 
     /// <summary>
-    /// Generic cache-aside helper. Returns the cached value if fresh; otherwise runs
-    /// <paramref name="factory"/>, stores the result, and returns it.
+    /// Cache-aside helper. Returns the cached value if fresh; otherwise runs <paramref name="factory"/>,
+    /// stores the result, and returns it.
     /// </summary>
-    /// <typeparam name="T">The result type (List, PagedResult, long, any object).</typeparam>
-    /// <param name="cacheKey">Unique key for this query/computation (use <see cref="BuildCacheKey"/> for SQL queries).</param>
-    /// <param name="tableName">Logical group name for invalidation (e.g. the MySQL table name).</param>
-    /// <param name="factory">The async function that produces the value on cache miss.</param>
-    /// <param name="ttl">How long the cached value stays fresh.</param>
     public static async Task<T> GetOrSetAsync<T>(
         string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl)
     {
-        if (_cache.TryGetValue(cacheKey, out var entry) && !entry.IsExpired)
-            return (T)entry.Value!;
+        if (!Enabled) return await factory().ConfigureAwait(false);
+
+        var (found, value) = await _store.TryGetAsync(cacheKey).ConfigureAwait(false);
+        if (found) return (T)value!;
 
         var result = await factory().ConfigureAwait(false);
-
-        _cache[cacheKey] = new CacheEntry(result, DateTime.UtcNow, ttl, tableName);
-
-        var tableKeys = _tableIndex.GetOrAdd(tableName, _ => new ConcurrentDictionary<string, byte>());
-        tableKeys[cacheKey] = 0;
-
-        if (_cache.Count > _maxEntries) EvictExpiredAndOldest();
-
+        if (result is not null)
+            await _store.SetAsync(cacheKey, result, ttl, tableName).ConfigureAwait(false);
         return result;
     }
 
-    /// <summary>Evict all cached entries associated with the given table name.</summary>
-    public static void Invalidate(string tableName)
-    {
-        if (!_tableIndex.TryRemove(tableName, out var keys)) return;
-        foreach (var key in keys.Keys)
-            _cache.TryRemove(key, out _);
-    }
+    /// <summary>Invalidate all cached entries for the given table.</summary>
+    public static void Invalidate(string tableName) =>
+        _tableVersions.AddOrUpdate(tableName, 1L, (_, v) => v + 1);
 
-    /// <summary>Evict all cached entries for the table associated with entity type <typeparamref name="T"/>.</summary>
+    /// <summary>Invalidate for the table behind entity type <typeparamref name="T"/>.</summary>
     public static void Invalidate<T>() where T : class => Invalidate(ResolveTableName<T>());
 
-    /// <summary>Evict everything.</summary>
+    /// <summary>Clear the entire cache (admin / tests).</summary>
     public static void Clear()
     {
-        _cache.Clear();
-        _tableIndex.Clear();
+        _store.Clear();
+        _tableVersions.Clear();
     }
 
     /// <summary>
-    /// Build a deterministic cache key from a SQL query and its parameters.
-    /// Same SQL + same param values + same connectionId → same key.
+    /// Build a deterministic cache key from a SQL query, its parameters, and the table it
+    /// reads from. DateTime parameters close to "now" are quantized to the configured
+    /// window. The table's current version is mixed in so invalidation is free.
     /// </summary>
-    internal static string BuildCacheKey(string connectionId, string sql, Dictionary<string, object?> parameters)
+    internal static string BuildCacheKey(
+        string connectionId,
+        string tableName,
+        string sql,
+        Dictionary<string, object?> parameters)
     {
+        var version = _tableVersions.TryGetValue(tableName, out var v) ? v : 0L;
+
         var sb = new StringBuilder();
-        sb.Append(connectionId).Append('|').Append(sql);
+        sb.Append(connectionId).Append('|').Append(tableName).Append('|')
+          .Append(version).Append('|').Append(sql);
+
         foreach (var kv in parameters.OrderBy(p => p.Key, StringComparer.Ordinal))
-            sb.Append('|').Append(kv.Key).Append('=').Append(kv.Value?.ToString() ?? "NULL");
+        {
+            sb.Append('|').Append(kv.Key).Append('=');
+            sb.Append(StringifyForKey(kv.Value));
+        }
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
         return Convert.ToHexString(hash);
+    }
+
+    private static string StringifyForKey(object? value)
+    {
+        if (value is null) return "NULL";
+
+        // DateTime near now → quantize to the configured window so that
+        // `Where(x => x.At >= DateTime.UtcNow.AddDays(-30))` produces a stable key
+        // across back-to-back calls. See NEWSHAPE.md §Cache key.
+        if (value is DateTime dt && TimeQuantizeSeconds > 0)
+        {
+            var delta = DateTime.UtcNow - dt;
+            if (delta.Duration() < QuantizeRelevance)
+            {
+                var q = TimeQuantizeSeconds;
+                var ticksPerBucket = TimeSpan.FromSeconds(q).Ticks;
+                var rounded = dt.Ticks - (dt.Ticks % ticksPerBucket);
+                return "DTQ:" + new DateTime(rounded, dt.Kind).ToString("O");
+            }
+        }
+
+        return value.ToString() ?? "NULL";
     }
 
     internal static string ResolveTableName<T>() where T : class
     {
         var attr = typeof(T).GetCustomAttribute<TableAttribute>();
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : typeof(T).Name;
-    }
-
-    private static void EvictExpiredAndOldest()
-    {
-        // Only one thread evicts at a time; others just skip.
-        if (Interlocked.CompareExchange(ref _evicting, 1, 0) != 0) return;
-
-        try
-        {
-            // Pass 1: purge expired
-            var expired = _cache.Where(kv => kv.Value.IsExpired).Select(kv => kv.Key).ToList();
-            foreach (var key in expired)
-            {
-                if (_cache.TryRemove(key, out var entry))
-                {
-                    if (_tableIndex.TryGetValue(entry.TableName, out var tbl))
-                        tbl.TryRemove(key, out _);
-                }
-            }
-
-            if (_cache.Count <= _maxEntries) return;
-
-            // Pass 2: evict oldest 25% by CachedAt
-            var toRemove = _cache
-                .OrderBy(kv => kv.Value.CachedAt)
-                .Take(_cache.Count / 4)
-                .Select(kv => kv.Key)
-                .ToList();
-
-            foreach (var key in toRemove)
-            {
-                if (_cache.TryRemove(key, out var entry))
-                {
-                    if (_tableIndex.TryGetValue(entry.TableName, out var tbl))
-                        tbl.TryRemove(key, out _);
-                }
-            }
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _evicting, 0);
-        }
-    }
-
-    private sealed record CacheEntry(object? Value, DateTime CachedAt, TimeSpan Ttl, string TableName)
-    {
-        public bool IsExpired => DateTime.UtcNow - CachedAt > Ttl;
     }
 }
