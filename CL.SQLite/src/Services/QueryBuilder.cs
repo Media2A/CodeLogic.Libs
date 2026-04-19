@@ -37,6 +37,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// </summary>
     /// <param name="connectionManager">The connection manager used to obtain and release database connections.</param>
     /// <param name="logger">Optional logger for debug and warning output.</param>
+    /// <param name="connectionId">Named SQLite connection to use (as configured in <c>config.sqlite.json</c>).</param>
     /// <param name="slowQueryThresholdMs">Queries exceeding this threshold in milliseconds are logged as warnings.</param>
     public QueryBuilder(
         ConnectionManager connectionManager,

@@ -49,6 +49,7 @@ public sealed class TableSyncService
     /// Indexes declared via attributes are also created.
     /// </summary>
     /// <typeparam name="T">The entity type whose table should be synchronized.</typeparam>
+    /// <param name="connectionId">Named SQLite connection to sync against.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="Result{T}"/> containing a <see cref="TableSyncResult"/> describing what was done.</returns>
     public async Task<Result<TableSyncResult>> SyncTableAsync<T>(
@@ -154,6 +155,7 @@ public sealed class TableSyncService
     /// Synchronizes the database tables for a collection of entity types.
     /// </summary>
     /// <param name="modelTypes">The entity types whose tables should be synchronized.</param>
+    /// <param name="connectionId">Named SQLite connection to sync against.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>
     /// A dictionary keyed by table name, where each value is the <see cref="Result{T}"/> of that table's sync.
@@ -196,6 +198,7 @@ public sealed class TableSyncService
     /// <param name="includeDerived">
     /// When <c>true</c>, also includes types in sub-namespaces that start with <paramref name="namespaceName"/>.
     /// </param>
+    /// <param name="connectionId">Named SQLite connection to sync against.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>
     /// A dictionary keyed by table name, where each value is the <see cref="Result{T}"/> of that table's sync.
