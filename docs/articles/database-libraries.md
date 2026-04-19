@@ -70,74 +70,32 @@ var results = await sqlite.GetQueryBuilder<User>("Default")
 
 ## CL.MySQL2
 
-MySQL library with repository access, query building, schema sync, and health checks.
-
-### Registration
+The most fully-featured of the three. Typed LINQ translated to SQL, compiled row
+materializers, SQL-side aggregation, working query cache, covering indexes, and
+attribute-driven retention.
 
 ```csharp
 await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
-```
 
-### Configuration (`config.mysql.json`)
-
-```json
-{
-  "Databases": {
-    "Default": {
-      "Enabled": true,
-      "Host": "localhost",
-      "Port": 3306,
-      "Database": "myapp",
-      "Username": "app",
-      "Password": "secret",
-      "EnablePooling": true,
-      "MinPoolSize": 1,
-      "MaxPoolSize": 20,
-      "ConnectionTimeout": 30,
-      "CommandTimeout": 30
-    },
-    "reporting": {
-      "Enabled": true,
-      "Host": "replica.internal",
-      "Port": 3306,
-      "Database": "myapp_reporting",
-      "Username": "ro_app",
-      "Password": "secret",
-      "EnablePooling": true,
-      "MinPoolSize": 1,
-      "MaxPoolSize": 10,
-      "ConnectionTimeout": 30,
-      "CommandTimeout": 30
-    }
-  }
-}
-```
-
-### Repository Usage
-
-```csharp
 var mysql = context.GetLibrary<CL.MySQL2.MySQL2Library>();
-var orderRepo = mysql.GetRepository<Order>();
-var reportingRepo = mysql.GetRepository<OrderReport>("reporting");
 
-var pendingOrders = await orderRepo.FindAsync(o => o.Status == "Pending");
-```
-
-### Query Builder
-
-```csharp
-var results = await mysql.Query<Order>()
-    .Where(o => o.Status == "Completed")
-    .OrderByDescending(o => o.Id)
-    .Limit(50)
+// Heatmap: GROUP BY (dow, hour) on the server, returns ~168 rows not 100k.
+var cells = await mysql.Query<SnapshotRecord>()
+    .Where(s => s.SnapshotUtc >= since)
+    .WithCache(TimeSpan.FromMinutes(30))
+    .GroupBy(s => new { Dow  = SqlFn.DayOfWeek(s.SnapshotUtc),
+                        Hour = SqlFn.Hour(s.SnapshotUtc) })
+    .Select(g => new HeatmapCell(g.Key.Dow, g.Key.Hour,
+                                 g.Average(x => (double)x.PlayerCount)))
     .ToListAsync();
 ```
 
-### Table Sync
+**Dedicated deep-dive pages:**
 
-```csharp
-await mysql.SyncTableAsync<User>();
-```
+- [MySQL2 — Overview & Quick Start](mysql2.md) — setup, config, repository, transactions
+- [MySQL2 — Query Builder](mysql2-queries.md) — filtering, projection, aggregation, `SqlFn`, joins, bulk writes
+- [MySQL2 — Caching & Performance](mysql2-performance.md) — how the cache works, benchmark recipe, slow-query hunting, EXPLAIN
+- [MySQL2 — Schema & Migrations](mysql2-schema.md) — attributes, indexes, retention, sync levels, backups
 
 ---
 

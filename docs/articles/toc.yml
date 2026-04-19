@@ -2,6 +2,15 @@
   href: getting-started.md
 - name: Database Libraries
   href: database-libraries.md
+  items:
+    - name: MySQL2 — Overview
+      href: mysql2.md
+    - name: MySQL2 — Query Builder
+      href: mysql2-queries.md
+    - name: MySQL2 — Performance & Caching
+      href: mysql2-performance.md
+    - name: MySQL2 — Schema & Migrations
+      href: mysql2-schema.md
 - name: Mail
   href: mail.md
 - name: Storage
