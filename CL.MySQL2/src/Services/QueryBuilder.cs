@@ -425,6 +425,106 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Bulk-update matching rows with a typed setter expression. Emits a single
+    /// <c>UPDATE … SET … WHERE …</c> statement; no rows are fetched client-side.
+    /// <para>
+    /// Example:
+    /// <code>
+    /// await mysql.Query&lt;Ticket&gt;()
+    ///     .Where(t =&gt; t.Status == "open" &amp;&amp; t.CreatedUtc &lt; cutoff)
+    ///     .UpdateAsync(t =&gt; new Ticket { Status = "stale", ReviewedUtc = now });
+    /// </code>
+    /// </para>
+    /// Each <c>new T { Prop = value }</c> binding maps to one <c>SET col = value</c>.
+    /// Values may reference captured variables (parameterized) or other columns of the
+    /// same row (<c>new T { Counter = t.Counter + 1 }</c>).
+    /// </summary>
+    public async Task<Result<int>> UpdateAsync(
+        Expression<Func<T, T>> setExpression,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (setExpression.Body is not MemberInitExpression mi)
+                throw new ArgumentException(
+                    "UpdateAsync setter must be a member-init expression like x => new T { Prop = value }.",
+                    nameof(setExpression));
+
+            var rowParam = setExpression.Parameters[0];
+            var tableName = GetTableName();
+            var (whereClause, whereParms) = BuildWhereSql();
+            var allParms = new Dictionary<string, object?>(whereParms);
+
+            var sets = new List<string>();
+            var idx = 0;
+            foreach (var binding in mi.Bindings)
+            {
+                if (binding is not MemberAssignment ma) continue;
+
+                var colName = EntityMetadata<T>.TryResolve(ma.Member.Name)?.ColumnName
+                              ?? throw new ArgumentException(
+                                  $"Property '{ma.Member.Name}' is not mapped on '{typeof(T).Name}'.");
+
+                // If the value only depends on captured state (closure), bind as a parameter.
+                // Otherwise translate it as a column expression so `Counter = t.Counter + 1`
+                // becomes `counter = counter + 1`.
+                if (ReferencesRowParameter(ma.Expression, rowParam))
+                {
+                    var (sql, _) = SqlExpressionTranslator.Translate(ma.Expression, rowParam, null, null);
+                    sets.Add($"`{colName}` = {sql}");
+                }
+                else
+                {
+                    var paramName = $"@upd_{idx++}";
+                    var value = Expression.Lambda(ma.Expression).Compile().DynamicInvoke();
+                    allParms[paramName] = TypeConverter.ToDbValue(value);
+                    sets.Add($"`{colName}` = {paramName}");
+                }
+            }
+
+            if (sets.Count == 0)
+                return Result<int>.Success(0);
+
+            var sql_full = $"UPDATE `{tableName}` SET {string.Join(", ", sets)}{whereClause}";
+            LogQuery(sql_full);
+
+            var affected = await ExecuteAsync(async conn =>
+            {
+                await using var cmd = BuildCommand(conn, sql_full, allParms);
+                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            QueryCache.Invalidate(tableName);
+            return Result<int>.Success(affected);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync (typed) failed: {ex.Message}", ex);
+            return Result<int>.Failure(Error.FromException(ex, "mysql.update_failed"));
+        }
+    }
+
+    private static bool ReferencesRowParameter(Expression expr, ParameterExpression row)
+    {
+        var found = false;
+        var walker = new RowParamWalker(row, () => found = true);
+        walker.Visit(expr);
+        return found;
+    }
+
+    private sealed class RowParamWalker : ExpressionVisitor
+    {
+        private readonly ParameterExpression _row;
+        private readonly Action _onHit;
+        public RowParamWalker(ParameterExpression row, Action onHit) { _row = row; _onHit = onHit; }
+        protected override Expression VisitParameter(ParameterExpression node)
+        {
+            if (node == _row) _onHit();
+            return base.VisitParameter(node);
+        }
+    }
+
     public async Task<Result<int>> UpdateAsync(Dictionary<string, object?> updates, CancellationToken ct = default)
     {
         try

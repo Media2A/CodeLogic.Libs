@@ -40,6 +40,8 @@ public sealed class MySQL2Library : ILibrary
     private TableSyncService? _tableSyncService;
     private MySQL2Strings? _strings;
     private bool _isEnabled;
+    private RetentionWorker? _retentionWorker;
+    private readonly HashSet<Type> _registeredEntities = new();
 
     // ── Phase 1: Configure ────────────────────────────────────────────────────
 
@@ -161,21 +163,29 @@ public sealed class MySQL2Library : ILibrary
             context.Logger.Warning($"[MySQL2] Could not retrieve server info: {ex.Message}");
         }
 
+        // Start the retention worker if any registered entity carries [RetainDays].
+        _retentionWorker = new RetentionWorker(
+            _connectionManager, context.Logger, _registeredEntities);
+        if (_retentionWorker.HasWork) _retentionWorker.Start();
+
         context.Logger.Info(_strings?.LibraryStarted ?? "MySQL2 library started");
     }
 
     // ── Phase 4: Stop ─────────────────────────────────────────────────────────
 
     /// <inheritdoc/>
-    public Task OnStopAsync()
+    public async Task OnStopAsync()
     {
         _context?.Logger.Info($"Stopping {Manifest.Name}");
+
+        if (_retentionWorker is not null)
+            await _retentionWorker.DisposeAsync().ConfigureAwait(false);
+        _retentionWorker = null;
 
         _tableSyncService = null;
         _connectionManager = null;
 
         _context?.Logger.Info(_strings?.LibraryStopped ?? "MySQL2 library stopped");
-        return Task.CompletedTask;
     }
 
     // ── Health check ──────────────────────────────────────────────────────────
@@ -330,12 +340,16 @@ public sealed class MySQL2Library : ILibrary
     }
 
     /// <summary>
-    /// Syncs the table schema for the specified entity type.
+    /// Syncs the table schema for the specified entity type. The type is also registered
+    /// with the library so that entity-level workers (e.g. retention purge) pick it up.
     /// </summary>
     public Task<Result<SyncResult>> SyncTableAsync<T>(
         bool createBackup = true,
         string connectionId = "Default") where T : class
-        => TableSync.SyncTableAsync<T>(createBackup, connectionId);
+    {
+        _registeredEntities.Add(typeof(T));
+        return TableSync.SyncTableAsync<T>(createBackup, connectionId);
+    }
 
     /// <summary>
     /// Tests the MySQL connection for the given connection ID.

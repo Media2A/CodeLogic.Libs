@@ -72,15 +72,6 @@ public enum SortOrder
     Desc
 }
 
-/// <summary>Type of DML operation performed on a record.</summary>
-public enum OperationType
-{
-    Insert,
-    Update,
-    Delete,
-    Select
-}
-
 /// <summary>
 /// Controls how aggressively the table sync service reconciles the live database
 /// schema with entity definitions. Higher levels allow more destructive operations.

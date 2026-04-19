@@ -100,41 +100,53 @@ internal static class TypeConverter
         {
             return Convert.ChangeType(dbValue, underlyingType);
         }
-        catch
+        catch (Exception ex)
         {
-            return dbValue;
+            // Hard fail: silent fallthrough to the raw DB value is a data-corruption trap
+            // (prior behaviour). Surface a helpful message instead so it's obvious which
+            // column and which conversion went wrong.
+            throw new InvalidCastException(
+                $"Cannot convert DB value '{dbValue}' (type {dbValue.GetType().Name}) " +
+                $"to CLR type '{underlyingType.Name}'.", ex);
         }
     }
 
     /// <summary>
-    /// Infers the best-matching <see cref="DataType"/> for a CLR type.
-    /// Used when reflecting entity properties without explicit <see cref="ColumnAttribute"/>.
+    /// Infers a <see cref="ColumnAttribute"/> — not just a DataType — for a CLR type
+    /// lacking an explicit one. This lets us pick the right size for Guid, varchar,
+    /// etc. instead of silently falling back to MySQL defaults.
     /// </summary>
-    public static DataType InferDataType(Type clrType)
+    public static ColumnAttribute InferColumn(Type clrType, int defaultStringSize = 255)
     {
         var type = Nullable.GetUnderlyingType(clrType) ?? clrType;
 
-        if (type == typeof(bool))        return DataType.TinyInt;
-        if (type == typeof(byte))        return DataType.TinyInt;
-        if (type == typeof(sbyte))       return DataType.TinyInt;
-        if (type == typeof(short))       return DataType.SmallInt;
-        if (type == typeof(ushort))      return DataType.SmallInt;
-        if (type == typeof(int))         return DataType.Int;
-        if (type == typeof(uint))        return DataType.Int;
-        if (type == typeof(long))        return DataType.BigInt;
-        if (type == typeof(ulong))       return DataType.BigInt;
-        if (type == typeof(float))       return DataType.Float;
-        if (type == typeof(double))      return DataType.Double;
-        if (type == typeof(decimal))     return DataType.Decimal;
-        if (type == typeof(string))      return DataType.VarChar;
-        if (type == typeof(char))        return DataType.Char;
-        if (type == typeof(DateTime))    return DataType.DateTime;
-        if (type == typeof(DateTimeOffset)) return DataType.DateTime;
-        if (type == typeof(TimeSpan))    return DataType.Time;
-        if (type == typeof(Guid))        return DataType.Char;
-        if (type == typeof(byte[]))      return DataType.Blob;
-        if (type.IsEnum)                 return DataType.Int;
+        if (type == typeof(bool))        return new ColumnAttribute { DataType = DataType.TinyInt };
+        if (type == typeof(byte))        return new ColumnAttribute { DataType = DataType.TinyInt, Unsigned = true };
+        if (type == typeof(sbyte))       return new ColumnAttribute { DataType = DataType.TinyInt };
+        if (type == typeof(short))       return new ColumnAttribute { DataType = DataType.SmallInt };
+        if (type == typeof(ushort))      return new ColumnAttribute { DataType = DataType.SmallInt, Unsigned = true };
+        if (type == typeof(int))         return new ColumnAttribute { DataType = DataType.Int };
+        if (type == typeof(uint))        return new ColumnAttribute { DataType = DataType.Int, Unsigned = true };
+        if (type == typeof(long))        return new ColumnAttribute { DataType = DataType.BigInt };
+        if (type == typeof(ulong))       return new ColumnAttribute { DataType = DataType.BigInt, Unsigned = true };
+        if (type == typeof(float))       return new ColumnAttribute { DataType = DataType.Float };
+        if (type == typeof(double))      return new ColumnAttribute { DataType = DataType.Double };
+        if (type == typeof(decimal))     return new ColumnAttribute { DataType = DataType.Decimal };
+        if (type == typeof(string))      return new ColumnAttribute { DataType = DataType.VarChar, Size = defaultStringSize };
+        if (type == typeof(char))        return new ColumnAttribute { DataType = DataType.Char, Size = 1 };
+        if (type == typeof(DateTime))    return new ColumnAttribute { DataType = DataType.DateTime };
+        if (type == typeof(DateTimeOffset)) return new ColumnAttribute { DataType = DataType.DateTime };
+        if (type == typeof(TimeSpan))    return new ColumnAttribute { DataType = DataType.Time };
+        if (type == typeof(Guid))        return new ColumnAttribute { DataType = DataType.Char, Size = 36 };
+        if (type == typeof(byte[]))     return new ColumnAttribute { DataType = DataType.Blob };
+        if (type.IsEnum)                 return new ColumnAttribute { DataType = DataType.Int };
 
-        return DataType.Text;
+        return new ColumnAttribute { DataType = DataType.Text };
     }
+
+    /// <summary>
+    /// Legacy helper — preserved for SchemaAnalyzer call sites that only need the DataType.
+    /// Prefer <see cref="InferColumn"/> which carries size/unsigned metadata.
+    /// </summary>
+    public static DataType InferDataType(Type clrType) => InferColumn(clrType).DataType;
 }

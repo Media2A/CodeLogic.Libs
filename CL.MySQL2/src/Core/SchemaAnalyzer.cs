@@ -65,6 +65,21 @@ internal sealed class SchemaAnalyzer
             if (colAttr?.Unique == true && colAttr.Primary == false)
                 uniqueIndexes.Add($"  UNIQUE KEY `uq_{tableName}_{colName}` (`{colName}`)");
 
+            // [Index] attributes — modern form supporting covering Include columns.
+            foreach (var idxAttr in prop.GetCustomAttributes<IndexAttribute>())
+            {
+                var idxName = !string.IsNullOrEmpty(idxAttr.Name)
+                    ? idxAttr.Name!
+                    : (idxAttr.Unique ? $"uq_{tableName}_{colName}" : $"idx_{tableName}_{colName}");
+                var includeCols = (idxAttr.Include ?? Array.Empty<string>())
+                    .Select(propName => ResolveColumnName(entityType, propName))
+                    .ToArray();
+                var colList = string.Join(", ",
+                    new[] { $"`{colName}`" }.Concat(includeCols.Select(c => $"`{c}`")));
+                if (idxAttr.Unique) uniqueIndexes.Add($"  UNIQUE KEY `{idxName}` ({colList})");
+                else                indexes.Add($"  INDEX `{idxName}` ({colList})");
+            }
+
             // Foreign key
             var fkAttr = prop.GetCustomAttribute<ForeignKeyAttribute>();
             if (fkAttr is not null)
@@ -189,6 +204,25 @@ internal sealed class SchemaAnalyzer
                 modelIndexNames.Add(idxName);
                 if (!existingIndexes.ContainsKey(idxName))
                     alterStatements.Add($"ALTER TABLE `{tableName}` ADD UNIQUE KEY `{idxName}` (`{colName}`);");
+            }
+
+            // [Index] attributes — same as CREATE TABLE path.
+            foreach (var idxAttr in prop.GetCustomAttributes<IndexAttribute>())
+            {
+                var idxName = !string.IsNullOrEmpty(idxAttr.Name)
+                    ? idxAttr.Name!
+                    : (idxAttr.Unique ? $"uq_{tableName}_{colName}" : $"idx_{tableName}_{colName}");
+                modelIndexNames.Add(idxName);
+                if (!existingIndexes.ContainsKey(idxName))
+                {
+                    var includeCols = (idxAttr.Include ?? Array.Empty<string>())
+                        .Select(propName => ResolveColumnName(entityType, propName))
+                        .ToArray();
+                    var colList = string.Join(", ",
+                        new[] { $"`{colName}`" }.Concat(includeCols.Select(c => $"`{c}`")));
+                    var keyword = idxAttr.Unique ? "UNIQUE KEY" : "INDEX";
+                    alterStatements.Add($"ALTER TABLE `{tableName}` ADD {keyword} `{idxName}` ({colList});");
+                }
             }
 
             // Foreign keys
@@ -527,6 +561,20 @@ internal sealed class SchemaAnalyzer
     };
 
     private static string EscapeString(string s) => s.Replace("'", "''");
+
+    /// <summary>
+    /// Map a property name (as written in <c>[Index(Include = …)]</c>) to the underlying
+    /// column name on the entity type. Missing properties throw a helpful error so
+    /// typos fail at schema-sync time, not silently at query time.
+    /// </summary>
+    private static string ResolveColumnName(Type entityType, string propertyName)
+    {
+        var prop = entityType.GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance)
+            ?? throw new ArgumentException(
+                $"[Index(Include)] refers to '{propertyName}' but type '{entityType.Name}' has no such property.");
+        var attr = prop.GetCustomAttribute<ColumnAttribute>();
+        return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : prop.Name;
+    }
 
     // ── Internal record types ─────────────────────────────────────────────────
 

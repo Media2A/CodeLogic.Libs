@@ -28,51 +28,6 @@ public sealed class PagedResult<T>
     public bool HasNextPage => PageNumber < TotalPages;
 }
 
-/// <summary>
-/// A single WHERE predicate clause for use in dynamic queries.
-/// </summary>
-public sealed class WhereCondition
-{
-    /// <summary>The column name to filter on. Required.</summary>
-    public required string Column { get; init; }
-
-    /// <summary>Comparison operator (e.g., "=", "!=", ">", "LIKE"). Default: "=".</summary>
-    public string Operator { get; init; } = "=";
-
-    /// <summary>The value to compare against.</summary>
-    public object? Value { get; init; }
-
-    /// <summary>Logical connector to the previous clause ("AND" or "OR"). Default: "AND".</summary>
-    public string LogicalOperator { get; init; } = "AND";
-}
-
-/// <summary>
-/// Specifies an ORDER BY clause for a query.
-/// </summary>
-public sealed class OrderByClause
-{
-    /// <summary>The column to sort by. Required.</summary>
-    public required string Column { get; init; }
-
-    /// <summary>Sort direction. Default: Asc.</summary>
-    public SortOrder Order { get; init; } = SortOrder.Asc;
-}
-
-/// <summary>
-/// Specifies a JOIN clause for a query.
-/// </summary>
-public sealed class JoinClause
-{
-    /// <summary>The JOIN type. Default: Inner.</summary>
-    public JoinType Type { get; init; } = JoinType.Inner;
-
-    /// <summary>The table to join. Required.</summary>
-    public required string Table { get; init; }
-
-    /// <summary>The ON condition (e.g., "a.id = b.a_id"). Required.</summary>
-    public required string Condition { get; init; }
-}
-
 /// <summary>SQL JOIN types.</summary>
 public enum JoinType
 {
@@ -80,31 +35,6 @@ public enum JoinType
     Left,
     Right,
     Cross
-}
-
-/// <summary>
-/// Describes a SQL aggregate function applied to a column.
-/// </summary>
-public sealed class AggregateFunction
-{
-    /// <summary>The aggregate type (COUNT, SUM, etc.).</summary>
-    public AggregateType Type { get; init; }
-
-    /// <summary>The column the function is applied to. Required.</summary>
-    public required string Column { get; init; }
-
-    /// <summary>The alias for the result column. Required.</summary>
-    public required string Alias { get; init; }
-}
-
-/// <summary>SQL aggregate function types.</summary>
-public enum AggregateType
-{
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max
 }
 
 /// <summary>

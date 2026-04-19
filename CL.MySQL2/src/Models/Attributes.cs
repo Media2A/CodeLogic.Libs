@@ -125,6 +125,37 @@ public enum ForeignKeyAction
 public sealed class IgnoreAttribute : Attribute { }
 
 /// <summary>
+/// Declares an index on the annotated property. Supersedes <c>Column(Index=true)</c> —
+/// provides control over the name, uniqueness, and covering <c>Include</c> columns.
+/// Can appear multiple times per property for rare multi-index cases.
+/// <para>
+/// <b>Include</b> lets you build a covering index: leaf pages carry the named extra
+/// columns so queries that filter on the indexed column and project only the included
+/// columns can answer from the index alone (no PK lookup per row). Property names map
+/// to their underlying column names via <see cref="ColumnAttribute.Name"/>.
+/// </para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = true)]
+public sealed class IndexAttribute : Attribute
+{
+    /// <summary>
+    /// Optional index name. If null, the sync generates <c>idx_{table}_{column}</c>
+    /// (or <c>uq_{table}_{column}</c> for unique).
+    /// </summary>
+    public string? Name { get; set; }
+
+    /// <summary>Whether this is a UNIQUE index.</summary>
+    public bool Unique { get; set; } = false;
+
+    /// <summary>
+    /// Additional property names stored at the index leaf (covering index). Use this
+    /// when you frequently <c>WHERE</c> on the indexed column and <c>SELECT</c> only
+    /// these extra columns — the query becomes an index-only scan.
+    /// </summary>
+    public string[]? Include { get; set; }
+}
+
+/// <summary>
 /// Declares a composite index spanning multiple columns.
 /// Apply to the class (not a single property) by using the index column names.
 /// Can be applied multiple times for multiple composite indexes.
@@ -154,20 +185,34 @@ public sealed class CompositeIndexAttribute : Attribute
 }
 
 /// <summary>
-/// Marks a property as a many-to-many navigation property resolved via a junction table entity.
+/// Declares a retention policy for the annotated entity. The library's background
+/// purge worker periodically deletes rows whose <see cref="TimestampColumn"/> is older
+/// than <see cref="Days"/>. Replaces hand-rolled cleanup jobs.
 /// </summary>
-[AttributeUsage(AttributeTargets.Property)]
-public sealed class ManyToManyAttribute : Attribute
+[AttributeUsage(AttributeTargets.Class, Inherited = false)]
+public sealed class RetainDaysAttribute : Attribute
 {
-    /// <summary>The CLR type of the junction table entity.</summary>
-    public Type JunctionEntityType { get; }
+    /// <summary>Rows older than this many days are deleted.</summary>
+    public int Days { get; }
 
     /// <summary>
-    /// Declares a many-to-many relationship via the specified junction entity type.
+    /// The property name on the entity that holds the timestamp to compare
+    /// (e.g. <c>nameof(FooRecord.CreatedUtc)</c>). Must map to a DATETIME column.
     /// </summary>
-    /// <param name="junctionEntityType">The junction table entity type.</param>
-    public ManyToManyAttribute(Type junctionEntityType)
+    public string TimestampColumn { get; }
+
+    /// <summary>
+    /// How many rows to delete per batch. Keeps the delete transaction small.
+    /// Default: 5000.
+    /// </summary>
+    public int BatchSize { get; set; } = 5000;
+
+    /// <param name="days">Retain rows for this many days.</param>
+    /// <param name="timestampColumn">Property name holding the timestamp to compare.</param>
+    public RetainDaysAttribute(int days, string timestampColumn)
     {
-        JunctionEntityType = junctionEntityType;
+        Days = days;
+        TimestampColumn = timestampColumn;
     }
 }
+
