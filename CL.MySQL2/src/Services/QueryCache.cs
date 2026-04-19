@@ -126,7 +126,7 @@ public static class QueryCache
 
         // DateTime near now → quantize to the configured window so that
         // `Where(x => x.At >= DateTime.UtcNow.AddDays(-30))` produces a stable key
-        // across back-to-back calls. See NEWSHAPE.md §Cache key.
+        // across back-to-back calls. Far-future / far-past absolute dates pass through.
         if (value is DateTime dt && TimeQuantizeSeconds > 0)
         {
             var delta = DateTime.UtcNow - dt;

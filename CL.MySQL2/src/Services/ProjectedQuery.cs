@@ -25,6 +25,17 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
     private readonly ProjectionCompiler.Compiled<TSource, TResult> _projection;
     private readonly TimeSpan? _cacheTtl;
 
+    /// <summary>
+    /// Enable result caching for this projected query. TTL and time-quantize behaviour come
+    /// from <see cref="Configuration.CacheConfiguration"/> globally; per-call TTL wins here.
+    /// </summary>
+    public ProjectedQuery<TSource, TResult> WithCache(TimeSpan ttl)
+    {
+        return new ProjectedQuery<TSource, TResult>(
+            _connectionManager, _logger, _connectionId, _transactionScope,
+            _slowQueryThresholdMs, _sql, _parameters, _projection, ttl);
+    }
+
     internal ProjectedQuery(
         ConnectionManager connectionManager,
         ILogger? logger,
