@@ -32,7 +32,6 @@ public sealed class QueryBuilder<T> where T : class, new()
     private readonly List<string> _groupBys = [];
     private int? _limit;
     private int? _offset;
-    private string? _selectColumns;
     private int _paramCounter;
     private TimeSpan? _cacheTtl;
 
@@ -112,27 +111,44 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
-    public QueryBuilder<T> Select(Expression<Func<T, object?>> selector)
+    /// <summary>
+    /// Typed projection: transforms rows of <typeparamref name="T"/> into rows of
+    /// <typeparamref name="TResult"/>. Emits a real <c>SELECT col1, col2 AS alias</c>
+    /// column list and returns a pipeline whose terminals hydrate
+    /// <typeparamref name="TResult"/> directly — skipping <typeparamref name="T"/>
+    /// materialization and any columns not referenced by the projection.
+    /// </summary>
+    public ProjectedQuery<T, TResult> Select<TResult>(Expression<Func<T, TResult>> selector)
     {
-        if (selector.Body is NewExpression newExpr)
-        {
-            var cols = newExpr.Members!
-                .Select(m => $"`{GetColumnName(m)}`");
-            _selectColumns = string.Join(", ", cols);
-        }
-        else
-        {
-            var col = MySqlExpressionVisitor.TranslateSelector(selector);
-            _selectColumns = $"`{col}`";
-        }
-        return this;
+        var compiled = ProjectionCompiler.Compile(selector);
+
+        var tableName = GetTableName();
+        var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
+        var (whereClause, parms) = BuildWhereSql();
+        var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
+        var orderBySql = _orderBys.Count > 0 ? $" ORDER BY {string.Join(", ", _orderBys)}" : string.Empty;
+        var limitSql = _limit.HasValue ? $" LIMIT {_limit.Value}" : string.Empty;
+        var offsetSql = _offset.HasValue ? $" OFFSET {_offset.Value}" : string.Empty;
+
+        var sql = $"SELECT {compiled.SelectList} FROM `{tableName}`{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+
+        return new ProjectedQuery<T, TResult>(
+            _connectionManager, _logger, _connectionId, _transactionScope,
+            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl);
     }
 
-    public QueryBuilder<T> GroupBy<TKey>(Expression<Func<T, TKey>> keySelector)
+    /// <summary>
+    /// Groups rows by the key selector and returns a <see cref="GroupedQuery{TKey, TSource}"/>.
+    /// Collapse the groups with <c>.Select(g =&gt; new { … g.Sum(...) … })</c>; nothing is
+    /// executed until a terminal on the projected query.
+    /// </summary>
+    public GroupedQuery<TKey, T> GroupBy<TKey>(Expression<Func<T, TKey>> keySelector)
     {
-        var col = MySqlExpressionVisitor.TranslateSelector(keySelector);
-        _groupBys.Add($"`{col}`");
-        return this;
+        var (whereClause, parms) = BuildWhereSql();
+        return new GroupedQuery<TKey, T>(
+            _connectionManager, _logger, _connectionId, _transactionScope,
+            _slowQueryThresholdMs, whereClause, parms, keySelector,
+            _cacheTtl, _orderBys, _limit, _offset);
     }
 
     public QueryBuilder<T> WithConnection(string connectionId)
@@ -447,7 +463,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         int? pageSize = null)
     {
         var tableName = GetTableName();
-        var selectCols = _selectColumns ?? "*";
+        var selectCols = "*";
         var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
         var (whereClause, parms) = BuildWhereSql();
         var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
