@@ -2,6 +2,12 @@
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.MySQL2)](https://www.nuget.org/packages/CodeLogic.MySQL2)
 
+> **v4.0.0** — major rewrite. Typed LINQ translated to SQL, compiled row
+> materializers, working result cache (time-quantized keys + table-version
+> invalidation), SQL-side aggregation (`GroupBy` + aggregating `Select`),
+> projection pushdown, covering indexes, attribute-driven retention. See the
+> [Performance docs](../docs/articles/mysql2-performance.md) for benchmark numbers.
+
 MySQL / Percona / MariaDB library for [CodeLogic](https://github.com/Media2A/CodeLogic).
 Typed LINQ-shaped queries translated to SQL, compiled row materializers, working
 result cache, server-side aggregation, and covering indexes driven by attributes.
