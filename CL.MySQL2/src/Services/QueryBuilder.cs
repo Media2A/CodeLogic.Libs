@@ -181,7 +181,8 @@ public sealed class QueryBuilder<T> where T : class, new()
             if (ShouldCache)
             {
                 var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
-                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteToList(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+                // connectionId passed in so cache hits / misses fire observability events.
+                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteToList(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
             }
 
             return await ExecuteToList(sql, parms, ct).ConfigureAwait(false);
@@ -224,7 +225,8 @@ public sealed class QueryBuilder<T> where T : class, new()
             if (ShouldCache)
             {
                 var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
-                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteFirstOrDefault(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+                // connectionId passed in so cache hits / misses fire observability events.
+                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteFirstOrDefault(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
             }
 
             return await ExecuteFirstOrDefault(sql, parms, ct).ConfigureAwait(false);
@@ -274,7 +276,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), dataSql, parms);
                 return await QueryCache.GetOrSetAsync(cacheKey, tblName,
-                    () => ExecutePagedList(countSql, page, pageSize, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+                    () => ExecutePagedList(countSql, page, pageSize, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
             }
 
             return await ExecutePagedList(countSql, page, pageSize, parms, ct).ConfigureAwait(false);
@@ -333,7 +335,8 @@ public sealed class QueryBuilder<T> where T : class, new()
             if (ShouldCache)
             {
                 var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
-                return await QueryCache.GetOrSetAsync(cacheKey, tblName, () => ExecuteCount(sql, parms, ct), _cacheTtl!.Value).ConfigureAwait(false);
+                // connectionId passed in so cache hits / misses fire observability events.
+                return await QueryCache.GetOrSetAsync(cacheKey, tblName, () => ExecuteCount(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
             }
 
             return await ExecuteCount(sql, parms, ct).ConfigureAwait(false);
@@ -655,10 +658,11 @@ public sealed class QueryBuilder<T> where T : class, new()
     private static void EnsureValidColumn(string column) =>
         _ = EntityMetadata<T>.RequireColumn(column);
 
-    private void LogSlowQuery(string sql, long elapsedMs)
+    private void LogSlowQuery(string sql, long elapsedMs, int rowCount = -1)
     {
+        QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            _logger?.Warning($"[MySQL2] [{_connectionId}] Slow query ({elapsedMs}ms): {sql}");
+            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
     }
 
     private void LogQuery(string sql)

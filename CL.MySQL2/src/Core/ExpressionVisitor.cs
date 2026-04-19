@@ -102,6 +102,15 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
 
     protected override Expression VisitMember(MemberExpression node)
     {
+        // Nullable<T>.Value: pass through to the inner value column.
+        if (node.Member.Name == "Value"
+            && node.Expression is not null
+            && Nullable.GetUnderlyingType(node.Expression.Type) is not null)
+        {
+            Visit(node.Expression);
+            return node;
+        }
+
         if (node.Expression is ParameterExpression)
         {
             // It's a property/field access on the entity parameter
@@ -144,6 +153,19 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
 
     protected override Expression VisitMethodCall(MethodCallExpression node)
     {
+        // string.IsNullOrEmpty(x.Col) → (col IS NULL OR col = '')
+        if (node.Method.DeclaringType == typeof(string)
+            && node.Method.Name == nameof(string.IsNullOrEmpty)
+            && node.Arguments.Count == 1
+            && node.Arguments[0] is MemberExpression m
+            && m.Expression is ParameterExpression)
+        {
+            var col = GetColumnName(m.Member);
+            var colRef = !string.IsNullOrEmpty(_tableAlias) ? $"`{_tableAlias}`.`{col}`" : $"`{col}`";
+            _sql.Append($"({colRef} IS NULL OR {colRef} = '')");
+            return node;
+        }
+
         switch (node.Method.Name)
         {
             case "Contains" when node.Object is MemberExpression containsMember
@@ -242,9 +264,45 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : member.Name;
     }
 
+    /// <summary>
+    /// Reads the runtime value of a closure / constant expression without compiling a
+    /// delegate. Covers the common cases (bare constant, field / property chains over a
+    /// captured constant) in O(depth) reflection. Falls back to
+    /// <see cref="Expression.Lambda(Expression, ParameterExpression[])"/> + Compile only
+    /// for genuinely dynamic shapes, so predicates like <c>Where(x =&gt; x.Foo &gt;= since)</c>
+    /// pay field-read cost, not JIT cost.
+    /// </summary>
     private static object? GetValue(Expression expression)
     {
+        if (TryFastEvaluate(expression, out var v)) return v;
         return Expression.Lambda(expression).Compile().DynamicInvoke();
+    }
+
+    private static bool TryFastEvaluate(Expression expr, out object? value)
+    {
+        switch (expr)
+        {
+            case ConstantExpression ce:
+                value = ce.Value;
+                return true;
+
+            case MemberExpression me:
+                if (!TryFastEvaluate(me.Expression!, out var target)) { value = null; return false; }
+                value = me.Member switch
+                {
+                    FieldInfo fi    => fi.GetValue(target),
+                    PropertyInfo pi => pi.GetValue(target),
+                    _               => null
+                };
+                return true;
+
+            case UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } u:
+                return TryFastEvaluate(u.Operand, out value);
+
+            default:
+                value = null;
+                return false;
+        }
     }
 
     /// <summary>

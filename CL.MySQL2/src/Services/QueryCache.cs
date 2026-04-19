@@ -57,12 +57,21 @@ public static class QueryCache
     /// stores the result, and returns it.
     /// </summary>
     public static async Task<T> GetOrSetAsync<T>(
-        string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl)
+        string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl,
+        string? connectionId = null)
     {
         if (!Enabled) return await factory().ConfigureAwait(false);
 
         var (found, value) = await _store.TryGetAsync(cacheKey).ConfigureAwait(false);
-        if (found) return (T)value!;
+        if (found)
+        {
+            if (connectionId is not null)
+                QueryObservability.RecordCacheHit(connectionId, tableName, cacheKey);
+            return (T)value!;
+        }
+
+        if (connectionId is not null)
+            QueryObservability.RecordCacheMiss(connectionId, tableName, cacheKey);
 
         var result = await factory().ConfigureAwait(false);
         if (result is not null)

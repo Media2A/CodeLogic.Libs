@@ -132,6 +132,10 @@ public sealed class MySQL2Library : ILibrary
             maxEntries: cacheConfig.MaxEntries,
             timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds);
 
+        // Bind observability to CodeLogic's event bus so QueryExecutedEvent /
+        // CacheHit / CacheMiss / SlowQuery land on the app's existing bus.
+        QueryObservability.Configure(context.Events, context.Logger);
+
         context.Logger.Info(_strings?.LibraryInitialized ?? "MySQL2 library initialized");
     }
 

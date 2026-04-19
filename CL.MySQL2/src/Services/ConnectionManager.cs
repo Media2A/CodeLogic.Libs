@@ -22,6 +22,12 @@ public sealed class ConnectionManager
     // Per-connection-id open connection counter
     private readonly ConcurrentDictionary<string, int> _openCounts = new(StringComparer.OrdinalIgnoreCase);
 
+    // Per-physical-connection owning id, indexed by reference-identity hash of the
+    // MySqlConnection instance. Lets CloseConnectionAsync resolve the id in O(1) without
+    // comparing connection strings (which is both slow and wrong when two configs share
+    // credentials).
+    private readonly ConcurrentDictionary<MySqlConnection, string> _connectionOwners = new();
+
     // ── Construction ──────────────────────────────────────────────────────────
 
     /// <summary>
@@ -78,6 +84,7 @@ public sealed class ConnectionManager
         {
             await connection.OpenAsync(ct).ConfigureAwait(false);
             _openCounts.AddOrUpdate(connectionId, 1, (_, v) => v + 1);
+            _connectionOwners[connection] = connectionId;
             _logger?.Debug($"[MySQL2] Connection opened for '{connectionId}'");
 
             if (_events is not null)
@@ -104,9 +111,8 @@ public sealed class ConnectionManager
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        // Decrement open count for whatever connection ID this belongs to
-        // (we track by string ID; the physical connection state is managed by the pool)
-        var connectionId = FindConnectionId(connection.ConnectionString) ?? "Default";
+        // O(1) id lookup from the owning map populated at open time.
+        var connectionId = _connectionOwners.TryRemove(connection, out var id) ? id : "Default";
 
         try
         {
@@ -161,15 +167,18 @@ public sealed class ConnectionManager
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(action);
-        await using var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
+        var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
         try
         {
             return await action(conn).ConfigureAwait(false);
         }
         finally
         {
-            await conn.CloseAsync().ConfigureAwait(false);
-            _openCounts.AddOrUpdate(connectionId, 0, (_, v) => Math.Max(0, v - 1));
+            // Route through CloseConnectionAsync so the open count + owner map stay in sync.
+            // Avoids the prior double-decrement where both this method and the await-using
+            // path decremented _openCounts for the same physical connection.
+            await CloseConnectionAsync(conn).ConfigureAwait(false);
+            await conn.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -183,7 +192,7 @@ public sealed class ConnectionManager
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(action);
-        await using var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
+        var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
         await using var tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
         try
         {
@@ -198,8 +207,8 @@ public sealed class ConnectionManager
         }
         finally
         {
-            await conn.CloseAsync().ConfigureAwait(false);
-            _openCounts.AddOrUpdate(connectionId, 0, (_, v) => Math.Max(0, v - 1));
+            await CloseConnectionAsync(conn).ConfigureAwait(false);
+            await conn.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -250,15 +259,6 @@ public sealed class ConnectionManager
             $"Call RegisterConfiguration first.");
     }
 
-    private string? FindConnectionId(string connectionString)
-    {
-        foreach (var kv in _configs)
-        {
-            if (string.Equals(kv.Value.BuildConnectionString(), connectionString, StringComparison.OrdinalIgnoreCase))
-                return kv.Key;
-        }
-        return null;
-    }
 }
 
 /// <summary>Basic MySQL server metadata.</summary>

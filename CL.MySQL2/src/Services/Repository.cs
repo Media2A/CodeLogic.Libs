@@ -524,8 +524,9 @@ public sealed class Repository<T> where T : class, new()
 
     private void LogSlowQuery(string sql, long elapsedMs)
     {
+        QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount: -1, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            _logger?.Warning($"[MySQL2] [{_connectionId}] Slow query ({elapsedMs}ms): {sql}");
+            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
     }
 
     private void LogQuery(string sql)

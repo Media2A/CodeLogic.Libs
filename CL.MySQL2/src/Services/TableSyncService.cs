@@ -61,12 +61,23 @@ public sealed class TableSyncService
     /// <param name="createBackup">Whether to back up the current schema before making changes.</param>
     /// <param name="connectionId">The connection ID to use.</param>
     /// <param name="ct">Cancellation token.</param>
-    public async Task<Result<SyncResult>> SyncTableAsync<T>(
+    public Task<Result<SyncResult>> SyncTableAsync<T>(
         bool createBackup = true,
         string connectionId = "Default",
         CancellationToken ct = default) where T : class
+        => SyncTableCoreAsync(typeof(T), createBackup, connectionId, ct);
+
+    /// <summary>
+    /// Non-generic core used by both the typed <see cref="SyncTableAsync{T}"/> and
+    /// <see cref="SyncTablesAsync"/>. Avoids per-type <c>MakeGenericMethod.Invoke</c>
+    /// reflection.
+    /// </summary>
+    internal async Task<Result<SyncResult>> SyncTableCoreAsync(
+        Type entityType,
+        bool createBackup = true,
+        string connectionId = "Default",
+        CancellationToken ct = default)
     {
-        var entityType = typeof(T);
         var tableName = SchemaAnalyzer.GetTableName(entityType);
         var sw = Stopwatch.StartNew();
         var operations = new List<string>();
@@ -182,13 +193,9 @@ public sealed class TableSyncService
             var tableName = SchemaAnalyzer.GetTableName(entityType);
             try
             {
-                // We use reflection to call the generic SyncTableAsync<T>
-                var method = typeof(TableSyncService)
-                    .GetMethod(nameof(SyncTableAsync))!
-                    .MakeGenericMethod(entityType);
-
-                var task = (Task<Result<SyncResult>>)method.Invoke(this, [createBackup, connectionId, ct])!;
-                var result = await task.ConfigureAwait(false);
+                // Non-generic core — no MakeGenericMethod/Invoke per type.
+                var result = await SyncTableCoreAsync(entityType, createBackup, connectionId, ct)
+                    .ConfigureAwait(false);
 
                 results[tableName] = result.IsSuccess
                     ? result.Value!

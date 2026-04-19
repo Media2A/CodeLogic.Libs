@@ -57,7 +57,8 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
             {
                 var tableName = EntityMetadata<TSource>.TableName;
                 var key = QueryCache.BuildCacheKey(_connectionId, tableName, _sql, _parameters);
-                return await QueryCache.GetOrSetAsync(key, tableName, () => Execute(ct), _cacheTtl!.Value).ConfigureAwait(false);
+                return await QueryCache.GetOrSetAsync(
+                    key, tableName, () => Execute(ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
             }
             return await Execute(ct).ConfigureAwait(false);
         }
@@ -95,8 +96,10 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         }).ConfigureAwait(false);
 
         sw.Stop();
+
+        QueryObservability.RecordExecuted(_connectionId, _sql, sw.ElapsedMilliseconds, items.Count, cacheHit: false);
         if (sw.ElapsedMilliseconds >= _slowQueryThresholdMs)
-            _logger?.Warning($"[MySQL2] [{_connectionId}] Slow query ({sw.ElapsedMilliseconds}ms): {_sql}");
+            QueryObservability.RecordSlow(_connectionId, _sql, sw.ElapsedMilliseconds);
 
         return Result<List<TResult>>.Success(items);
     }
