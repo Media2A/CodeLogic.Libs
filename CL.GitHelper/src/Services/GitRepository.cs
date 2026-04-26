@@ -1,6 +1,7 @@
 using CL.GitHelper.Models;
 using CodeLogic.Core.Logging;
 using LibGit2Sharp;
+using LibGit2Sharp.Handlers;
 
 // Alias our model types that clash with LibGit2Sharp names.
 using GitCloneOptions = CL.GitHelper.Models.CloneOptions;
@@ -66,8 +67,18 @@ public sealed class GitRepository : IDisposable
 
             _logger?.Info($"Cloning {_config.RepositoryUrl} → {_resolvedPath}");
 
+            var libOptions = new LibGit2Sharp.CloneOptions
+            {
+                BranchName = options.BranchName,
+                RecurseSubmodules = options.RecurseSubmodules,
+                IsBare = options.Bare
+            };
+            var credHandler = BuildCredentialsHandler();
+            if (credHandler is not null)
+                libOptions.FetchOptions.CredentialsProvider = credHandler;
+
             await Task.Run(() =>
-                Repository.Clone(_config.RepositoryUrl, _resolvedPath),
+                Repository.Clone(_config.RepositoryUrl, _resolvedPath, libOptions),
                 options.CancellationToken);
 
             diag.Complete();
@@ -112,8 +123,17 @@ public sealed class GitRepository : IDisposable
 
                 var refSpecs = remote.FetchRefSpecs.Select(s => s.Specification);
 
+                var fetchOpts = new LibGit2Sharp.FetchOptions
+                {
+                    Prune = options.Prune,
+                    TagFetchMode = options.FetchTags ? TagFetchMode.Auto : TagFetchMode.None
+                };
+                var credHandler = BuildCredentialsHandler();
+                if (credHandler is not null)
+                    fetchOpts.CredentialsProvider = credHandler;
+
                 await Task.Run(() =>
-                    Commands.Fetch(_repo, options.RemoteName, refSpecs, null, null),
+                    Commands.Fetch(_repo, options.RemoteName, refSpecs, fetchOpts, null),
                     options.CancellationToken);
 
                 diag.Complete();
@@ -423,6 +443,108 @@ public sealed class GitRepository : IDisposable
         }
     }
 
+    // ── Reset ─────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Performs a hard reset of the working tree and index to the tip of the named branch.
+    /// Equivalent to <c>git reset --hard origin/&lt;branch&gt;</c>.
+    /// </summary>
+    /// <param name="branchName">
+    /// Branch to reset to. If null, resets to the current branch's tracked upstream tip
+    /// (or the configured <see cref="RepositoryConfiguration.DefaultBranch"/>'s remote-tracking
+    /// branch when HEAD has no upstream).
+    /// </param>
+    /// <param name="remoteName">Remote name for resolving the upstream tip. Defaults to "origin".</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public async Task<GitResult<bool>> ResetHardAsync(
+        string? branchName = null,
+        string remoteName = "origin",
+        CancellationToken cancellationToken = default)
+    {
+        var diag = new GitDiagnostics();
+
+        try
+        {
+            await EnsureOpenAsync();
+            await _lock.WaitAsync(cancellationToken);
+            try
+            {
+                var target = ResolveResetTarget(_repo!, branchName, remoteName);
+                if (target is null)
+                    return GitResult<bool>.Fail(
+                        $"Could not resolve reset target (branch='{branchName ?? "<upstream>"}', remote='{remoteName}').",
+                        null, diag);
+
+                diag.AddMessage($"Hard reset to {target.Sha[..Math.Min(7, target.Sha.Length)]}");
+                _logger?.Info($"Hard reset '{_config.Id}' → {target.Sha[..Math.Min(7, target.Sha.Length)]}");
+
+                await Task.Run(() => _repo!.Reset(ResetMode.Hard, target), cancellationToken);
+
+                diag.Complete();
+                return GitResult<bool>.Ok(true, diag);
+            }
+            finally
+            {
+                _lock.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            diag.Complete();
+            _logger?.Error($"Reset failed: {ex.Message}", ex);
+            return GitResult<bool>.Fail($"Reset failed: {ex.Message}", ex, diag);
+        }
+    }
+
+    // ── Ensure up to date ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Convenience: clones the repository if it does not exist locally, otherwise fetches
+    /// and hard-resets to the tip of the named branch on the remote. Idempotent.
+    /// </summary>
+    /// <param name="branchName">
+    /// Branch to track. Null uses <see cref="RepositoryConfiguration.DefaultBranch"/>.
+    /// </param>
+    /// <param name="remoteName">Remote name. Defaults to "origin".</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public async Task<GitResult<RepositoryInfo>> EnsureUpToDateAsync(
+        string? branchName = null,
+        string remoteName = "origin",
+        CancellationToken cancellationToken = default)
+    {
+        branchName ??= string.IsNullOrWhiteSpace(_config.DefaultBranch) ? "main" : _config.DefaultBranch;
+
+        var alreadyCloned =
+            Directory.Exists(_resolvedPath) &&
+            Directory.Exists(Path.Combine(_resolvedPath, ".git"));
+
+        if (!alreadyCloned)
+        {
+            var cloneResult = await CloneAsync(new GitCloneOptions
+            {
+                BranchName = branchName,
+                CancellationToken = cancellationToken
+            });
+            if (!cloneResult.IsSuccess)
+                return cloneResult;
+            return await GetRepositoryInfoAsync();
+        }
+
+        var fetch = await FetchAsync(new GitFetchOptions
+        {
+            RemoteName = remoteName,
+            CancellationToken = cancellationToken
+        });
+        if (!fetch.IsSuccess)
+            return GitResult<RepositoryInfo>.Fail(fetch.ErrorMessage!, fetch.Exception);
+
+        var reset = await ResetHardAsync(branchName, remoteName, cancellationToken);
+        if (!reset.IsSuccess)
+            return GitResult<RepositoryInfo>.Fail(reset.ErrorMessage!, reset.Exception);
+
+        return await GetRepositoryInfoAsync();
+    }
+
     /// <summary>
     /// Retrieves the commit log for the current branch.
     /// </summary>
@@ -453,6 +575,51 @@ public sealed class GitRepository : IDisposable
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Builds a LibGit2Sharp credentials callback for HTTPS authentication from the
+    /// repository configuration. Returns null when no credentials are configured (anonymous).
+    /// </summary>
+    /// <remarks>
+    /// When only <see cref="RepositoryConfiguration.Password"/> is set, the username is sent
+    /// as <c>x-access-token</c> — the canonical placeholder GitHub accepts for PAT-only auth.
+    /// When both are set, both are forwarded verbatim. SSH key fields on the configuration
+    /// are preserved for future use but are not currently wired (the LibGit2Sharp 0.30 managed
+    /// binary ships without the native SSH transport).
+    /// </remarks>
+    private CredentialsHandler? BuildCredentialsHandler()
+    {
+        if (string.IsNullOrWhiteSpace(_config.Password)) return null;
+
+        return (_, _, _) => new UsernamePasswordCredentials
+        {
+            Username = string.IsNullOrWhiteSpace(_config.Username) ? "x-access-token" : _config.Username!,
+            Password = _config.Password ?? ""
+        };
+    }
+
+    /// <summary>
+    /// Resolves the commit object that <see cref="ResetHardAsync"/> should target.
+    /// </summary>
+    private static Commit? ResolveResetTarget(Repository repo, string? branchName, string remoteName)
+    {
+        if (!string.IsNullOrWhiteSpace(branchName))
+        {
+            var remoteTracking = repo.Branches[$"{remoteName}/{branchName}"];
+            if (remoteTracking?.Tip is not null) return remoteTracking.Tip;
+
+            var local = repo.Branches[branchName];
+            if (local?.Tip is not null) return local.Tip;
+
+            return null;
+        }
+
+        var head = repo.Head;
+        if (head.IsTracking && head.TrackedBranch?.Tip is not null)
+            return head.TrackedBranch.Tip;
+
+        return head.Tip;
+    }
 
     private async Task EnsureOpenAsync()
     {
