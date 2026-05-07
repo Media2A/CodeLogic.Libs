@@ -98,7 +98,8 @@ internal static class SqlExpressionTranslator
 
             // Captured closure member — evaluate to a literal. Primitives only for column
             // expressions; WHERE-side parameter binding is handled by MySqlExpressionVisitor.
-            var value = Expression.Lambda(m).Compile().DynamicInvoke();
+            // Fast path skips Compile() for the common closure-field shape.
+            var value = ClosureEvaluator.Evaluate(m);
             return (FormatConstant(value), m.Type);
         }
 

@@ -264,46 +264,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : member.Name;
     }
 
-    /// <summary>
-    /// Reads the runtime value of a closure / constant expression without compiling a
-    /// delegate. Covers the common cases (bare constant, field / property chains over a
-    /// captured constant) in O(depth) reflection. Falls back to
-    /// <see cref="Expression.Lambda(Expression, ParameterExpression[])"/> + Compile only
-    /// for genuinely dynamic shapes, so predicates like <c>Where(x =&gt; x.Foo &gt;= since)</c>
-    /// pay field-read cost, not JIT cost.
-    /// </summary>
-    private static object? GetValue(Expression expression)
-    {
-        if (TryFastEvaluate(expression, out var v)) return v;
-        return Expression.Lambda(expression).Compile().DynamicInvoke();
-    }
-
-    private static bool TryFastEvaluate(Expression expr, out object? value)
-    {
-        switch (expr)
-        {
-            case ConstantExpression ce:
-                value = ce.Value;
-                return true;
-
-            case MemberExpression me:
-                if (!TryFastEvaluate(me.Expression!, out var target)) { value = null; return false; }
-                value = me.Member switch
-                {
-                    FieldInfo fi    => fi.GetValue(target),
-                    PropertyInfo pi => pi.GetValue(target),
-                    _               => null
-                };
-                return true;
-
-            case UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } u:
-                return TryFastEvaluate(u.Operand, out value);
-
-            default:
-                value = null;
-                return false;
-        }
-    }
+    private static object? GetValue(Expression expression) => ClosureEvaluator.Evaluate(expression);
 
     /// <summary>
     /// Escapes LIKE special characters (%, _, \) in a user-supplied value so it is treated

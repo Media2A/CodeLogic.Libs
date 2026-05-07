@@ -480,7 +480,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 else
                 {
                     var paramName = $"@upd_{idx++}";
-                    var value = Expression.Lambda(ma.Expression).Compile().DynamicInvoke();
+                    var value = ClosureEvaluator.Evaluate(ma.Expression);
                     allParms[paramName] = TypeConverter.ToDbValue(value);
                     sets.Add($"`{colName}` = {paramName}");
                 }
