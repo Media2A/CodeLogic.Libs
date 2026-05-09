@@ -16,7 +16,7 @@ public sealed class CommonLibrary : ILibrary
     {
         Id          = "cl.common",
         Name        = "CL.Common",
-        Version     = "4.0.2",
+        Version     = CL.Internal.InternalLibraryVersion.Current,
         Description = "General-purpose utility toolkit — security, generators, caching, imaging, and more",
         Author      = "Media2A",
         Dependencies = []

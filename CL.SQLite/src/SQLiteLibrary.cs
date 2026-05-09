@@ -15,7 +15,7 @@ public sealed class SQLiteLibrary : ILibrary
     {
         Id = "CL.SQLite",
         Name = "SQLite Library",
-        Version = "4.0.2",
+        Version = CL.Internal.InternalLibraryVersion.Current,
         Description = "SQLite database library with connection pooling, LINQ queries, and table sync",
         Author = "Media2A",
         Tags = ["sqlite", "database", "orm", "repository"]

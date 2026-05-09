@@ -25,7 +25,7 @@ public sealed class NetUtilsLibrary : ILibrary
     {
         Id = "CL.NetUtils",
         Name = "Network Utilities Library",
-        Version = "4.0.2",
+        Version = CL.Internal.InternalLibraryVersion.Current,
         Description = "DNSBL blacklist checking and IP geolocation services",
         Author = "Media2A",
         Tags = ["network", "dnsbl", "geoip", "ip"]

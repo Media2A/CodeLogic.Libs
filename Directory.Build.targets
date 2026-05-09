@@ -24,4 +24,15 @@
                       Condition="$([System.String]::new('%(ProjectReference.Identity)').Contains('CodeLogic.csproj'))" />
     <PackageReference Include="CodeLogic" Version="$(CodeLogicPackageVersion)" />
   </ItemGroup>
+
+  <!--
+    Inject a shared helper that reads each lib's runtime version from its own
+    AssemblyInformationalVersionAttribute (which MSBuild populates from the
+    csproj <Version>). Keeps LibraryManifest.Version automatically in sync
+    with the package version — no hand-edited string in *Library.cs to drift.
+  -->
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)Shared/InternalLibraryVersion.cs"
+             Link="Shared/InternalLibraryVersion.cs" />
+  </ItemGroup>
 </Project>

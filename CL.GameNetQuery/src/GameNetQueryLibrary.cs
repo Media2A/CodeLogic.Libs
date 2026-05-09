@@ -13,7 +13,7 @@ public sealed class GameNetQueryLibrary : ILibrary
     {
         Id          = "cl.gamenetquery",
         Name        = "CL.GameNetQuery",
-        Version     = "4.0.2",
+        Version     = CL.Internal.InternalLibraryVersion.Current,
         Description = "Game server query toolkit — Valve Source Engine and Minecraft UDP/RCON queries",
         Author      = "Media2A",
         Dependencies = []

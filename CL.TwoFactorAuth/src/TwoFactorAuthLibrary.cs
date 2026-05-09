@@ -32,7 +32,7 @@ public sealed class TwoFactorAuthLibrary : ILibrary
     {
         Id = "CL.TwoFactorAuth",
         Name = "Two-Factor Auth Library",
-        Version = "4.0.2",
+        Version = CL.Internal.InternalLibraryVersion.Current,
         Description = "TOTP two-factor authentication with QR code generation for CodeLogic 4 applications",
         Author = "Media2A",
         Tags = ["security", "2fa", "totp", "qrcode", "authentication"]
