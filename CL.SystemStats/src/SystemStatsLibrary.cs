@@ -27,8 +27,8 @@ public sealed class SystemStatsLibrary : ILibrary
     {
         Id = "CL.SystemStats",
         Name = "System Stats Library",
-        Version = "3.0.0",
-        Description = "Cross-platform system statistics (CPU, memory, processes) for CodeLogic3",
+        Version = "4.0.2",
+        Description = "Cross-platform system statistics (CPU, memory, processes) for CodeLogic 4 applications",
         Author = "Media2A",
         Tags = ["system", "stats", "cpu", "memory", "processes", "monitoring"]
     };

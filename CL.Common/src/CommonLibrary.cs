@@ -4,7 +4,7 @@ using CodeLogic.Framework.Libraries;
 namespace CL.Common;
 
 /// <summary>
-/// CL.Common library — general-purpose utility toolkit for CodeLogic 3 applications.
+/// CL.Common library — general-purpose utility toolkit for CodeLogic applications.
 /// Provides Security, Generators, Caching, Compression, Imaging, Networking,
 /// Data, FileHandling, Conversion, Parser, Time, and String utilities.
 /// No external service dependencies — always healthy when initialized.
@@ -16,7 +16,7 @@ public sealed class CommonLibrary : ILibrary
     {
         Id          = "cl.common",
         Name        = "CL.Common",
-        Version     = "1.0.0",
+        Version     = "4.0.2",
         Description = "General-purpose utility toolkit — security, generators, caching, imaging, and more",
         Author      = "Media2A",
         Dependencies = []

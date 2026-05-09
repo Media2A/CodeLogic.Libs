@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SocialConnect)](https://www.nuget.org/packages/CodeLogic.SocialConnect)
 
-Discord webhook and Steam Web API integration for [CodeLogic 3](https://github.com/Media2A/CodeLogic). Send Discord notifications and fetch Steam player profiles, bans, and game libraries.
+Discord webhook and Steam Web API integration for [CodeLogic](https://github.com/Media2A/CodeLogic). Send Discord notifications and fetch Steam player profiles, bans, and game libraries.
 
 ## Install
 
@@ -73,8 +73,8 @@ Get your Steam Web API key at [steamcommunity.com/dev/apikey](https://steamcommu
 
 ## Requirements
 
-- [CodeLogic 3.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
 
 ## License
 
-MIT — see [LICENSE](../LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

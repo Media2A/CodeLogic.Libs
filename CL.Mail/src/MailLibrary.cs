@@ -25,7 +25,7 @@ public sealed class MailLibrary : ILibrary
     {
         Id = "CL.Mail",
         Name = "Mail Library",
-        Version = "3.0.0",
+        Version = "4.0.2",
         Description = "SMTP/IMAP e-mail with variable-substitution template engine",
         Author = "Media2A",
         Tags = ["email", "smtp", "imap", "templates"]

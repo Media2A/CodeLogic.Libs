@@ -1,8 +1,8 @@
-# CL.TwoFactorAuth
+# CodeLogic.TwoFactorAuth
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.TwoFactorAuth)](https://www.nuget.org/packages/CodeLogic.TwoFactorAuth)
 
-TOTP two-factor authentication with QR code generation for CodeLogic 3 applications.
+TOTP two-factor authentication with QR code generation for [CodeLogic](https://github.com/Media2A/CodeLogic) applications.
 
 ## Install
 
@@ -57,10 +57,10 @@ Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Me
 ## Requirements
 
 - .NET 10.0+
-- CodeLogic 3.0.0+
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
 - Otp.NET 1.x
 - QRCoder 1.x
 
 ## License
 
-MIT -- see [LICENSE](../LICENSE) for details.
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

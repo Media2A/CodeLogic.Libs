@@ -239,4 +239,4 @@ await tx.CommitAsync();  // auto-rolls back on dispose if not committed
 
 ## License
 
-MIT — see [LICENSE](../LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

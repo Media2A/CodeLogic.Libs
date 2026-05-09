@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SQLite)](https://www.nuget.org/packages/CodeLogic.SQLite)
 
-SQLite database library for [CodeLogic 3](https://github.com/Media2A/CodeLogic) with connection pooling, LINQ query builder, and automatic table sync. Built on [Microsoft.Data.Sqlite](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/).
+SQLite database library for [CodeLogic](https://github.com/Media2A/CodeLogic) with connection pooling, LINQ query builder, and automatic table sync. Built on [Microsoft.Data.Sqlite](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/).
 
 ## Install
 
@@ -58,8 +58,8 @@ Auto-generated at `data/codelogic/Libraries/CL.SQLite/config.sqlite.json`:
 
 ## Requirements
 
-- [CodeLogic 3.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
 
 ## License
 
-MIT — see [LICENSE](../LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

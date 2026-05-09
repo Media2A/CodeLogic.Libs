@@ -1,8 +1,8 @@
-# CL.GameNetQuery
+# CodeLogic.GameNetQuery
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.GameNetQuery)](https://www.nuget.org/packages/CodeLogic.GameNetQuery)
 
-Game server query library for CodeLogic 3 -- Valve Source Engine (CSS, CS2) and Minecraft server queries via UDP and RCON.
+Game server query library for [CodeLogic](https://github.com/Media2A/CodeLogic) — Valve Source Engine (CSS, CS2) and Minecraft server queries via UDP and RCON.
 
 ## Install
 
@@ -51,8 +51,8 @@ Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Me
 ## Requirements
 
 - .NET 10.0+
-- CodeLogic 3.0.0+
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
 
 ## License
 
-MIT -- see [LICENSE](../LICENSE) for details.
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

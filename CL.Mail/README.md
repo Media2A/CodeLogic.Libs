@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Mail)](https://www.nuget.org/packages/CodeLogic.Mail)
 
-SMTP/IMAP email library for [CodeLogic 3](https://github.com/Media2A/CodeLogic) with an HTML template engine, attachment support, and mailbox management. Built on [MailKit](https://github.com/jstedfast/MailKit).
+SMTP/IMAP email library for [CodeLogic](https://github.com/Media2A/CodeLogic) with an HTML template engine, attachment support, and mailbox management. Built on [MailKit](https://github.com/jstedfast/MailKit).
 
 ## Install
 
@@ -71,8 +71,8 @@ Auto-generated at `data/codelogic/Libraries/CL.Mail/config.mail.json`:
 
 ## Requirements
 
-- [CodeLogic 3.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
 
 ## License
 
-MIT — see [LICENSE](../LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

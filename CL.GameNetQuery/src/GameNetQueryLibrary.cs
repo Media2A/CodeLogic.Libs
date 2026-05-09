@@ -3,7 +3,7 @@ using CodeLogic.Framework.Libraries;
 namespace CL.GameNetQuery;
 
 /// <summary>
-/// CL.GameNetQuery library — game server query toolkit for CodeLogic 3 applications.
+/// CL.GameNetQuery library — game server query toolkit for CodeLogic applications.
 /// Supports Valve Source Engine (CSS, CS2) and Minecraft server queries via UDP/RCON.
 /// </summary>
 public sealed class GameNetQueryLibrary : ILibrary
@@ -13,7 +13,7 @@ public sealed class GameNetQueryLibrary : ILibrary
     {
         Id          = "cl.gamenetquery",
         Name        = "CL.GameNetQuery",
-        Version     = "1.0.0",
+        Version     = "4.0.2",
         Description = "Game server query toolkit — Valve Source Engine and Minecraft UDP/RCON queries",
         Author      = "Media2A",
         Dependencies = []

@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Common)](https://www.nuget.org/packages/CodeLogic.Common)
 
-General-purpose utility toolkit for [CodeLogic 3](https://github.com/Media2A/CodeLogic) applications. Provides imaging (SkiaSharp), hashing, caching, file handling, compression, and networking utilities.
+General-purpose utility toolkit for [CodeLogic](https://github.com/Media2A/CodeLogic) applications. Provides imaging (SkiaSharp), hashing, caching, file handling, compression, and networking utilities.
 
 ## Install
 
@@ -44,8 +44,8 @@ var hash = CLU_Hashing.SHA256("my-secret-data");
 
 ## Requirements
 
-- [CodeLogic 3.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
 
 ## License
 
-MIT — see [LICENSE](../LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

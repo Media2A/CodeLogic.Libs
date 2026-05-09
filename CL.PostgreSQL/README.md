@@ -1,8 +1,8 @@
-# CL.PostgreSQL
+# CodeLogic.PostgreSQL
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.PostgreSQL)](https://www.nuget.org/packages/CodeLogic.PostgreSQL)
 
-PostgreSQL database access for CodeLogic 3 applications with multi-database support, a LINQ query builder, table sync, and migrations.
+PostgreSQL database access for [CodeLogic](https://github.com/Media2A/CodeLogic) applications with multi-database support, a LINQ query builder, table sync, and migrations.
 
 ## Install
 
@@ -72,8 +72,9 @@ Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Me
 ## Requirements
 
 - .NET 10.0+
-- CodeLogic 3.0.0+
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
 - Npgsql 9.x
+
 ## License
 
-MIT -- see [LICENSE](../LICENSE) for details.
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

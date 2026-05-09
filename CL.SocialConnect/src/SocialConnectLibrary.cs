@@ -33,7 +33,7 @@ public sealed class SocialConnectLibrary : ILibrary
     {
         Id = "CL.SocialConnect",
         Name = "Social Connect Library",
-        Version = "3.0.0",
+        Version = "4.0.2",
         Description = "Discord webhook messaging and Steam profile/authentication services",
         Author = "Media2A",
         Tags = ["discord", "steam", "webhook", "social", "gaming"]

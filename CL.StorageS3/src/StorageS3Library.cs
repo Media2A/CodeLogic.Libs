@@ -24,8 +24,8 @@ public sealed class StorageS3Library : ILibrary
     {
         Id = "CL.StorageS3",
         Name = "Storage S3 Library",
-        Version = "3.0.0",
-        Description = "Amazon S3 and S3-compatible object storage for CodeLogic3",
+        Version = "4.0.2",
+        Description = "Amazon S3 and S3-compatible object storage for CodeLogic 4 applications",
         Author = "Media2A",
         Tags = ["storage", "s3", "aws", "minio", "objects"]
     };

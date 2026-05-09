@@ -1,8 +1,8 @@
-# CL.GitHelper
+# CodeLogic.GitHelper
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.GitHelper)](https://www.nuget.org/packages/CodeLogic.GitHelper)
 
-Git repository management library for CodeLogic 3 applications, powered by LibGit2Sharp.
+Git repository management library for [CodeLogic](https://github.com/Media2A/CodeLogic) applications, powered by LibGit2Sharp.
 
 ## Install
 
@@ -68,9 +68,9 @@ Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Me
 ## Requirements
 
 - .NET 10.0+
-- CodeLogic 3.0.0+
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
 - LibGit2Sharp 0.30+
 
 ## License
 
-MIT -- see [LICENSE](../LICENSE) for details.
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

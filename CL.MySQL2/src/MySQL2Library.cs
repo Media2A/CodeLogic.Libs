@@ -29,7 +29,7 @@ public sealed class MySQL2Library : ILibrary
     {
         Id = "CL.MySQL2",
         Name = "MySQL2 Library",
-        Version = "4.0.0",
+        Version = "4.0.2",
         Description = "MySQL with typed LINQ, SQL aggregation, projection pushdown, compiled materializers, covering indexes, retention, and a working cache.",
         Author = "Media2A",
         Tags = ["mysql", "database", "orm", "repository"]

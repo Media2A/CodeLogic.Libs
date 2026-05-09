@@ -1,8 +1,8 @@
-# CL.NetUtils
+# CodeLogic.NetUtils
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.NetUtils)](https://www.nuget.org/packages/CodeLogic.NetUtils)
 
-DNSBL blacklist checking and IP geolocation services for CodeLogic 3 applications, using MaxMind GeoIP2.
+DNSBL blacklist checking and IP geolocation services for [CodeLogic](https://github.com/Media2A/CodeLogic) applications, using MaxMind GeoIP2.
 
 ## Install
 
@@ -71,10 +71,10 @@ Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Me
 ## Requirements
 
 - .NET 10.0+
-- CodeLogic 3.0.0+
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
 - MaxMind.GeoIP2 5.x
 - A MaxMind GeoLite2 or GeoIP2 database file (`.mmdb`)
 
 ## License
 
-MIT -- see [LICENSE](../LICENSE) for details.
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

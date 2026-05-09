@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.StorageS3)](https://www.nuget.org/packages/CodeLogic.StorageS3)
 
-S3-compatible object storage library for [CodeLogic 3](https://github.com/Media2A/CodeLogic). Works with Amazon S3, Cloudflare R2, MinIO, and any S3-compatible provider. Built on [AWSSDK.S3](https://aws.amazon.com/sdk-for-net/).
+S3-compatible object storage library for [CodeLogic](https://github.com/Media2A/CodeLogic). Works with Amazon S3, Cloudflare R2, MinIO, and any S3-compatible provider. Built on [AWSSDK.S3](https://aws.amazon.com/sdk-for-net/).
 
 ## Install
 
@@ -71,8 +71,8 @@ Auto-generated at `data/codelogic/Libraries/CL.StorageS3/config.storages3.json`:
 
 ## Requirements
 
-- [CodeLogic 3.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
 
 ## License
 
-MIT — see [LICENSE](../LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)

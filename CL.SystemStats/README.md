@@ -1,8 +1,8 @@
-# CL.SystemStats
+# CodeLogic.SystemStats
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SystemStats)](https://www.nuget.org/packages/CodeLogic.SystemStats)
 
-Cross-platform system statistics (CPU, memory, processes) for CodeLogic 3 applications on Windows and Linux.
+Cross-platform system statistics (CPU, memory, processes) for [CodeLogic](https://github.com/Media2A/CodeLogic) applications on Windows and Linux.
 
 ## Install
 
@@ -57,10 +57,10 @@ Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Me
 ## Requirements
 
 - .NET 10.0+
-- CodeLogic 3.0.0+
+- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
 - Windows: `System.Diagnostics.PerformanceCounter`, `System.Management`
 - Linux: `/proc` filesystem access
 
 ## License
 
-MIT -- see [LICENSE](../LICENSE) for details.
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
