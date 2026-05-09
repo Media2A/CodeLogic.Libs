@@ -160,6 +160,235 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
+    /// <summary>
+    /// Inserts a single entity, or updates all non-auto-PK columns to the entity's values
+    /// if a UNIQUE/PRIMARY-KEY conflict occurs (set semantics). Issues
+    /// <c>INSERT ... AS new ON DUPLICATE KEY UPDATE</c> (MySQL 8.0.20+ alias syntax).
+    /// On a new insert the auto-PK is refreshed from <c>LAST_INSERT_ID()</c>; on a pure
+    /// update the entity's existing PK value is preserved.
+    /// </summary>
+    public async Task<Result<T>> UpsertAsync(T entity, CancellationToken ct = default)
+    {
+        try
+        {
+            var table = EntityMetadata<T>.TableName;
+            var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
+            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
+            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = new.`{c.ColumnName}`"));
+            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) AS new ON DUPLICATE KEY UPDATE {updateList}; SELECT LAST_INSERT_ID();";
+
+            LogQuery(sql);
+            var sw = Stopwatch.StartNew();
+
+            var lastId = await ExecuteAsync(async conn =>
+            {
+                await using var cmd = conn.CreateCommand();
+                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                cmd.CommandText = sql;
+                foreach (var col in insertCols)
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity)) ?? DBNull.Value);
+                return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            sw.Stop();
+            LogSlowQuery(sql, sw.ElapsedMilliseconds);
+
+            var pk = EntityMetadata<T>.PrimaryKey;
+            if (pk is not null && pk.IsAutoIncrement && lastId is not null && lastId is not DBNull)
+            {
+                // LAST_INSERT_ID() is 0 on a pure update; only refresh on a new insert.
+                var lastIdLong = Convert.ToInt64(lastId);
+                if (lastIdLong > 0)
+                {
+                    var converted = Convert.ChangeType(lastIdLong, pk.Property.PropertyType);
+                    pk.Set(entity, converted);
+                }
+            }
+
+            QueryCache.Invalidate(table);
+            return Result<T>.Success(entity);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[MySQL2] UpsertAsync failed: {ex.Message}", ex);
+            return Result<T>.Failure(Error.FromException(ex, "mysql.upsert_failed"));
+        }
+    }
+
+    /// <summary>
+    /// Bulk-upserts a collection of entities using batched
+    /// <c>INSERT ... AS new ON DUPLICATE KEY UPDATE</c> statements (set semantics).
+    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// Returns the total rows-affected count (MySQL counts 1 for each insert and 2 for each
+    /// update, so this is not equal to <c>entities.Count</c>).
+    /// </summary>
+    public async Task<Result<int>> UpsertManyAsync(IEnumerable<T> entities, CancellationToken ct = default)
+    {
+        var list = entities as IList<T> ?? entities.ToList();
+        if (list.Count == 0) return Result<int>.Success(0);
+
+        try
+        {
+            var table = EntityMetadata<T>.TableName;
+            var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
+            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = new.`{c.ColumnName}`"));
+
+            var affected = 0;
+            var sw = Stopwatch.StartNew();
+
+            await ExecuteAsync<int>(async conn =>
+            {
+                for (var start = 0; start < list.Count; start += _maxBatchInsertSize)
+                {
+                    var end = Math.Min(start + _maxBatchInsertSize, list.Count);
+                    var count = end - start;
+
+                    await using var cmd = conn.CreateCommand();
+                    if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+
+                    var valueTuples = new string[count];
+                    for (var i = 0; i < count; i++)
+                    {
+                        var entity = list[start + i];
+                        var tupleParts = new string[insertCols.Length];
+                        for (var j = 0; j < insertCols.Length; j++)
+                        {
+                            var paramName = $"@p_{i}_{j}";
+                            tupleParts[j] = paramName;
+                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!)) ?? DBNull.Value);
+                        }
+                        valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
+                    }
+
+                    cmd.CommandText = $"INSERT INTO `{table}` ({columnList}) VALUES {string.Join(", ", valueTuples)} AS new ON DUPLICATE KEY UPDATE {updateList};";
+                    LogQuery(cmd.CommandText);
+                    affected += await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                return affected;
+            }).ConfigureAwait(false);
+
+            sw.Stop();
+            _logger?.Debug($"[MySQL2] Bulk-upserted {list.Count} records into `{table}` in {sw.ElapsedMilliseconds}ms (rows affected: {affected})");
+            QueryCache.Invalidate(table);
+            return Result<int>.Success(affected);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[MySQL2] UpsertManyAsync failed: {ex.Message}", ex);
+            return Result<int>.Failure(Error.FromException(ex, "mysql.bulk_upsert_failed"));
+        }
+    }
+
+    /// <summary>
+    /// Inserts <paramref name="insertSeed"/> if no UNIQUE/PRIMARY-KEY conflict occurs;
+    /// otherwise applies increment / set semantics to the listed properties on conflict.
+    /// Properties NOT listed in either array are insert-only — present in the
+    /// <c>VALUES</c> clause but absent from <c>ON DUPLICATE KEY UPDATE</c> (so they don't
+    /// change on conflict — useful for <c>created_utc</c> style columns). Property names
+    /// resolve through <see cref="EntityMetadata{T}"/> so callers can use
+    /// <c>nameof(...)</c> for compile-time-safe column references.
+    /// </summary>
+    /// <param name="insertSeed">Row to INSERT if no conflict. All non-auto-PK columns
+    /// go into the <c>VALUES</c> clause.</param>
+    /// <param name="incrementProperties">C# property names whose columns should
+    /// <c>col = col + new.col</c> on conflict.</param>
+    /// <param name="setProperties">C# property names whose columns should <c>col = new.col</c>
+    /// on conflict. Defaults to empty.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Rows affected (MySQL: 1 = insert, 2 = update with changes, 0 = update with
+    /// no change).</returns>
+    /// <exception cref="ArgumentException">
+    /// A name in <paramref name="incrementProperties"/> or <paramref name="setProperties"/>
+    /// does not resolve to a property on <typeparamref name="T"/>, refers to an
+    /// auto-increment PK, or appears in both arrays.
+    /// </exception>
+    public async Task<Result<int>> UpsertWithIncrementsAsync(
+        T insertSeed,
+        IReadOnlyList<string> incrementProperties,
+        IReadOnlyList<string>? setProperties = null,
+        CancellationToken ct = default)
+    {
+        if (insertSeed is null) throw new ArgumentNullException(nameof(insertSeed));
+        if (incrementProperties is null) throw new ArgumentNullException(nameof(incrementProperties));
+        setProperties ??= Array.Empty<string>();
+
+        var incrementCols = ResolveUpsertColumns(incrementProperties, nameof(incrementProperties));
+        var setCols       = ResolveUpsertColumns(setProperties, nameof(setProperties));
+
+        // Reject overlap: a property listed in both arrays would produce ambiguous SQL.
+        if (incrementCols.Length > 0 && setCols.Length > 0)
+        {
+            var incNames = new HashSet<string>(incrementProperties, StringComparer.Ordinal);
+            foreach (var name in setProperties)
+            {
+                if (incNames.Contains(name))
+                    throw new ArgumentException(
+                        $"Property '{name}' appears in both incrementProperties and setProperties.",
+                        nameof(setProperties));
+            }
+        }
+
+        if (incrementCols.Length == 0 && setCols.Length == 0)
+            throw new ArgumentException(
+                "At least one of incrementProperties or setProperties must contain entries.",
+                nameof(incrementProperties));
+
+        try
+        {
+            var table = EntityMetadata<T>.TableName;
+            var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
+            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
+
+            var updateClauses = incrementCols
+                .Select(c => $"`{c.ColumnName}` = `{c.ColumnName}` + new.`{c.ColumnName}`")
+                .Concat(setCols.Select(c => $"`{c.ColumnName}` = new.`{c.ColumnName}`"));
+            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) AS new ON DUPLICATE KEY UPDATE {string.Join(", ", updateClauses)};";
+
+            LogQuery(sql);
+            var sw = Stopwatch.StartNew();
+
+            var affected = await ExecuteAsync(async conn =>
+            {
+                await using var cmd = conn.CreateCommand();
+                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                cmd.CommandText = sql;
+                foreach (var col in insertCols)
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(insertSeed)) ?? DBNull.Value);
+                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            sw.Stop();
+            LogSlowQuery(sql, sw.ElapsedMilliseconds);
+            QueryCache.Invalidate(table);
+            return Result<int>.Success(affected);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[MySQL2] UpsertWithIncrementsAsync failed: {ex.Message}", ex);
+            return Result<int>.Failure(Error.FromException(ex, "mysql.upsert_increment_failed"));
+        }
+    }
+
+    private static ColumnMetadata[] ResolveUpsertColumns(IReadOnlyList<string> propertyNames, string paramName)
+    {
+        var cols = new ColumnMetadata[propertyNames.Count];
+        for (var i = 0; i < propertyNames.Count; i++)
+        {
+            var name = propertyNames[i];
+            if (!EntityMetadata<T>.ColumnsByPropertyName.TryGetValue(name, out var col))
+                throw new ArgumentException($"Property '{name}' not found on type {typeof(T).Name}", paramName);
+            if (col.IsAutoIncrement)
+                throw new ArgumentException(
+                    $"Property '{name}' is an auto-increment primary key and cannot appear in {paramName}.",
+                    paramName);
+            cols[i] = col;
+        }
+        return cols;
+    }
+
     /// <summary>Retrieves an entity by its primary key value.</summary>
     public async Task<Result<T?>> GetByIdAsync(object id, CancellationToken ct = default)
     {
