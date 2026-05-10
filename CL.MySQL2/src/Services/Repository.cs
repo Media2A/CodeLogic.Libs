@@ -175,7 +175,10 @@ public sealed class Repository<T> where T : class, new()
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
             var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
             var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
-            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = new.`{c.ColumnName}`"));
+            // LHS is qualified with the table name to avoid the
+            // "Column 'X' in field list is ambiguous" error MySQL throws when
+            // both the base table and the `AS new` alias have the same column.
+            var updateList = string.Join(", ", insertCols.Select(c => $"`{table}`.`{c.ColumnName}` = new.`{c.ColumnName}`"));
             var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) AS new ON DUPLICATE KEY UPDATE {updateList}; SELECT LAST_INSERT_ID();";
 
             LogQuery(sql);
@@ -233,7 +236,8 @@ public sealed class Repository<T> where T : class, new()
             var table = EntityMetadata<T>.TableName;
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
             var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
-            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = new.`{c.ColumnName}`"));
+            // LHS table-qualified to disambiguate from the `AS new` row alias.
+            var updateList = string.Join(", ", insertCols.Select(c => $"`{table}`.`{c.ColumnName}` = new.`{c.ColumnName}`"));
 
             var affected = 0;
             var sw = Stopwatch.StartNew();
@@ -342,9 +346,14 @@ public sealed class Repository<T> where T : class, new()
             var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
             var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
 
+            // Qualify unaliased column references with the table name. With the
+            // `AS new` row alias, an unqualified `col` in the SET clause is
+            // ambiguous (MySQL: "Column 'X' in field list is ambiguous") because
+            // it could refer to either the existing row or the new row. Prefixing
+            // with the table name pins it to the existing row.
             var updateClauses = incrementCols
-                .Select(c => $"`{c.ColumnName}` = `{c.ColumnName}` + new.`{c.ColumnName}`")
-                .Concat(setCols.Select(c => $"`{c.ColumnName}` = new.`{c.ColumnName}`"));
+                .Select(c => $"`{table}`.`{c.ColumnName}` = `{table}`.`{c.ColumnName}` + new.`{c.ColumnName}`")
+                .Concat(setCols.Select(c => $"`{table}`.`{c.ColumnName}` = new.`{c.ColumnName}`"));
             var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) AS new ON DUPLICATE KEY UPDATE {string.Join(", ", updateClauses)};";
 
             LogQuery(sql);
