@@ -4,6 +4,20 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## [4.2.2] — 2026-05-15
+
+### Fixed
+
+- **SmartCache pool no longer corrupts `ToListAsync` results.** The pool's
+  refresh factory stored the unwrapped `List<T>` instead of the
+  `Result<List<T>>` that the cache-aside read path expects. After the first
+  background refresh tick, every subsequent read failed the `(Result<List<T>>)`
+  cast inside `GetOrSetAsync`, the outer try/catch turned it into a Failure
+  Result, and callers saw an empty list (manifested as "No servers configured"
+  / empty leaderboards roughly one refresh interval after warm-up). `FirstOrDefaultAsync`
+  and `CountAsync` already cached the full Result and were unaffected; only
+  `ToListAsync` was wrong.
+
 ## [4.2.1] — 2026-05-15
 
 ### Fixed
