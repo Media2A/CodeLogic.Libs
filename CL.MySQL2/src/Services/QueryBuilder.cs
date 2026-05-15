@@ -212,8 +212,9 @@ public sealed class QueryBuilder<T> where T : class, new()
                     pool.RegisterOrTouch(_connectionId, tableName, sql, parms,
                         refreshFactory: async tickCt =>
                         {
+                            // Store the full Result — GetOrSetAsync reads it back as Result<List<T>> and casts.
                             var r = await ExecuteToList(sql, parms, tickCt).ConfigureAwait(false);
-                            return r.IsSuccess ? (object?)r.Value : null;
+                            return r.IsSuccess ? (object?)r : null;
                         });
 
                     var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
