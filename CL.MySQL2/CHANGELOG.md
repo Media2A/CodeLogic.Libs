@@ -4,6 +4,34 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## [4.2.3] — 2026-05-15
+
+### Fixed
+
+- **Cache orphan accumulation on mutations.** `QueryCache.Invalidate(tableName)`
+  previously only bumped the per-table version counter — old cache entries
+  (now unreachable via the read path because the cache key changed) lingered
+  in the underlying store until TTL or LRU swept them. On a busy app this
+  produced unbounded memory growth. Invalidate now also calls
+  `ICacheStore.EvictByTableAsync` to sweep matching entries in the same step.
+- **SmartCachePool orphan tracking.** Each pool entry now remembers the
+  cache key it last wrote. If the next tick computes a different key
+  (because a mutation bumped the table version between ticks), the
+  previous key is evicted explicitly. Works on any `ICacheStore`
+  implementation including ones that can't enumerate (Redis without
+  SCAN, memcached).
+
+### Added
+
+- `ICacheStore.EvictByTableAsync(tableName)` — bulk eviction by table.
+  Default in-process implementation is an O(n) scan over current entries.
+  Distributed adapters can override (e.g. Redis tag-set or key prefix).
+- `ICacheStore.CountByTable()` — entries grouped by tableName for diagnostics.
+- `QueryCache.GetStats()` → `QueryCacheStats(TotalEntries, EntriesByTable,
+  TableVersions)`. Surfaced on the library API via `MySQL2Library.GetCacheStats()`
+  so admin tools can render "what's in the cache right now" without
+  dumping values.
+
 ## [4.2.2] — 2026-05-15
 
 ### Fixed

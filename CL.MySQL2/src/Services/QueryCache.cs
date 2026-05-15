@@ -123,12 +123,40 @@ public static class QueryCache
         return _store.SetAsync(cacheKey, value, ttl, tableName, ct);
     }
 
-    /// <summary>Invalidate all cached entries for the given table.</summary>
-    public static void Invalidate(string tableName) =>
+    /// <summary>
+    /// Invalidate all cached entries for the given table.
+    /// <para>
+    /// Two-step: bump the per-table version (so future reads compute a
+    /// different cache key and miss any in-flight refresh writes), then
+    /// evict the now-orphaned entries from the underlying store so they
+    /// don't accumulate. Without the second step, every mutation leaves
+    /// behind the previous version's entries until TTL/LRU clears them,
+    /// which on a busy app produces unbounded memory growth.
+    /// </para>
+    /// </summary>
+    public static void Invalidate(string tableName)
+    {
         _tableVersions.AddOrUpdate(tableName, 1L, (_, v) => v + 1);
+        // Fire-and-forget — the eviction sweep doesn't need to complete
+        // before the mutation that triggered it returns. The cache is
+        // already "logically invalid" from the version bump above.
+        _ = _store.EvictByTableAsync(tableName);
+    }
 
     /// <summary>Invalidate for the table behind entity type <typeparamref name="T"/>.</summary>
     public static void Invalidate<T>() where T : class => Invalidate(ResolveTableName<T>());
+
+    /// <summary>
+    /// Diagnostic snapshot: total entries + per-table counts + table-version
+    /// map. Returned types are immutable copies; safe to log or render on an
+    /// admin page without holding cache locks.
+    /// </summary>
+    public static QueryCacheStats GetStats()
+    {
+        var byTable = _store.CountByTable();
+        var versions = new Dictionary<string, long>(_tableVersions, StringComparer.OrdinalIgnoreCase);
+        return new QueryCacheStats(_store.Count, byTable, versions);
+    }
 
     /// <summary>Clear the entire cache (admin / tests).</summary>
     public static void Clear()
@@ -136,6 +164,9 @@ public static class QueryCache
         _store.Clear();
         _tableVersions.Clear();
     }
+
+    /// <summary>Internal hook for SmartCachePool to evict a single key.</summary>
+    internal static Task EvictAsync(string cacheKey) => _store.EvictAsync(cacheKey);
 
     /// <summary>
     /// Build a deterministic cache key from a SQL query, its parameters, and the table it
