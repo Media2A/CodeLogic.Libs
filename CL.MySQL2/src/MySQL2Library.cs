@@ -380,8 +380,21 @@ public sealed class MySQL2Library : ILibrary
     /// no read. Default 3 — at a 30-second refresh interval, an unread entry
     /// is dropped after ~90 seconds, bounding cardinality on parameterized queries.
     /// </param>
-    public SmartCachePool RegisterCachePool(string name, TimeSpan refreshEvery, int maxIdleFires = 3) =>
-        SmartCachePoolRegistry.Register(name, refreshEvery, maxIdleFires);
+    /// <param name="warmUp">
+    /// Optional warm-up callback. When supplied, the pool runs it once as a
+    /// fire-and-forget task right after registration so the cache is hot
+    /// before the first user request hits it. Inside the callback, just call
+    /// the queries that should be warm (with their normal
+    /// <c>.SmartCache(name)</c> decoration) — they auto-register with the
+    /// pool as usual. Exceptions are caught and logged; the pool stays
+    /// lazy if warm-up fails.
+    /// </param>
+    public SmartCachePool RegisterCachePool(
+        string name,
+        TimeSpan refreshEvery,
+        int maxIdleFires = 3,
+        Func<Task>? warmUp = null) =>
+        SmartCachePoolRegistry.Register(name, refreshEvery, maxIdleFires, warmUp);
 
     /// <summary>Triggers an out-of-schedule refresh for the named pool.</summary>
     public Task RefreshCachePoolAsync(string name, CancellationToken ct = default) =>

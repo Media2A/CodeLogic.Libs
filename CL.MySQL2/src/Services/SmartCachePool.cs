@@ -52,6 +52,37 @@ public sealed class SmartCachePool : IAsyncDisposable
     }
 
     /// <summary>
+    /// Runs <paramref name="warmUp"/> as a fire-and-forget task so the pool's
+    /// hot queries are populated before any user request hits them. Inside
+    /// <paramref name="warmUp"/>, just call the queries that should be warm
+    /// (with their normal <c>.SmartCache(...)</c> decoration) — they
+    /// auto-register with this pool as they always do.
+    /// <para>
+    /// Exceptions are caught and logged so a slow or broken warm-up never
+    /// crashes startup. The pool stays lazy if the warm-up fails: queries
+    /// still register on their first real read.
+    /// </para>
+    /// </summary>
+    public void WarmUp(Func<Task> warmUp)
+    {
+        if (warmUp is null) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                await warmUp().ConfigureAwait(false);
+                sw.Stop();
+                _logger?.Info($"[MySQL2] SmartCachePool '{Name}' warm-up complete: {_entries.Count} entries primed in {sw.ElapsedMilliseconds}ms.");
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning($"[MySQL2] SmartCachePool '{Name}' warm-up faulted: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>
     /// Registers a query in the pool's refresh list, or touches the existing
     /// entry's last-read timestamp + resets its idle counter. Called from
     /// terminal methods on the query builder when <c>.SmartCache(...)</c> is set.

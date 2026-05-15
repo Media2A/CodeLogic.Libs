@@ -19,23 +19,36 @@ public static class SmartCachePoolRegistry
     /// <summary>
     /// Registers and starts a new pool. If a pool with the same name already
     /// exists it is returned unchanged (idempotent on plugin reloads).
+    /// <para>
+    /// When <paramref name="warmUp"/> is supplied the pool runs it once as
+    /// a fire-and-forget task so its hot queries are populated before the
+    /// first user request. Inside <paramref name="warmUp"/>, just call the
+    /// queries that should be warm — they auto-register with the pool via
+    /// their normal <c>.SmartCache(name)</c> decoration. The warm-up is
+    /// skipped on a repeat registration of an existing pool.
+    /// </para>
     /// </summary>
     public static SmartCachePool Register(
         string name,
         TimeSpan refreshEvery,
-        int maxIdleFires = 3)
+        int maxIdleFires = 3,
+        Func<Task>? warmUp = null)
     {
         if (string.IsNullOrWhiteSpace(name))
             throw new ArgumentException("Pool name must be non-empty.", nameof(name));
         if (refreshEvery <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(refreshEvery), "Refresh interval must be positive.");
 
-        return _pools.GetOrAdd(name, key =>
+        var created = false;
+        var pool = _pools.GetOrAdd(name, key =>
         {
-            var pool = new SmartCachePool(key, refreshEvery, maxIdleFires, _logger);
-            pool.Start();
-            return pool;
+            var p = new SmartCachePool(key, refreshEvery, maxIdleFires, _logger);
+            p.Start();
+            created = true;
+            return p;
         });
+        if (created && warmUp is not null) pool.WarmUp(warmUp);
+        return pool;
     }
 
     /// <summary>Returns the pool with the given name, or <c>null</c> if not registered.</summary>

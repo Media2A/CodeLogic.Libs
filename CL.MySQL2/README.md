@@ -143,6 +143,17 @@ var top10 = await mysql.Query<PlayerRecord>()
 // Out-of-schedule refresh — useful right after a deploy to prime the cache.
 await mysql.RefreshCachePoolAsync("dashboard");
 
+// Warm the cache on startup — readers never see a cold pool. The warm-up
+// callback just calls the queries that should be hot; they auto-register
+// with the pool via .SmartCache("dashboard") as usual. Runs as a fire-and-
+// forget task so startup doesn't block.
+mysql.RegisterCachePool("dashboard", TimeSpan.FromSeconds(30),
+    warmUp: async () =>
+    {
+        await statsService.GetDashboardTop10Async();
+        await statsService.GetRecentMatchesAsync();
+    });
+
 // Diagnostic snapshot
 foreach (var s in mysql.GetCachePoolStats())
     Console.WriteLine($"{s.Name}: {s.EntryCount} entries, {s.TicksFired} ticks fired");

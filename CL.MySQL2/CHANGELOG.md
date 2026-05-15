@@ -4,6 +4,21 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## [4.2.0] — 2026-05-15
+
+### Added
+
+- **Smart-cache pool warm-up on registration.** `RegisterCachePool` now
+  accepts an optional `warmUp: Func<Task>` callback that fires as a
+  fire-and-forget task right after the pool starts. The callback just
+  calls the queries that should be warm — they auto-register with the
+  pool via their normal `.SmartCache(name)` decoration — so the cache
+  is hot before the first user request hits it. Exceptions are caught
+  and logged; the pool stays lazy if warm-up fails.
+- `SmartCachePool.WarmUp(Func<Task>)` — public method exposing the same
+  behaviour for callers that want to warm a pool independently of
+  registration.
+
 ## [4.1.2] — 2026-05-15
 
 ### Added
