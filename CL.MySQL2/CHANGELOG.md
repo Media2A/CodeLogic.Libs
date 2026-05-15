@@ -4,6 +4,19 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## [4.2.1] — 2026-05-15
+
+### Fixed
+
+- **Failure Results no longer poison the cache.** Previously, a query that
+  failed (e.g. transient connection error during a cold warm-up) had its
+  `Result<T>.Failure` value cached just like a successful one — subsequent
+  reads served the failure until the entry's TTL expired or a pool refresh
+  overwrote it. Now `QueryCache.GetOrSetAsync` skips writing failure Results,
+  evicts any pre-existing failure entry on read, and `SetDirectAsync` (the
+  smart-cache pool's refresh path) refuses to write failures too. Empty
+  server lists / leaderboards on first request after a deploy are gone.
+
 ## [4.2.0] — 2026-05-15
 
 ### Added
