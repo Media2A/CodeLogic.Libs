@@ -97,10 +97,15 @@ jobs:
             }
             $projectLogStr = ($projectLog ?? @()) -join "`n"
 
-            # Determine bump level for THIS project
-            if ($projectLogStr -match '(?i)breaking[:\s]|BREAKING CHANGE') {
+            # Determine bump level for THIS project.
+            # Conventional-commit prefixes match with optional (scope):
+            #   feat: …        → minor
+            #   feat(MySQL2): … → minor
+            #   feat!: …       → major (breaking-bang)
+            #   BREAKING CHANGE in any commit body → major
+            if ($projectLogStr -match '(?im)^(breaking[:\s]|feat[!]|[a-z]+(\([^)]*\))?!:|BREAKING CHANGE)') {
               $bump = 'major'
-            } elseif ($projectLogStr -match '(?i)feat[:\s]') {
+            } elseif ($projectLogStr -match '(?im)^feat(\([^)]*\))?[:\s]') {
               $bump = 'minor'
             } else {
               $bump = 'patch'
