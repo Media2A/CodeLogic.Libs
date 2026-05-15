@@ -35,4 +35,19 @@
     <Compile Include="$(MSBuildThisFileDirectory)Shared/InternalLibraryVersion.cs"
              Link="Shared/InternalLibraryVersion.cs" />
   </ItemGroup>
+
+  <!--
+    Populate PackageReleaseNotes from the lib's local CHANGELOG.md so the
+    "Release Notes" section on NuGet.org shows what changed. Runs before
+    Pack so the value is in scope when the nuspec is generated.
+    NuGet's hard cap on PackageReleaseNotes is 35 000 characters; our
+    changelogs are well under that.
+  -->
+  <Target Name="_InjectChangelogIntoPackageReleaseNotes"
+          BeforeTargets="GenerateNuspec"
+          Condition="Exists('$(MSBuildProjectDirectory)\CHANGELOG.md')">
+    <PropertyGroup>
+      <PackageReleaseNotes>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\CHANGELOG.md'))</PackageReleaseNotes>
+    </PropertyGroup>
+  </Target>
 </Project>
