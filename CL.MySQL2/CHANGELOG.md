@@ -1,0 +1,121 @@
+# CL.MySQL2 — Changelog
+
+All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
+[Semantic Versioning](https://semver.org/). The version listed here matches the
+NuGet package version of `CodeLogic.MySQL2`.
+
+## [4.2.0] — Unreleased
+
+### Added
+
+- **Smart cache pools** — named groups of cached queries kept warm by a
+  background timer (`mysql.RegisterCachePool("dashboard", refreshEvery: 30s)`,
+  opt in per-query with `.SmartCache("dashboard")`). Reads after the first
+  populate the cache never block on the DB — the pool's timer re-runs every
+  registered query in the background and overwrites the entry.
+- `SmartCachePool.RefreshNowAsync()` — out-of-schedule refresh, useful right
+  after a deploy to prime the cache before the first user hits the page.
+- `MySQL2Library.GetCachePoolStats()` — diagnostic snapshot per pool
+  (entry count, ticks fired, ticks failed, last tick UTC).
+- `QueryCache.SetDirectAsync(...)` — internal cache write API used by pools.
+
+### Notes
+
+- Smart cache is mutually exclusive with `.WithCache(TimeSpan)` — if both are
+  set, the pool wins and the TTL comes from `refreshEvery * 2`.
+- Unknown pool name on `.SmartCache(name)` logs a warning and falls back to
+  non-cached execution (no exception).
+- Per-pool eviction policy: an entry that has not been read for
+  `MaxIdleFires` (default 3) consecutive ticks is dropped from the refresh
+  list. Bounds cardinality on parameterized queries.
+- Smart cache is disabled inside a transaction scope (same as `.WithCache`).
+- Single-node only in v4.2. Multi-node coordination is on the roadmap.
+
+## [4.1.1] — 2026-04-17
+
+### Fixed
+
+- Qualify LHS columns in upsert SET clauses so `UpsertAsync` no longer
+  generates ambiguous column references when the table has columns whose
+  names clash with parameter placeholders.
+
+## [4.1.0] — 2026-04-17
+
+### Added
+
+- **Typed upsert** — `UpsertAsync` + `UpsertWithIncrementsAsync` on the
+  repository. Compiles to `INSERT ... ON DUPLICATE KEY UPDATE ...` with
+  full LINQ-shaped value/increment expressions on the update side.
+
+### Changed
+
+- `LibraryManifest.Version` now reads from the assembly's `AssemblyVersion`
+  attribute at runtime instead of being a hard-coded string. Keeps the
+  manifest honest across rebuilds.
+
+## [4.0.4] — 2026-04-16
+
+### Changed
+
+- README + manifest refresh across every CodeLogic library for the v4 baseline.
+- No functional changes vs 4.0.3.
+
+## [4.0.1] — 2026-04-09
+
+### Fixed
+
+- Drop the `Expression.Compile().DynamicInvoke()` fast-path inside the SQL
+  expression visitor — it broke on closures over generic types. The visitor
+  now always walks the tree.
+
+## [4.0.0] — 2026-04-09
+
+Major rewrite. Breaking.
+
+### Added
+
+- **Projection pushdown** — `.Select<TResult>(x => new { ... })` emits a
+  real `SELECT col1, col2, ...` column list instead of `SELECT *`. Combined
+  with compiled materializers this often cuts row-transfer bandwidth by 80%+.
+- **SQL-side aggregation** — `.GroupBy(...).Select(g => new { g.Key,
+  g.Sum(...), g.Average(...), ... })` translates to real `GROUP BY` +
+  aggregate functions. No client-side row materialization.
+- **`SqlFn` helpers** — server-side function markers (`SqlFn.DayOfWeek`,
+  `SqlFn.Hour`, `SqlFn.BucketUtc`, `SqlFn.Coalesce`, `SqlFn.Round`, etc.)
+  recognized by the translator — mirrors EF's `EF.Functions` pattern.
+- **`[Index]` attribute** — declare named, unique, and covering indexes
+  (with `Include = new[] { ... }`) at the column level.
+- **`[RetainDays]` attribute** — opt entities into a daily background purge
+  worker that runs batched `DELETE` until drained.
+- **Working result cache** — `.WithCache(TimeSpan)` with two correctness
+  fixes from prior versions:
+  - DateTime closures near `UtcNow` are time-quantized to a configurable
+    window (default 60s) so `.Where(x => x.At >= UtcNow.AddDays(-30))`
+    stops producing a unique cache key per call.
+  - Mutations bump a per-table version that participates in the cache
+    key — invalidation is free (old keys become un-hittable, no eviction
+    loop).
+- **`EntityMetadata<T>` + compiled `Materializer<T>`** — reflection runs
+  once per entity at first use; subsequent reads use a compiled
+  reader-to-entity function.
+- **Observability events** — `QueryExecutedEvent`, `SlowQueryEvent`,
+  `CacheHitEvent`, `CacheMissEvent`, `N1QueryDetectedEvent`,
+  `TableSyncedEvent` publish to the CodeLogic event bus.
+- **`MaxBatchInsertSize`, `MaxInClauseValues`, `PreparedStatementCacheSize`,
+  `N1DetectorThreshold`, `CaptureExplainOnSlowQuery`, `DefaultStringSize`,
+  `CacheEnabledOverride`** — per-database config knobs.
+- **`CacheConfiguration`** — global cache settings (`Enabled`,
+  `MaxEntries`, `DefaultTtlSeconds`, `TimeQuantizeSeconds`,
+  `PublishEvents`).
+
+### Changed
+
+- Republished as v4.0.0 to reset the version line with the new package shape.
+- All public APIs refreshed under the v4 baseline.
+
+## Earlier releases
+
+Pre-4.0 history is retained in the
+[git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.MySQL2)
+but is not documented in detail here — the library shape changed
+significantly in the v4 rewrite.

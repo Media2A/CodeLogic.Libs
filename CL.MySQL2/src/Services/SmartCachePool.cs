@@ -1,0 +1,230 @@
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using CodeLogic.Core.Logging;
+
+namespace CL.MySQL2.Services;
+
+/// <summary>
+/// A named group of cached queries that is kept warm by a background timer.
+/// Queries opt in via <c>.SmartCache("poolName")</c>; on first execution they
+/// register their refresh factory with the pool. Every <see cref="RefreshEvery"/>
+/// the pool re-runs every registered factory and overwrites the cache entry,
+/// so subsequent reads never block on the DB.
+/// <para>
+/// Cardinality is bounded by the eviction policy: an entry that hasn't been
+/// read for <see cref="MaxIdleFires"/> consecutive refresh ticks is dropped
+/// from the refresh list (the cache entry expires on its own TTL afterwards).
+/// </para>
+/// </summary>
+public sealed class SmartCachePool : IAsyncDisposable
+{
+    /// <summary>Pool name used by <c>.SmartCache(name)</c>. Case-insensitive.</summary>
+    public string Name { get; }
+
+    /// <summary>How often the pool re-runs every registered factory.</summary>
+    public TimeSpan RefreshEvery { get; }
+
+    /// <summary>Drop an entry after this many consecutive refresh ticks with no read. Default 3.</summary>
+    public int MaxIdleFires { get; }
+
+    private readonly ConcurrentDictionary<string, PoolEntry> _entries = new(StringComparer.Ordinal);
+    private readonly ILogger? _logger;
+    private readonly CancellationTokenSource _cts = new();
+    private Task? _loop;
+    private long _ticksFired;
+    private long _ticksFailed;
+    private DateTime _lastTickUtc;
+
+    internal SmartCachePool(string name, TimeSpan refreshEvery, int maxIdleFires, ILogger? logger)
+    {
+        Name = name;
+        RefreshEvery = refreshEvery;
+        MaxIdleFires = Math.Max(1, maxIdleFires);
+        _logger = logger;
+    }
+
+    internal void Start()
+    {
+        if (_loop is not null) return;
+        _loop = Task.Run(() => LoopAsync(_cts.Token));
+        _logger?.Info($"[MySQL2] SmartCachePool '{Name}' started (refreshEvery={RefreshEvery.TotalSeconds:0.#}s, maxIdleFires={MaxIdleFires}).");
+    }
+
+    /// <summary>
+    /// Registers a query in the pool's refresh list, or touches the existing
+    /// entry's last-read timestamp + resets its idle counter. Called from
+    /// terminal methods on the query builder when <c>.SmartCache(...)</c> is set.
+    /// </summary>
+    internal void RegisterOrTouch(
+        string connectionId,
+        string tableName,
+        string sql,
+        Dictionary<string, object?> parms,
+        Func<CancellationToken, Task<object?>> refreshFactory)
+    {
+        var entryId = ComputeEntryId(connectionId, tableName, sql, parms);
+        var entry = _entries.GetOrAdd(entryId, _ => new PoolEntry
+        {
+            EntryId       = entryId,
+            ConnectionId  = connectionId,
+            TableName     = tableName,
+            Sql           = sql,
+            Parms         = new Dictionary<string, object?>(parms),
+            RefreshFactory = refreshFactory,
+        });
+        Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
+        Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
+    }
+
+    /// <summary>
+    /// Runs every registered factory once. Public so callers can warm the
+    /// pool on startup (or trigger an out-of-schedule refresh after a deploy).
+    /// </summary>
+    public async Task RefreshNowAsync(CancellationToken ct = default)
+    {
+        await TickAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Snapshot of pool stats for diagnostics.</summary>
+    public SmartCachePoolStats GetStats()
+    {
+        return new SmartCachePoolStats(
+            Name,
+            RefreshEvery,
+            MaxIdleFires,
+            _entries.Count,
+            Interlocked.Read(ref _ticksFired),
+            Interlocked.Read(ref _ticksFailed),
+            _lastTickUtc);
+    }
+
+    private async Task LoopAsync(CancellationToken ct)
+    {
+        // First tick after one full interval — never block startup. Callers
+        // wanting an immediate warm-up call RefreshNowAsync() explicitly.
+        try { await Task.Delay(RefreshEvery, ct).ConfigureAwait(false); }
+        catch (TaskCanceledException) { return; }
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await TickAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning($"[MySQL2] SmartCachePool '{Name}' tick faulted: {ex.Message}");
+            }
+
+            try { await Task.Delay(RefreshEvery, ct).ConfigureAwait(false); }
+            catch (TaskCanceledException) { return; }
+        }
+    }
+
+    private async Task TickAsync(CancellationToken ct)
+    {
+        _lastTickUtc = DateTime.UtcNow;
+        Interlocked.Increment(ref _ticksFired);
+
+        foreach (var kv in _entries)
+        {
+            if (ct.IsCancellationRequested) return;
+            var entry = kv.Value;
+
+            // Idle eviction: if nobody has read this entry for MaxIdleFires
+            // consecutive ticks, drop it from the refresh list.
+            var idle = Interlocked.Increment(ref entry.ConsecutiveIdleFires);
+            if (idle > MaxIdleFires)
+            {
+                if (_entries.TryRemove(kv))
+                    _logger?.Debug($"[MySQL2] SmartCachePool '{Name}' evicted idle entry {entry.EntryId[..8]} ({entry.TableName}).");
+                continue;
+            }
+
+            try
+            {
+                var result = await entry.RefreshFactory(ct).ConfigureAwait(false);
+                if (result is null) continue;
+
+                // Cache key is rebuilt each tick: table-version bumps from
+                // mutations mean the old key is unreachable; we write to
+                // the current key so the next read is warm.
+                var cacheKey = QueryCache.BuildCacheKey(
+                    entry.ConnectionId, entry.TableName, entry.Sql, entry.Parms);
+
+                // TTL = 2x refresh interval. Survives one missed refresh
+                // before falling back to cache-aside cold read.
+                var ttl = TimeSpan.FromMilliseconds(RefreshEvery.TotalMilliseconds * 2);
+                await QueryCache.SetDirectAsync(cacheKey, result, ttl, entry.TableName, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Increment(ref _ticksFailed);
+                _logger?.Warning($"[MySQL2] SmartCachePool '{Name}' refresh failed for {entry.TableName}/{entry.EntryId[..8]}: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Marks a touched entry to reset its idle counter. Called by the
+    /// query builder on every cache hit so an actively-read entry never
+    /// drifts toward eviction.
+    /// </summary>
+    internal void Touch(string connectionId, string tableName, string sql, Dictionary<string, object?> parms)
+    {
+        var entryId = ComputeEntryId(connectionId, tableName, sql, parms);
+        if (_entries.TryGetValue(entryId, out var entry))
+        {
+            Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
+        }
+    }
+
+    private static string ComputeEntryId(string connectionId, string tableName, string sql, Dictionary<string, object?> parms)
+    {
+        // Stable across table-version bumps (unlike cache keys). Identifies
+        // a logical query within the pool so reads and refreshes refer to
+        // the same entry.
+        var sb = new StringBuilder();
+        sb.Append(connectionId).Append('|').Append(tableName).Append('|').Append(sql);
+        foreach (var kv in parms.OrderBy(p => p.Key, StringComparer.Ordinal))
+            sb.Append('|').Append(kv.Key).Append('=').Append(kv.Value?.ToString() ?? "NULL");
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
+        return Convert.ToHexString(hash);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        if (_loop is not null)
+        {
+            try { await _loop.ConfigureAwait(false); } catch { }
+        }
+        _cts.Dispose();
+        _entries.Clear();
+    }
+
+    private sealed class PoolEntry
+    {
+        public required string EntryId { get; init; }
+        public required string ConnectionId { get; init; }
+        public required string TableName { get; init; }
+        public required string Sql { get; init; }
+        public required Dictionary<string, object?> Parms { get; init; }
+        public required Func<CancellationToken, Task<object?>> RefreshFactory { get; init; }
+        public long LastReadUtcTicks;
+        public int ConsecutiveIdleFires;
+    }
+}
+
+/// <summary>Diagnostic snapshot of a pool's state.</summary>
+public sealed record SmartCachePoolStats(
+    string Name,
+    TimeSpan RefreshEvery,
+    int MaxIdleFires,
+    int EntryCount,
+    long TicksFired,
+    long TicksFailed,
+    DateTime LastTickUtc);

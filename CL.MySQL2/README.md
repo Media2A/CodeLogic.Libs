@@ -118,6 +118,53 @@ Two things that weren't right before and now are:
 Cache hits and misses publish `CacheHitEvent` / `CacheMissEvent` on the
 CodeLogic event bus.
 
+### Smart cache pools — kept warm in the background _(new in 4.2)_
+
+For pages where a small set of queries should stay hot regardless of read
+traffic, register a **named pool** with a refresh interval and opt queries
+into it. The pool's background timer re-runs every registered query and
+overwrites the cache entry — readers never block on the DB after the first
+populate.
+
+```csharp
+// Declare the pool once at startup (typically in OnInitializeAsync).
+mysql.RegisterCachePool("dashboard", refreshEvery: TimeSpan.FromSeconds(30));
+
+// Opt queries into the pool. First call: cold DB hit, result cached, query
+// registered with the pool. Subsequent calls: cache hit. Every 30s the
+// pool's timer re-runs the query and refreshes the entry.
+var top10 = await mysql.Query<PlayerRecord>()
+    .Where(p => p.IsActive)
+    .OrderByDescending(p => p.Score)
+    .Take(10)
+    .SmartCache("dashboard")
+    .ToListAsync();
+
+// Out-of-schedule refresh — useful right after a deploy to prime the cache.
+await mysql.RefreshCachePoolAsync("dashboard");
+
+// Diagnostic snapshot
+foreach (var s in mysql.GetCachePoolStats())
+    Console.WriteLine($"{s.Name}: {s.EntryCount} entries, {s.TicksFired} ticks fired");
+```
+
+How it behaves:
+
+- **TTL is derived from the pool** — `refreshEvery * 2`. Cache entries
+  outlive a missed refresh by one cycle before falling back to cache-aside.
+- **Bounded cardinality** — an entry that has not been read for
+  `MaxIdleFires` (default 3) consecutive ticks is dropped from the refresh
+  list. Parameterized queries (per-user keys, etc.) don't spawn unbounded
+  background work — they auto-retire when nobody's looking.
+- **Mutually exclusive with `.WithCache(TimeSpan)`** — if both are set, the
+  pool wins.
+- **Falls back gracefully** — an unknown pool name on `.SmartCache(name)`
+  logs a warning and the query runs uncached. No exception.
+- **Skipped inside transactions** — same rule as `.WithCache`.
+- **Single-node only** — coordination across multiple app instances is on
+  the roadmap. With a Redis-backed `ICacheStore` today, every node will run
+  its own refresh timer; that's safe but wasteful at high node counts.
+
 ### Bulk writes / predicate mutations
 
 ```csharp

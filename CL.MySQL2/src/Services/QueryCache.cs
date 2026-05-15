@@ -79,6 +79,18 @@ public static class QueryCache
         return result;
     }
 
+    /// <summary>
+    /// Direct write into the cache, bypassing the cache-aside flow. Used by
+    /// <see cref="SmartCachePool"/> to overwrite an entry after a background
+    /// refresh produces a fresh value. No observability event is emitted —
+    /// the refresh isn't a cache hit or miss from a caller's perspective.
+    /// </summary>
+    public static Task SetDirectAsync(string cacheKey, object value, TimeSpan ttl, string tableName, CancellationToken ct = default)
+    {
+        if (!Enabled) return Task.CompletedTask;
+        return _store.SetAsync(cacheKey, value, ttl, tableName, ct);
+    }
+
     /// <summary>Invalidate all cached entries for the given table.</summary>
     public static void Invalidate(string tableName) =>
         _tableVersions.AddOrUpdate(tableName, 1L, (_, v) => v + 1);

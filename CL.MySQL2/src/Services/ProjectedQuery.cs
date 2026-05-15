@@ -24,6 +24,7 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
     private readonly Dictionary<string, object?> _parameters;
     private readonly ProjectionCompiler.Compiled<TSource, TResult> _projection;
     private readonly TimeSpan? _cacheTtl;
+    private readonly string? _smartCachePool;
 
     /// <summary>
     /// Enable result caching for this projected query. TTL and time-quantize behaviour come
@@ -33,7 +34,18 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
     {
         return new ProjectedQuery<TSource, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, _sql, _parameters, _projection, ttl);
+            _slowQueryThresholdMs, _sql, _parameters, _projection, ttl, _smartCachePool);
+    }
+
+    /// <summary>
+    /// Opt this projected query into a named <see cref="SmartCachePool"/>.
+    /// See <c>QueryBuilder.SmartCache</c> for details.
+    /// </summary>
+    public ProjectedQuery<TSource, TResult> SmartCache(string poolName)
+    {
+        return new ProjectedQuery<TSource, TResult>(
+            _connectionManager, _logger, _connectionId, _transactionScope,
+            _slowQueryThresholdMs, _sql, _parameters, _projection, _cacheTtl, poolName);
     }
 
     internal ProjectedQuery(
@@ -45,7 +57,8 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         string sql,
         Dictionary<string, object?> parameters,
         ProjectionCompiler.Compiled<TSource, TResult> projection,
-        TimeSpan? cacheTtl)
+        TimeSpan? cacheTtl,
+        string? smartCachePool = null)
     {
         _connectionManager = connectionManager;
         _logger = logger;
@@ -56,17 +69,45 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         _parameters = parameters;
         _projection = projection;
         _cacheTtl = cacheTtl;
+        _smartCachePool = smartCachePool;
     }
 
-    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null;
+    private bool ShouldCache => (_cacheTtl is not null || _smartCachePool is not null) && _transactionScope is null;
+    private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null;
 
     public async Task<Result<List<TResult>>> ToListAsync(CancellationToken ct = default)
     {
         try
         {
+            var tableName = EntityMetadata<TSource>.TableName;
+
+            if (ShouldSmartCache)
+            {
+                var pool = SmartCachePoolRegistry.Get(_smartCachePool!);
+                if (pool is null)
+                {
+                    _logger?.Warning($"[MySQL2] SmartCache pool '{_smartCachePool}' is not registered — falling back to uncached execution.");
+                }
+                else
+                {
+                    var ttl = TimeSpan.FromMilliseconds(pool.RefreshEvery.TotalMilliseconds * 2);
+                    pool.RegisterOrTouch(_connectionId, tableName, _sql, _parameters,
+                        refreshFactory: async tickCt =>
+                        {
+                            var r = await Execute(tickCt).ConfigureAwait(false);
+                            return r.IsSuccess ? (object?)r : null;
+                        });
+
+                    var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, _sql, _parameters);
+                    pool.Touch(_connectionId, tableName, _sql, _parameters);
+                    return await QueryCache.GetOrSetAsync(
+                        cacheKey, tableName,
+                        () => Execute(ct), ttl, _connectionId).ConfigureAwait(false);
+                }
+            }
+
             if (ShouldCache)
             {
-                var tableName = EntityMetadata<TSource>.TableName;
                 var key = QueryCache.BuildCacheKey(_connectionId, tableName, _sql, _parameters);
                 return await QueryCache.GetOrSetAsync(
                     key, tableName, () => Execute(ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);

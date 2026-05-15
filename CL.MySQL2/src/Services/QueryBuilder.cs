@@ -34,6 +34,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     private int? _offset;
     private int _paramCounter;
     private TimeSpan? _cacheTtl;
+    private string? _smartCachePool;
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
@@ -134,7 +135,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
         return new ProjectedQuery<T, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl);
+            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl, _smartCachePool);
     }
 
     /// <summary>
@@ -168,7 +169,26 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
-    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null;
+    /// <summary>
+    /// Opt this query into a named <see cref="SmartCachePool"/>. The pool's
+    /// background timer keeps the cache entry warm — readers never block on
+    /// the DB once the entry is populated. The pool must be registered via
+    /// <c>MySQL2Library.RegisterCachePool</c> beforehand; an unknown name
+    /// falls back to non-cached execution (logged at warn).
+    /// <para>
+    /// Mutually exclusive with <see cref="WithCache(TimeSpan)"/> — if both
+    /// are set, <c>SmartCache</c> wins and the TTL is derived from the
+    /// pool's refresh interval.
+    /// </para>
+    /// </summary>
+    public QueryBuilder<T> SmartCache(string poolName)
+    {
+        _smartCachePool = poolName;
+        return this;
+    }
+
+    private bool ShouldCache => (_cacheTtl is not null || _smartCachePool is not null) && _transactionScope is null;
+    private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null;
 
     // ── Terminal methods ──────────────────────────────────────────────────────
 
@@ -177,12 +197,38 @@ public sealed class QueryBuilder<T> where T : class, new()
         try
         {
             var (sql, parms) = BuildSelectSql();
+            var tableName = GetTableName();
+
+            if (ShouldSmartCache)
+            {
+                var pool = SmartCachePoolRegistry.Get(_smartCachePool!);
+                if (pool is null)
+                {
+                    _logger?.Warning($"[MySQL2] SmartCache pool '{_smartCachePool}' is not registered — falling back to uncached execution.");
+                }
+                else
+                {
+                    var ttl = TimeSpan.FromMilliseconds(pool.RefreshEvery.TotalMilliseconds * 2);
+                    pool.RegisterOrTouch(_connectionId, tableName, sql, parms,
+                        refreshFactory: async tickCt =>
+                        {
+                            var r = await ExecuteToList(sql, parms, tickCt).ConfigureAwait(false);
+                            return r.IsSuccess ? (object?)r.Value : null;
+                        });
+
+                    var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                    pool.Touch(_connectionId, tableName, sql, parms);
+                    return await QueryCache.GetOrSetAsync(
+                        cacheKey, tableName,
+                        () => ExecuteToList(sql, parms, ct), ttl, _connectionId).ConfigureAwait(false);
+                }
+            }
 
             if (ShouldCache)
             {
-                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
                 // connectionId passed in so cache hits / misses fire observability events.
-                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteToList(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+                return await QueryCache.GetOrSetAsync(cacheKey, tableName, () => ExecuteToList(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
             }
 
             return await ExecuteToList(sql, parms, ct).ConfigureAwait(false);
@@ -221,12 +267,38 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             Limit(1);
             var (sql, parms) = BuildSelectSql();
+            var tableName = GetTableName();
+
+            if (ShouldSmartCache)
+            {
+                var pool = SmartCachePoolRegistry.Get(_smartCachePool!);
+                if (pool is null)
+                {
+                    _logger?.Warning($"[MySQL2] SmartCache pool '{_smartCachePool}' is not registered — falling back to uncached execution.");
+                }
+                else
+                {
+                    var ttl = TimeSpan.FromMilliseconds(pool.RefreshEvery.TotalMilliseconds * 2);
+                    pool.RegisterOrTouch(_connectionId, tableName, sql, parms,
+                        refreshFactory: async tickCt =>
+                        {
+                            var r = await ExecuteFirstOrDefault(sql, parms, tickCt).ConfigureAwait(false);
+                            return r.IsSuccess ? (object?)r : null;
+                        });
+
+                    var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                    pool.Touch(_connectionId, tableName, sql, parms);
+                    return await QueryCache.GetOrSetAsync(
+                        cacheKey, tableName,
+                        () => ExecuteFirstOrDefault(sql, parms, ct), ttl, _connectionId).ConfigureAwait(false);
+                }
+            }
 
             if (ShouldCache)
             {
-                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
                 // connectionId passed in so cache hits / misses fire observability events.
-                return await QueryCache.GetOrSetAsync(cacheKey, GetTableName(), () => ExecuteFirstOrDefault(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+                return await QueryCache.GetOrSetAsync(cacheKey, tableName, () => ExecuteFirstOrDefault(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
             }
 
             return await ExecuteFirstOrDefault(sql, parms, ct).ConfigureAwait(false);
@@ -331,6 +403,31 @@ public sealed class QueryBuilder<T> where T : class, new()
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
             var sql = $"SELECT COUNT(*) FROM `{tblName}`{joinSql}{whereClause}";
+
+            if (ShouldSmartCache)
+            {
+                var pool = SmartCachePoolRegistry.Get(_smartCachePool!);
+                if (pool is null)
+                {
+                    _logger?.Warning($"[MySQL2] SmartCache pool '{_smartCachePool}' is not registered — falling back to uncached execution.");
+                }
+                else
+                {
+                    var ttl = TimeSpan.FromMilliseconds(pool.RefreshEvery.TotalMilliseconds * 2);
+                    pool.RegisterOrTouch(_connectionId, tblName, sql, parms,
+                        refreshFactory: async tickCt =>
+                        {
+                            var r = await ExecuteCount(sql, parms, tickCt).ConfigureAwait(false);
+                            return r.IsSuccess ? (object?)r : null;
+                        });
+
+                    var cacheKey = QueryCache.BuildCacheKey(_connectionId, tblName, sql, parms);
+                    pool.Touch(_connectionId, tblName, sql, parms);
+                    return await QueryCache.GetOrSetAsync(
+                        cacheKey, tblName,
+                        () => ExecuteCount(sql, parms, ct), ttl, _connectionId).ConfigureAwait(false);
+                }
+            }
 
             if (ShouldCache)
             {

@@ -132,6 +132,10 @@ public sealed class MySQL2Library : ILibrary
             maxEntries: cacheConfig.MaxEntries,
             timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds);
 
+        // Wire the smart-cache pool registry so its background timers log to the
+        // app's logger and so it can be cleanly disposed on stop.
+        SmartCachePoolRegistry.Configure(context.Logger);
+
         // Bind observability to CodeLogic's event bus so QueryExecutedEvent /
         // CacheHit / CacheMiss / SlowQuery land on the app's existing bus.
         QueryObservability.Configure(context.Events, context.Logger);
@@ -185,6 +189,9 @@ public sealed class MySQL2Library : ILibrary
         if (_retentionWorker is not null)
             await _retentionWorker.DisposeAsync().ConfigureAwait(false);
         _retentionWorker = null;
+
+        // Stop every smart-cache pool's background timer.
+        await SmartCachePoolRegistry.DisposeAllAsync().ConfigureAwait(false);
 
         _tableSyncService = null;
         _connectionManager = null;
@@ -354,6 +361,35 @@ public sealed class MySQL2Library : ILibrary
         _registeredEntities.Add(typeof(T));
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
     }
+
+    // ── Smart cache pools ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Registers a named <see cref="SmartCachePool"/>. Queries opt into the
+    /// pool via <c>.SmartCache(name)</c>; the pool's background timer keeps
+    /// every registered query's cache entry warm.
+    /// <para>
+    /// Idempotent — calling twice with the same name returns the existing
+    /// pool unchanged (refresh interval is NOT updated on re-register).
+    /// </para>
+    /// </summary>
+    /// <param name="name">Pool name (case-insensitive) referenced by <c>.SmartCache</c>.</param>
+    /// <param name="refreshEvery">How often the pool re-runs every registered query.</param>
+    /// <param name="maxIdleFires">
+    /// Drop a registered entry after this many consecutive refresh ticks with
+    /// no read. Default 3 — at a 30-second refresh interval, an unread entry
+    /// is dropped after ~90 seconds, bounding cardinality on parameterized queries.
+    /// </param>
+    public SmartCachePool RegisterCachePool(string name, TimeSpan refreshEvery, int maxIdleFires = 3) =>
+        SmartCachePoolRegistry.Register(name, refreshEvery, maxIdleFires);
+
+    /// <summary>Triggers an out-of-schedule refresh for the named pool.</summary>
+    public Task RefreshCachePoolAsync(string name, CancellationToken ct = default) =>
+        SmartCachePoolRegistry.RefreshNowAsync(name, ct);
+
+    /// <summary>Diagnostic snapshot of every registered smart-cache pool.</summary>
+    public IReadOnlyList<SmartCachePoolStats> GetCachePoolStats() =>
+        SmartCachePoolRegistry.GetStats();
 
     /// <summary>
     /// Tests the MySQL connection for the given connection ID.

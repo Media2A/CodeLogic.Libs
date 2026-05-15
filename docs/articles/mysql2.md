@@ -338,6 +338,59 @@ reads see uncommitted writes, which caching would hide.
 
 ---
 
+## Smart cache pools (new in 4.2)
+
+`WithCache` is cache-aside: the first read after the TTL expires pays the DB
+cost. For pages with a small set of "always hot" queries — dashboards, live
+leaderboards, hall-of-fame — register a **smart cache pool** and opt queries
+into it. A background timer re-runs every registered query and overwrites the
+cache entry, so readers never block on the DB after the first populate.
+
+```csharp
+// Declared once, typically in OnInitializeAsync.
+mysql.RegisterCachePool("dashboard", refreshEvery: TimeSpan.FromSeconds(30));
+
+// Used wherever the query runs.
+var top10 = await mysql.Query<PlayerRecord>()
+    .Where(p => p.IsActive)
+    .OrderByDescending(p => p.Score)
+    .Take(10)
+    .SmartCache("dashboard")
+    .ToListAsync();
+```
+
+How it differs from `WithCache(ttl)`:
+
+| Aspect | `WithCache(ttl)` | `SmartCache("poolName")` |
+|---|---|---|
+| Refresh model | Cache-aside (lazy, on read) | Background timer (proactive) |
+| First read after TTL | Pays DB cost | Still warm (timer already refreshed) |
+| Configuration | Per-call TTL | Per-pool refresh interval |
+| Cardinality | Unbounded — every key lives until TTL | Bounded — idle entries dropped after `MaxIdleFires` ticks |
+| Transactions | Suppressed | Suppressed |
+| Best for | Ad-hoc reads tolerating brief staleness | Hot pages where stalling on DB is unacceptable |
+
+Knobs:
+
+- **`refreshEvery`** — how often the timer re-runs every registered query.
+- **`maxIdleFires`** (default 3) — drop an entry from the refresh list after
+  this many consecutive ticks with no read. Bounds cardinality on
+  parameterized queries.
+- **`mysql.RefreshCachePoolAsync(name)`** — trigger an out-of-schedule
+  refresh. Useful after a deploy to prime the cache before the first user
+  request.
+- **`mysql.GetCachePoolStats()`** — per-pool snapshot
+  (`EntryCount`, `TicksFired`, `TicksFailed`, `LastTickUtc`).
+
+An unknown pool name on `.SmartCache(name)` logs a warning and falls back to
+uncached execution. No exception is thrown.
+
+Single-node only in 4.2 — with a Redis-backed `ICacheStore`, every node will
+run its own refresh timer; that's safe but wasteful at high node counts.
+Multi-node coordination is on the roadmap.
+
+---
+
 ## Multiple databases
 
 Any named connection in `config.mysql.json` is addressable by its key:

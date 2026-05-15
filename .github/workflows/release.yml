@@ -232,11 +232,20 @@ jobs:
             artifacts/*.nupkg
             artifacts/package-versions.txt
 
-      - name: Sync version bumps back to main
-        if: steps.changes.outputs.has_changes == 'True'
-        shell: bash
-        run: |
-          git fetch origin main
-          git checkout main
-          git merge release --no-edit -m "chore: sync release version bumps to main [skip ci]"
-          git push origin main
+      # NOTE: version bumps are intentionally NOT synced back to main.
+      # main is the working branch — it never carries auto-bumped csproj
+      # commits. The release branch owns the version line; when a release
+      # cycle finishes, release is ahead of main by one "chore: release —
+      # auto-bump versions [skip ci]" commit, which is the desired state.
+      #
+      # Workflow:
+      #   - dev pushes feature work to main (no version churn there)
+      #   - when ready to publish: merge or fast-forward main → release
+      #   - this workflow fires, bumps versions, packs, publishes to NuGet,
+      #     and creates a GitHub release on the release branch
+      #   - main stays clean
+      #
+      # If the same csproj is edited on both branches (e.g. main adds a
+      # dependency while release has a version bump), git's line-level
+      # merge handles it automatically as long as nothing on main touches
+      # the <Version> element.

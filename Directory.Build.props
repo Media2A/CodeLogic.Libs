@@ -32,6 +32,14 @@
     <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="/" />
   </ItemGroup>
 
+  <!-- Each library has its own CHANGELOG.md alongside the csproj. Packed into
+       the NuGet root so consumers can read release notes without leaving
+       the package. Condition keeps the build clean for libs that don't
+       have one yet. -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\CHANGELOG.md')">
+    <None Include="$(MSBuildProjectDirectory)\CHANGELOG.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
   <!--
     Floating dependency range for CodeLogic. Targets in Directory.Build.targets
     use this property to override the auto-generated dependency in packed nuspec.
