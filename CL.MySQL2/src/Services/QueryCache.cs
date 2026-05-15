@@ -55,6 +55,12 @@ public static class QueryCache
     /// <summary>
     /// Cache-aside helper. Returns the cached value if fresh; otherwise runs <paramref name="factory"/>,
     /// stores the result, and returns it.
+    /// <para>
+    /// Failure <see cref="CodeLogic.Core.Results.Result{T}"/> values are NEVER cached and never
+    /// served as cache hits — a transient DB failure during a cold-warmup cannot poison the
+    /// cache. If a previously-cached value is detected as a failure (legacy entries from older
+    /// versions), it's evicted on read so the call falls through to a fresh execution.
+    /// </para>
     /// </summary>
     public static async Task<T> GetOrSetAsync<T>(
         string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl,
@@ -63,20 +69,43 @@ public static class QueryCache
         if (!Enabled) return await factory().ConfigureAwait(false);
 
         var (found, value) = await _store.TryGetAsync(cacheKey).ConfigureAwait(false);
-        if (found)
+        if (found && !IsFailureResult(value))
         {
             if (connectionId is not null)
                 QueryObservability.RecordCacheHit(connectionId, tableName, cacheKey);
             return (T)value!;
         }
 
+        // Poisoned entry: evict so subsequent reads don't re-hit it before
+        // the eventual pool refresh / TTL kicks in.
+        if (found)
+            await _store.EvictAsync(cacheKey).ConfigureAwait(false);
+
         if (connectionId is not null)
             QueryObservability.RecordCacheMiss(connectionId, tableName, cacheKey);
 
         var result = await factory().ConfigureAwait(false);
-        if (result is not null)
+        if (result is not null && !IsFailureResult(result))
             await _store.SetAsync(cacheKey, result, ttl, tableName).ConfigureAwait(false);
         return result;
+    }
+
+    /// <summary>
+    /// Duck-typed check for a <c>Result&lt;T&gt;</c>-shaped object whose
+    /// <c>IsFailure</c> property is <c>true</c>. Uses cached PropertyInfo per
+    /// type so the reflection cost is amortised. Returns <c>false</c> for
+    /// anything that doesn't expose the property (lists, scalars, etc.) —
+    /// those are cached as before.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, System.Reflection.PropertyInfo?> _isFailureProps = new();
+    private static bool IsFailureResult(object? value)
+    {
+        if (value is null) return false;
+        var prop = _isFailureProps.GetOrAdd(value.GetType(), t =>
+            t.GetProperty("IsFailure", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance));
+        if (prop is null || prop.PropertyType != typeof(bool)) return false;
+        try { return (bool)(prop.GetValue(value) ?? false); }
+        catch { return false; }
     }
 
     /// <summary>
@@ -88,6 +117,9 @@ public static class QueryCache
     public static Task SetDirectAsync(string cacheKey, object value, TimeSpan ttl, string tableName, CancellationToken ct = default)
     {
         if (!Enabled) return Task.CompletedTask;
+        // Same guard as GetOrSetAsync — a pool refresh that produced a
+        // failure Result must not be written back into the cache.
+        if (IsFailureResult(value)) return Task.CompletedTask;
         return _store.SetAsync(cacheKey, value, ttl, tableName, ct);
     }
 
