@@ -405,6 +405,13 @@ public sealed class MySQL2Library : ILibrary
         SmartCachePoolRegistry.GetStats();
 
     /// <summary>
+    /// Diagnostic snapshot of the underlying <see cref="QueryCache"/>:
+    /// total entries, per-table breakdown, table-version counters. Use
+    /// from the admin UI to spot orphan accumulation or a hot table.
+    /// </summary>
+    public QueryCacheStats GetCacheStats() => QueryCache.GetStats();
+
+    /// <summary>
     /// Tests the MySQL connection for the given connection ID.
     /// </summary>
     public async Task<Result<bool>> TestConnectionAsync(

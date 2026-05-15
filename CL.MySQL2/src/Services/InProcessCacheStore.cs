@@ -42,6 +42,34 @@ internal sealed class InProcessCacheStore : ICacheStore
         return Task.CompletedTask;
     }
 
+    public Task<int> EvictByTableAsync(string tableName, CancellationToken ct = default)
+    {
+        // O(n) over current entries — acceptable: this is called only on
+        // mutation invalidations, not on the hot read path. Without this
+        // sweep, every mutation orphans every previously-cached entry on
+        // the same table; orphans pile up until LRU eviction.
+        var removed = 0;
+        foreach (var kv in _entries)
+        {
+            if (string.Equals(kv.Value.TableName, tableName, StringComparison.OrdinalIgnoreCase)
+                && _entries.TryRemove(kv.Key, out _))
+                removed++;
+        }
+        return Task.FromResult(removed);
+    }
+
+    public IReadOnlyDictionary<string, int> CountByTable()
+    {
+        var by = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in _entries)
+        {
+            var table = kv.Value.TableName ?? "";
+            by.TryGetValue(table, out var n);
+            by[table] = n + 1;
+        }
+        return by;
+    }
+
     public void Clear() => _entries.Clear();
 
     private void EvictExpiredAndOldest()

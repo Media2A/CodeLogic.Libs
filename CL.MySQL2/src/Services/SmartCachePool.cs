@@ -184,11 +184,23 @@ public sealed class SmartCachePool : IAsyncDisposable
                 var cacheKey = QueryCache.BuildCacheKey(
                     entry.ConnectionId, entry.TableName, entry.Sql, entry.Parms);
 
+                // If the cache key changed since our last write (the table
+                // version was bumped by a mutation), evict the previous key
+                // ourselves. The QueryCache.Invalidate path also sweeps by
+                // tableName as a safety net, but this targeted eviction is
+                // O(1) and avoids leaving orphans even on cache backends
+                // that can't enumerate (e.g. Redis without SCAN).
+                var lastKey = entry.LastCacheKey;
+                if (lastKey is not null && !string.Equals(lastKey, cacheKey, StringComparison.Ordinal))
+                    await QueryCache.EvictAsync(lastKey).ConfigureAwait(false);
+
                 // TTL = 2x refresh interval. Survives one missed refresh
                 // before falling back to cache-aside cold read.
                 var ttl = TimeSpan.FromMilliseconds(RefreshEvery.TotalMilliseconds * 2);
                 await QueryCache.SetDirectAsync(cacheKey, result, ttl, entry.TableName, ct)
                     .ConfigureAwait(false);
+
+                entry.LastCacheKey = cacheKey;
             }
             catch (Exception ex)
             {
@@ -247,6 +259,15 @@ public sealed class SmartCachePool : IAsyncDisposable
         public required Func<CancellationToken, Task<object?>> RefreshFactory { get; init; }
         public long LastReadUtcTicks;
         public int ConsecutiveIdleFires;
+
+        /// <summary>
+        /// Most recent cache key written by this entry's refresh tick.
+        /// Used to evict orphans when the table-version bumps between
+        /// ticks: tick N writes to key V<sub>N</sub>, a mutation bumps the
+        /// version, tick N+1 writes to V<sub>N+1</sub> — we evict V<sub>N</sub>
+        /// in the same tick so it doesn't linger in the cache store.
+        /// </summary>
+        public string? LastCacheKey;
     }
 }
 
