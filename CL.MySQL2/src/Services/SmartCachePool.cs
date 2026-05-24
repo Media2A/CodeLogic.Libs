@@ -21,8 +21,7 @@ public sealed class SmartCachePool : IAsyncDisposable
     /// <summary>How often the pool re-runs every registered factory.</summary>
     public TimeSpan RefreshEvery { get; }
 
-    /// <summary>Deprecated — idle eviction removed. Entries stay warm forever once registered.</summary>
-    [Obsolete("Idle eviction removed. Entries stay warm forever once registered.")]
+    /// <summary>Drop an entry after this many consecutive refresh ticks with no read. Default 10.</summary>
     public int MaxIdleFires { get; }
 
     private readonly ConcurrentDictionary<string, PoolEntry> _entries = new(StringComparer.Ordinal);
@@ -102,6 +101,7 @@ public sealed class SmartCachePool : IAsyncDisposable
             RefreshFactory = refreshFactory,
         });
         Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
+        Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
     }
 
     /// <summary>
@@ -167,6 +167,13 @@ public sealed class SmartCachePool : IAsyncDisposable
             if (ct.IsCancellationRequested) return;
             var entry = kv.Value;
 
+            var idle = Interlocked.Increment(ref entry.ConsecutiveIdleFires);
+            if (idle > MaxIdleFires)
+            {
+                _entries.TryRemove(kv);
+                continue;
+            }
+
             try
             {
                 var result = await entry.RefreshFactory(ct).ConfigureAwait(false);
@@ -215,6 +222,7 @@ public sealed class SmartCachePool : IAsyncDisposable
         if (_entries.TryGetValue(entryId, out var entry))
         {
             Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
         }
     }
 
@@ -251,6 +259,7 @@ public sealed class SmartCachePool : IAsyncDisposable
         public required Dictionary<string, object?> Parms { get; init; }
         public required Func<CancellationToken, Task<object?>> RefreshFactory { get; init; }
         public long LastReadUtcTicks;
+        public int ConsecutiveIdleFires;
 
         /// <summary>
         /// Most recent cache key written by this entry's refresh tick.

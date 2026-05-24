@@ -392,7 +392,7 @@ public sealed class MySQL2Library : ILibrary
     public SmartCachePool RegisterCachePool(
         string name,
         TimeSpan refreshEvery,
-        int maxIdleFires = 3,
+        int maxIdleFires = 10,
         Func<Task>? warmUp = null) =>
         SmartCachePoolRegistry.Register(name, refreshEvery, maxIdleFires, warmUp);
 
