@@ -26,6 +26,15 @@
   </ItemGroup>
 
   <!--
+    Derive AssemblyVersion from the csproj <Version> — strip any prerelease
+    suffix and keep only Major.Minor.0.0 so every patch loads interchangeably.
+  -->
+  <PropertyGroup>
+    <_CleanVersion>$(Version.Split('-')[0])</_CleanVersion>
+    <AssemblyVersion>$([System.Version]::Parse($(_CleanVersion)).Major).$([System.Version]::Parse($(_CleanVersion)).Minor).0.0</AssemblyVersion>
+  </PropertyGroup>
+
+  <!--
     Inject a shared helper that reads each lib's runtime version from its own
     AssemblyInformationalVersionAttribute (which MSBuild populates from the
     csproj <Version>). Keeps LibraryManifest.Version automatically in sync

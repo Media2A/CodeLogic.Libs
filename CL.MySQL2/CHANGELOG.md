@@ -4,7 +4,7 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
-## [4.3.0] — 2026-05-24
+## [4.5.0] — 2026-05-24
 
 ### Added
 
@@ -45,6 +45,19 @@ NuGet package version of `CodeLogic.MySQL2`.
 - **LINQ WHERE support for binary-stored columns.** Expressions like
   `repo.Where(x => x.Id == someGuid)` and `list.Contains(x.Id)` correctly
   convert parameter values to binary when the column uses `StorageType`.
+
+- **`SequentialGuid.NewId()` helper.** Generates time-ordered UUIDv7 values
+  optimized for `BINARY(16)` primary keys. Sequential inserts append to the
+  B-tree instead of causing random page splits — dramatically reducing index
+  fragmentation compared to random UUIDv4.
+
+  ```csharp
+  [Column(StorageType = StorageType.Binary, Primary = true, NotNull = true)]
+  public Guid Id { get; set; } = SequentialGuid.NewId();
+  ```
+
+- **Unified versioning.** All CodeLogic.Libs now share a single version line
+  controlled by `version.txt`. AssemblyVersion is derived automatically.
 
 ### Notes
 

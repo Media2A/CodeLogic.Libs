@@ -11,18 +11,17 @@
 
   <!--
     Stable assembly binding across patches. NuGet `<Version>` bumps each
-    release (3.2.9 → 3.2.10 → …) so consumers can track updates, but the
+    release (4.5.0 → 4.5.1 → …) so consumers can track updates, but the
     CLR assembly binding must stay fixed per minor version so transitive
     dependencies don't demand an exact patch match at load time.
 
-    AssemblyVersion = binding identity. Pinned to <Major>.<Minor>.0.0 so
-      every 4.0.x patch loads interchangeably.
+    AssemblyVersion = binding identity. Derived in Directory.Build.targets
+      as <Major>.<Minor>.0.0 from <Version>. Every patch loads interchangeably.
     FileVersion     = deploy fingerprint. Mirrors <Version> so file hash
       checks can still tell patches apart on disk.
     InformationalVersion = display string. Also mirrors <Version>.
   -->
   <PropertyGroup>
-    <AssemblyVersion>4.0.0.0</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
   </PropertyGroup>

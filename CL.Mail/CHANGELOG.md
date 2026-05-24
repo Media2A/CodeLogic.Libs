@@ -3,6 +3,13 @@
 All notable changes to **CodeLogic.Mail** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.0] — 2026-05-24
+
+### Changed
+
+- **Unified versioning.** All CodeLogic.Libs now share a single version line
+  controlled by `version.txt` in the repo root. This is a version alignment
+  release — no functional changes to this library.
 ## [4.0.4] — 2026-04-16
 
 ### Changed
