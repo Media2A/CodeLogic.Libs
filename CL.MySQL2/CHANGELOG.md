@@ -4,6 +4,54 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## [4.3.0] — 2026-05-24
+
+### Added
+
+- **`StorageType` enum on `ColumnAttribute`.** Per-column physical storage
+  override that takes precedence over `DataType` for DDL generation.
+  Available values: `Binary`, `VarBinary`, `TinyBlob`, `Blob`, `MediumBlob`,
+  `LongBlob`. When set, the column is stored as the chosen binary type and
+  values are automatically converted to/from binary on read and write.
+
+- **Guid-as-BINARY(16) support.** Set `StorageType = StorageType.Binary` on a
+  `Guid` property and CL.MySQL2 stores it as `BINARY(16)` using RFC 4122
+  big-endian byte layout for correct lexicographic sort order. Conversion is
+  automatic in all paths: insert, update, read, WHERE clauses, and IN queries.
+
+  ```csharp
+  [Column(StorageType = StorageType.Binary, Primary = true, NotNull = true)]
+  public Guid Id { get; set; }
+  ```
+
+- **Automatic binary conversion for all CLR types.** Any property can be
+  stored as binary by setting `StorageType`. Supported types and their binary
+  sizes (auto-detected when `Size` is not explicit):
+
+  | CLR type | Binary size | Byte order |
+  |---|---|---|
+  | `Guid` | 16 | RFC 4122 big-endian |
+  | `long` / `ulong` | 8 | big-endian |
+  | `int` / `uint` | 4 | big-endian |
+  | `short` / `ushort` | 2 | big-endian |
+  | `double` | 8 | big-endian |
+  | `float` | 4 | big-endian |
+  | `decimal` | 16 | big-endian |
+  | `DateTime` / `DateTimeOffset` | 8 | ticks, big-endian |
+  | `bool` / `byte` / `sbyte` | 1 | — |
+  | `string` | explicit | UTF-8 |
+  | `byte[]` | passthrough | as-is |
+
+- **LINQ WHERE support for binary-stored columns.** Expressions like
+  `repo.Where(x => x.Id == someGuid)` and `list.Contains(x.Id)` correctly
+  convert parameter values to binary when the column uses `StorageType`.
+
+### Notes
+
+- **No breaking changes.** `StorageType` defaults to `StorageType.Default`
+  (the zero-value), so all existing entities and schemas are unaffected.
+  Guid inference still returns `Char(36)` unless you explicitly opt in.
+
 ## [4.2.3] — 2026-05-15
 
 ### Fixed

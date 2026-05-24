@@ -563,9 +563,10 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 if (binding is not MemberAssignment ma) continue;
 
-                var colName = EntityMetadata<T>.TryResolve(ma.Member.Name)?.ColumnName
+                var colMeta = EntityMetadata<T>.TryResolve(ma.Member.Name)
                               ?? throw new ArgumentException(
                                   $"Property '{ma.Member.Name}' is not mapped on '{typeof(T).Name}'.");
+                var colName = colMeta.ColumnName;
 
                 // If the value only depends on captured state (closure), bind as a parameter.
                 // Otherwise translate it as a column expression so `Counter = t.Counter + 1`
@@ -579,7 +580,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 {
                     var paramName = $"@upd_{idx++}";
                     var value = ClosureEvaluator.Evaluate(ma.Expression);
-                    allParms[paramName] = TypeConverter.ToDbValue(value);
+                    allParms[paramName] = TypeConverter.ToDbValue(value, colMeta.EffectiveStorageType);
                     sets.Add($"`{colName}` = {paramName}");
                 }
             }
@@ -638,7 +639,10 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             var allParms = new Dictionary<string, object?>(whereParms);
             foreach (var kv in updates)
-                allParms[$"@upd_{kv.Key}"] = TypeConverter.ToDbValue(kv.Value);
+            {
+                var meta = EntityMetadata<T>.RequireColumn(kv.Key);
+                allParms[$"@upd_{kv.Key}"] = TypeConverter.ToDbValue(kv.Value, meta.EffectiveStorageType);
+            }
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>

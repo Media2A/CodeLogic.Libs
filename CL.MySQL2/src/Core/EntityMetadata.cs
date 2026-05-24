@@ -102,6 +102,7 @@ internal sealed class ColumnMetadata
     public string ColumnName { get; }
     public bool IsAutoIncrement => Attribute?.AutoIncrement == true;
     public bool IsPrimary => Attribute?.Primary == true;
+    public StorageType EffectiveStorageType => Attribute?.StorageType ?? StorageType.Default;
 
     private Func<object, object?>? _getter;
     private Action<object, object?>? _setter;

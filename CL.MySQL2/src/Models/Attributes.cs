@@ -73,6 +73,12 @@ public sealed class ColumnAttribute : Attribute
 
     /// <summary>Whether to add ON UPDATE CURRENT_TIMESTAMP (for TIMESTAMP/DATETIME).</summary>
     public bool OnUpdateCurrentTimestamp { get; set; } = false;
+
+    /// <summary>
+    /// Optional physical-storage override. When set, takes precedence over <see cref="DataType"/>
+    /// for DDL generation and may activate automatic value conversion.
+    /// </summary>
+    public StorageType StorageType { get; set; } = StorageType.Default;
 }
 
 /// <summary>

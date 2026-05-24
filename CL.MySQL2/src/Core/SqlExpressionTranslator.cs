@@ -261,6 +261,7 @@ internal static class SqlExpressionTranslator
             bool b => b ? "1" : "0",
             string s => $"'{s.Replace("'", "''")}'",
             DateTime dt => $"'{dt:yyyy-MM-dd HH:mm:ss}'",
+            Guid g => $"'{g}'",
             IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
             _ => v.ToString() ?? "NULL"
         };

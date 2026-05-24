@@ -311,7 +311,7 @@ internal sealed class SchemaAnalyzer
         else
             fakeAttr = colAttr;
 
-        sb.Append(TypeConverter.GetMySqlType(fakeAttr));
+        sb.Append(TypeConverter.GetMySqlType(fakeAttr, colAttr?.StorageType ?? StorageType.Default, prop.PropertyType));
 
         if (!string.IsNullOrEmpty(colAttr?.Charset))
             sb.Append($" CHARACTER SET {colAttr.Charset}");
@@ -515,7 +515,7 @@ internal sealed class SchemaAnalyzer
     {
         var dataType = colAttr?.DataType ?? TypeConverter.InferDataType(prop.PropertyType);
         var fakeAttr = colAttr ?? new ColumnAttribute { DataType = dataType };
-        return TypeConverter.GetMySqlType(fakeAttr);
+        return TypeConverter.GetMySqlType(fakeAttr, colAttr?.StorageType ?? StorageType.Default, prop.PropertyType);
     }
 
     private static string NormalizeDefault(string? value, bool isNullable)

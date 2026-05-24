@@ -74,7 +74,7 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity)) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -135,7 +135,7 @@ public sealed class Repository<T> where T : class, new()
                         {
                             var paramName = $"@p_{i}_{j}";
                             tupleParts[j] = paramName;
-                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!)) ?? DBNull.Value);
+                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!), insertCols[j].EffectiveStorageType) ?? DBNull.Value);
                         }
                         valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
                     }
@@ -190,7 +190,7 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity)) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -261,7 +261,7 @@ public sealed class Repository<T> where T : class, new()
                         {
                             var paramName = $"@p_{i}_{j}";
                             tupleParts[j] = paramName;
-                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!)) ?? DBNull.Value);
+                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!), insertCols[j].EffectiveStorageType) ?? DBNull.Value);
                         }
                         valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
                     }
@@ -365,7 +365,7 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(insertSeed)) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(insertSeed), col.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -415,7 +415,7 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", id);
+                cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
@@ -450,7 +450,7 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@val", TypeConverter.ToDbValue(value) ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@val", TypeConverter.ToDbValue(value, col.EffectiveStorageType) ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 var items = new List<T>();
@@ -610,8 +610,8 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in setCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity)) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@__pk", pk.Get(entity));
+                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType) ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@__pk", TypeConverter.ToDbValue(pk.Get(entity), pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -642,7 +642,7 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", id);
+                cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 

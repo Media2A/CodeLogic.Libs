@@ -16,6 +16,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     private readonly Dictionary<string, object?> _parameters = new();
     private int _paramCounter;
     private readonly string _tableAlias;
+    private StorageType _currentComparisonStorageType = StorageType.Default;
 
     public MySqlExpressionVisitor(string tableAlias = "")
     {
@@ -54,6 +55,14 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     protected override Expression VisitBinary(BinaryExpression node)
     {
         _sql.Append('(');
+
+        // Resolve StorageType from whichever side is an entity member, so the
+        // value side gets the correct binary conversion.
+        var memberExpr = GetEntityMember(node.Left) ?? GetEntityMember(node.Right);
+        var prevStorageType = _currentComparisonStorageType;
+        if (memberExpr is not null)
+            _currentComparisonStorageType = ResolveStorageType(memberExpr.Member);
+
         Visit(node.Left);
 
         var op = node.NodeType switch
@@ -75,11 +84,13 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
         if (node.NodeType == ExpressionType.Equal && IsNullConstant(node.Right))
         {
             _sql.Append(" IS NULL)");
+            _currentComparisonStorageType = prevStorageType;
             return node;
         }
         if (node.NodeType == ExpressionType.NotEqual && IsNullConstant(node.Right))
         {
             _sql.Append(" IS NOT NULL)");
+            _currentComparisonStorageType = prevStorageType;
             return node;
         }
         // Handle null == x.Prop
@@ -90,6 +101,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
             _sql.Append('(');
             Visit(node.Right);
             _sql.Append(" IS NULL)");
+            _currentComparisonStorageType = prevStorageType;
             return node;
         }
 
@@ -97,6 +109,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
         Visit(node.Right);
         _sql.Append(')');
 
+        _currentComparisonStorageType = prevStorageType;
         return node;
     }
 
@@ -214,6 +227,11 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
             {
                 // Static Enumerable.Contains(collection, item) or IList.Contains
                 var collection = GetValue(node.Arguments[0]);
+                var entityMember = GetEntityMember(node.Arguments[1]);
+                var prevStorageType = _currentComparisonStorageType;
+                if (entityMember is not null)
+                    _currentComparisonStorageType = ResolveStorageType(entityMember.Member);
+
                 Visit(node.Arguments[1]);
                 _sql.Append(" IN (");
                 if (collection is System.Collections.IEnumerable enumerable)
@@ -227,6 +245,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
                     }
                 }
                 _sql.Append(')');
+                _currentComparisonStorageType = prevStorageType;
                 break;
             }
             default:
@@ -251,7 +270,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     private void AddParameter(object? value)
     {
         var paramName = $"@p{_paramCounter++}";
-        _parameters[paramName] = TypeConverter.ToDbValue(value);
+        _parameters[paramName] = TypeConverter.ToDbValue(value, _currentComparisonStorageType);
         _sql.Append(paramName);
     }
 
@@ -262,6 +281,20 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     {
         var attr = member.GetCustomAttribute<ColumnAttribute>();
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : member.Name;
+    }
+
+    private static MemberExpression? GetEntityMember(Expression expr)
+    {
+        var e = expr;
+        while (e is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } u)
+            e = u.Operand;
+        return e is MemberExpression { Expression: ParameterExpression } me ? me : null;
+    }
+
+    private static StorageType ResolveStorageType(MemberInfo member)
+    {
+        var attr = member.GetCustomAttribute<ColumnAttribute>();
+        return attr?.StorageType ?? StorageType.Default;
     }
 
     private static object? GetValue(Expression expression) => ClosureEvaluator.Evaluate(expression);

@@ -56,7 +56,7 @@ internal sealed class Materializer<T> where T : class
                 var col = fieldToColumn[i];
                 if (col is null || !col.Property.CanWrite) continue;
                 var raw = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
-                var converted = TypeConverter.FromDbValue(raw, col.Property.PropertyType);
+                var converted = TypeConverter.FromDbValue(raw, col.Property.PropertyType, col.EffectiveStorageType);
                 col.Set(entity, converted);
             }
             return entity;

@@ -108,6 +108,7 @@ public string Email { get; set; } = "";
 | `Comment` | null | Column comment |
 | `Unsigned` | false | For numeric types |
 | `OnUpdateCurrentTimestamp` | false | Adds `ON UPDATE CURRENT_TIMESTAMP` |
+| `StorageType` | `Default` | Physical storage override — see [StorageType](#storagetype--binary-columns) below |
 
 ### Supported `DataType`s
 
@@ -179,6 +180,96 @@ public string Email { get; set; } = "";
 [Column(Name = "status", DataType = DataType.VarChar, Size = 16, NotNull = true,
         DefaultValue = "'pending'")]
 public string Status { get; set; } = "pending";
+```
+
+---
+
+## StorageType — binary columns
+
+The `StorageType` property on `[Column]` overrides the physical storage format.
+Values are automatically converted to/from binary on every read and write path
+(insert, update, materializer, WHERE clauses, IN queries).
+
+Available values: `Binary`, `VarBinary`, `TinyBlob`, `Blob`, `MediumBlob`, `LongBlob`.
+
+### Guid as BINARY(16)
+
+The most common use case. Stores a `Guid` as 16 bytes using RFC 4122 big-endian
+layout — half the storage of `CHAR(36)` and sorts correctly:
+
+```csharp
+[Column(StorageType = StorageType.Binary, Primary = true, NotNull = true)]
+public Guid Id { get; set; }
+```
+
+Generates `BINARY(16)`. The size is auto-detected from the CLR type — no need
+to set `Size = 16` explicitly.
+
+### String as binary
+
+Store a string column in binary form (UTF-8 encoded):
+
+```csharp
+[Column(StorageType = StorageType.Binary, Size = 64)]
+public string Token { get; set; } = "";
+
+[Column(StorageType = StorageType.Blob)]
+public string Payload { get; set; } = "";
+```
+
+### Auto-sized BINARY
+
+When `StorageType = StorageType.Binary` and `Size` is not set, CL.MySQL2
+infers the correct fixed size from the CLR type:
+
+| CLR type | Auto size | Byte order |
+|---|---|---|
+| `Guid` | 16 | RFC 4122 big-endian |
+| `long` / `ulong` / `double` / `DateTime` / `DateTimeOffset` | 8 | big-endian |
+| `int` / `uint` / `float` | 4 | big-endian |
+| `short` / `ushort` | 2 | big-endian |
+| `decimal` | 16 | big-endian |
+| `bool` / `byte` / `sbyte` | 1 | — |
+
+All numeric types use big-endian byte order so `ORDER BY` on the binary column
+matches the expected numeric sort.
+
+### Full example
+
+```csharp
+[Table(Name = "sessions")]
+public sealed class SessionRecord
+{
+    [Column(StorageType = StorageType.Binary, Primary = true, NotNull = true)]
+    public Guid Id { get; set; }
+
+    [Column(Name = "user_id", DataType = DataType.BigInt, NotNull = true)]
+    public long UserId { get; set; }
+
+    [Column(Name = "token", StorageType = StorageType.Binary, Size = 32, NotNull = true)]
+    public string Token { get; set; } = "";
+
+    [Column(Name = "created_utc", DataType = DataType.DateTime, NotNull = true)]
+    public DateTime CreatedUtc { get; set; }
+}
+```
+
+Generates:
+```sql
+CREATE TABLE `sessions` (
+    `Id` BINARY(16) NOT NULL,
+    `user_id` BIGINT NOT NULL,
+    `token` BINARY(32) NOT NULL,
+    `created_utc` DATETIME NOT NULL,
+    PRIMARY KEY (`Id`)
+);
+```
+
+LINQ queries work as expected — Guid values are automatically converted to
+binary parameters:
+
+```csharp
+var session = await repo.Where(x => x.Id == sessionGuid).FirstOrDefaultAsync();
 ```
 
 ---

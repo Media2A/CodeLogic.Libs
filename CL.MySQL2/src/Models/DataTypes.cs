@@ -44,6 +44,37 @@ public enum DataType
     Geometry
 }
 
+/// <summary>
+/// Optional physical-storage override for a column. When set to anything other than
+/// <see cref="StorageType.Default"/>, the storage type takes precedence over
+/// <see cref="DataType"/> for DDL generation. For certain CLR types automatic value
+/// conversion is applied (e.g. a <see cref="System.Guid"/> property with
+/// <see cref="StorageType.Binary"/> is stored as <c>BINARY(16)</c> with big-endian byte conversion).
+/// </summary>
+public enum StorageType
+{
+    /// <summary>No override — use <see cref="DataType"/> as-is.</summary>
+    Default = 0,
+
+    /// <summary>Fixed-length binary. Uses <see cref="ColumnAttribute.Size"/> for explicit length; for <see cref="System.Guid"/> auto-sizes to 16.</summary>
+    Binary,
+
+    /// <summary>Variable-length binary. Uses <see cref="ColumnAttribute.Size"/> (default 255).</summary>
+    VarBinary,
+
+    /// <summary>Tiny binary large object (max 255 bytes).</summary>
+    TinyBlob,
+
+    /// <summary>Binary large object (max 65 535 bytes).</summary>
+    Blob,
+
+    /// <summary>Medium binary large object (max 16 MB).</summary>
+    MediumBlob,
+
+    /// <summary>Long binary large object (max 4 GB).</summary>
+    LongBlob
+}
+
 /// <summary>MySQL storage engine options.</summary>
 public enum TableEngine
 {
