@@ -199,6 +199,12 @@ public static class QueryCache
     {
         if (value is null) return "NULL";
 
+        // byte[] (StorageType.Binary parameters — Guid→byte[16], etc.)
+        // byte[].ToString() returns "System.Byte[]" for every array, which
+        // collapses all binary parameter values into one cache key and causes
+        // cross-query cache poisoning.
+        if (value is byte[] bytes) return Convert.ToHexString(bytes);
+
         // DateTime near now → quantize to the configured window so that
         // `Where(x => x.At >= DateTime.UtcNow.AddDays(-30))` produces a stable key
         // across back-to-back calls. Far-future / far-past absolute dates pass through.
