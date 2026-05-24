@@ -86,62 +86,48 @@ jobs:
 
           Write-Host "Changed projects: $($changedProjects -join ', ')"
 
-          # Per-library bump: scan only the commits that touched each lib's folder
+          # ── Unified versioning from version.txt ──────────────────────────
+          # Major.Minor is controlled manually via version.txt in the repo root.
+          # CI only ever bumps the patch number. All libraries share the same version.
+          $versionLine = (Get-Content 'version.txt' -TotalCount 1).Trim()
+          $vParts = $versionLine.Split('.')
+          $major = [int]$vParts[0]
+          $minor = [int]$vParts[1]
+
+          # Find the highest current patch across ALL projects to keep them aligned
+          $maxPatch = 0
+          foreach ($project in $allProjects) {
+            $csproj = Join-Path $project "$project.csproj"
+            [xml]$proj = Get-Content $csproj
+            $vNode = $proj.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
+            $cur = ($vNode.Version -split '-')[0]  # strip any prerelease suffix
+            $curParts = $cur.Split('.')
+            if ([int]$curParts[0] -eq $major -and [int]$curParts[1] -eq $minor) {
+              $maxPatch = [Math]::Max($maxPatch, [int]$curParts[2])
+            }
+          }
+
+          # Bump patch by 1 from the highest current
+          $newPatch = $maxPatch + 1
+          $newVersion = "$major.$minor.$newPatch"
+          if ('${{ github.ref_name }}' -eq 'prerelease') {
+            $newVersion = "$newVersion-preview.${{ github.run_number }}"
+          }
+
+          Write-Host "version.txt = $versionLine → all changed libs get $newVersion"
+
+          # Apply the unified version to all changed projects
           $versionMap = @{}
-          $bumpSummary = @()
           foreach ($project in $changedProjects) {
-            # Get commit messages that touched THIS project's folder
-            if ($lastTag) {
-              $projectLog = git log "$lastTag..HEAD" --format=%s -- "$project/" 2>$null
-            } else {
-              $projectLog = git log -10 --format=%s -- "$project/" 2>$null
-            }
-            $projectLogStr = ($projectLog ?? @()) -join "`n"
-
-            # Determine bump level for THIS project.
-            # Conventional-commit prefixes match with optional (scope):
-            #   feat: …        → minor
-            #   feat(MySQL2): … → minor
-            #   feat!: …       → major (breaking-bang)
-            #   BREAKING CHANGE in any commit body → major
-            if ($projectLogStr -match '(?im)^(breaking[:\s]|feat[!]|[a-z]+(\([^)]*\))?!:|BREAKING CHANGE)') {
-              $bump = 'major'
-            } elseif ($projectLogStr -match '(?im)^feat(\([^)]*\))?[:\s]') {
-              $bump = 'minor'
-            } else {
-              $bump = 'patch'
-            }
-
-            # Read and bump version
             $csproj = Join-Path $project "$project.csproj"
             [xml]$proj = Get-Content $csproj
             $versionNode = $proj.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
             $currentVersion = $versionNode.Version
-            if ([string]::IsNullOrWhiteSpace($currentVersion)) {
-              throw "Could not read <Version> from $csproj"
-            }
-
-            # Strip any prerelease suffix (e.g. "4.2.4-preview.51" → "4.2.4")
-            $baseVersion = ($currentVersion -split '-')[0]
-            $parts = $baseVersion.Split('.')
-            $major = [int]$parts[0]; $minor = [int]$parts[1]; $patch = [int]$parts[2]
-
-            switch ($bump) {
-              'major' { $major++; $minor = 0; $patch = 0 }
-              'minor' { $minor++; $patch = 0 }
-              'patch' { $patch++ }
-            }
-
-            $newVersion = "$major.$minor.$patch"
-            if ('${{ github.ref_name }}' -eq 'prerelease') {
-              $newVersion = "$newVersion-preview.${{ github.run_number }}"
-            }
             $versionNode.Version = $newVersion
             $proj.Save((Resolve-Path $csproj).Path)
 
             $versionMap[$project] = $newVersion
-            $bumpSummary += "$project : $currentVersion -> $newVersion ($bump)"
-            Write-Host "$project : $currentVersion -> $newVersion ($bump)"
+            Write-Host "$project : $currentVersion -> $newVersion"
           }
 
           $projectList = $changedProjects -join ','
