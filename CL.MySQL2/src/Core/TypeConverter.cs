@@ -196,6 +196,7 @@ internal static class TypeConverter
         null                => null,
         byte[] b            => b,
         Guid guid           => GuidToBytes(guid),
+        string s when Guid.TryParse(s, out var g) => GuidToBytes(g),
         string s            => System.Text.Encoding.UTF8.GetBytes(s),
         bool b              => [b ? (byte)1 : (byte)0],
         byte v              => [v],
