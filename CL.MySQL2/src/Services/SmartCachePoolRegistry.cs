@@ -55,6 +55,15 @@ public static class SmartCachePoolRegistry
     public static SmartCachePool? Get(string name) =>
         _pools.TryGetValue(name, out var pool) ? pool : null;
 
+    /// <summary>
+    /// Returns <c>true</c> if any registered pool currently has refresh entries
+    /// for the given table name. Used by <see cref="QueryCache.Invalidate"/> to
+    /// skip mutation-triggered eviction for tables that are kept warm by a pool's
+    /// background refresh loop.
+    /// </summary>
+    public static bool HasEntriesForTable(string tableName) =>
+        _pools.Values.Any(p => p.HasEntriesForTable(tableName));
+
     /// <summary>Triggers an out-of-schedule refresh for the named pool.</summary>
     public static Task RefreshNowAsync(string name, CancellationToken ct = default) =>
         _pools.TryGetValue(name, out var pool) ? pool.RefreshNowAsync(ct) : Task.CompletedTask;

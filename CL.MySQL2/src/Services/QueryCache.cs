@@ -133,13 +133,28 @@ public static class QueryCache
     /// behind the previous version's entries until TTL/LRU clears them,
     /// which on a busy app produces unbounded memory growth.
     /// </para>
+    /// <para>
+    /// When a table has active <see cref="SmartCachePool"/> entries, the
+    /// pool's background refresh is the source of truth for freshness — it
+    /// re-executes queries every <c>RefreshEvery</c> and writes to the
+    /// current version's cache key. Flushing the cache on every mutation
+    /// (e.g. a stats ingest INSERT) would defeat the pool: every request
+    /// between the flush and the next refresh tick hits the DB cold. For
+    /// pool-managed tables we skip the eviction and let the pool refresh
+    /// deliver naturally-stale-within-interval reads instead.
+    /// </para>
     /// </summary>
     public static void Invalidate(string tableName)
     {
+        // SmartCache-managed tables: the pool refresh is the freshness
+        // mechanism. Skip the version bump + eviction so entries stay warm
+        // between refresh ticks. The data is at most RefreshEvery stale,
+        // which is an acceptable trade-off for stats/dashboard tables that
+        // receive high-frequency inserts.
+        if (SmartCachePoolRegistry.HasEntriesForTable(tableName))
+            return;
+
         _tableVersions.AddOrUpdate(tableName, 1L, (_, v) => v + 1);
-        // Fire-and-forget — the eviction sweep doesn't need to complete
-        // before the mutation that triggered it returns. The cache is
-        // already "logically invalid" from the version bump above.
         _ = _store.EvictByTableAsync(tableName);
     }
 

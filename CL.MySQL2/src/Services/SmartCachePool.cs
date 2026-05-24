@@ -117,6 +117,14 @@ public sealed class SmartCachePool : IAsyncDisposable
         await TickAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Returns <c>true</c> if this pool has any active refresh entries for the
+    /// given table name. Used to suppress mutation-triggered cache invalidation
+    /// for tables whose freshness is managed by the pool's background refresh.
+    /// </summary>
+    public bool HasEntriesForTable(string tableName) =>
+        _entries.Values.Any(e => string.Equals(e.TableName, tableName, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>Snapshot of pool stats for diagnostics.</summary>
     public SmartCachePoolStats GetStats()
     {
@@ -233,7 +241,7 @@ public sealed class SmartCachePool : IAsyncDisposable
         var sb = new StringBuilder();
         sb.Append(connectionId).Append('|').Append(tableName).Append('|').Append(sql);
         foreach (var kv in parms.OrderBy(p => p.Key, StringComparer.Ordinal))
-            sb.Append('|').Append(kv.Key).Append('=').Append(kv.Value?.ToString() ?? "NULL");
+            sb.Append('|').Append(kv.Key).Append('=').Append(kv.Value is byte[] b ? Convert.ToHexString(b) : kv.Value?.ToString() ?? "NULL");
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
         return Convert.ToHexString(hash);
     }
