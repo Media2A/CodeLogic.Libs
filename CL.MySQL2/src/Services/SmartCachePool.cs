@@ -10,12 +10,8 @@ namespace CL.MySQL2.Services;
 /// Queries opt in via <c>.SmartCache("poolName")</c>; on first execution they
 /// register their refresh factory with the pool. Every <see cref="RefreshEvery"/>
 /// the pool re-runs every registered factory and overwrites the cache entry,
-/// so subsequent reads never block on the DB.
-/// <para>
-/// Cardinality is bounded by the eviction policy: an entry that hasn't been
-/// read for <see cref="MaxIdleFires"/> consecutive refresh ticks is dropped
-/// from the refresh list (the cache entry expires on its own TTL afterwards).
-/// </para>
+/// so subsequent reads never block on the DB. Entries stay warm forever once
+/// registered — the pool never evicts them.
 /// </summary>
 public sealed class SmartCachePool : IAsyncDisposable
 {
@@ -25,7 +21,8 @@ public sealed class SmartCachePool : IAsyncDisposable
     /// <summary>How often the pool re-runs every registered factory.</summary>
     public TimeSpan RefreshEvery { get; }
 
-    /// <summary>Drop an entry after this many consecutive refresh ticks with no read. Default 3.</summary>
+    /// <summary>Deprecated — idle eviction removed. Entries stay warm forever once registered.</summary>
+    [Obsolete("Idle eviction removed. Entries stay warm forever once registered.")]
     public int MaxIdleFires { get; }
 
     private readonly ConcurrentDictionary<string, PoolEntry> _entries = new(StringComparer.Ordinal);
@@ -48,7 +45,7 @@ public sealed class SmartCachePool : IAsyncDisposable
     {
         if (_loop is not null) return;
         _loop = Task.Run(() => LoopAsync(_cts.Token));
-        _logger?.Info($"[MySQL2] SmartCachePool '{Name}' started (refreshEvery={RefreshEvery.TotalSeconds:0.#}s, maxIdleFires={MaxIdleFires}).");
+        _logger?.Info($"[MySQL2] SmartCachePool '{Name}' started (refreshEvery={RefreshEvery.TotalSeconds:0.#}s).");
     }
 
     /// <summary>
@@ -105,7 +102,6 @@ public sealed class SmartCachePool : IAsyncDisposable
             RefreshFactory = refreshFactory,
         });
         Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
-        Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
     }
 
     /// <summary>
@@ -171,16 +167,6 @@ public sealed class SmartCachePool : IAsyncDisposable
             if (ct.IsCancellationRequested) return;
             var entry = kv.Value;
 
-            // Idle eviction: if nobody has read this entry for MaxIdleFires
-            // consecutive ticks, drop it from the refresh list.
-            var idle = Interlocked.Increment(ref entry.ConsecutiveIdleFires);
-            if (idle > MaxIdleFires)
-            {
-                if (_entries.TryRemove(kv))
-                    _logger?.Debug($"[MySQL2] SmartCachePool '{Name}' evicted idle entry {entry.EntryId[..8]} ({entry.TableName}).");
-                continue;
-            }
-
             try
             {
                 var result = await entry.RefreshFactory(ct).ConfigureAwait(false);
@@ -229,7 +215,6 @@ public sealed class SmartCachePool : IAsyncDisposable
         if (_entries.TryGetValue(entryId, out var entry))
         {
             Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
-            Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
         }
     }
 
@@ -266,7 +251,6 @@ public sealed class SmartCachePool : IAsyncDisposable
         public required Dictionary<string, object?> Parms { get; init; }
         public required Func<CancellationToken, Task<object?>> RefreshFactory { get; init; }
         public long LastReadUtcTicks;
-        public int ConsecutiveIdleFires;
 
         /// <summary>
         /// Most recent cache key written by this entry's refresh tick.
