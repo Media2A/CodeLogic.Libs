@@ -121,7 +121,7 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] ProjectedQuery.ToListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] ProjectedQuery.ToListAsync failed: {ex.Message} — query: {_sql}", ex);
             return Result<List<TResult>>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }

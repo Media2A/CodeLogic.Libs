@@ -241,8 +241,27 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.ToListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.ToListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<List<T>>.Failure(Error.FromException(ex, "mysql.query_failed"));
+        }
+    }
+
+
+    /// <summary>
+    /// Best-effort query description for error logs — the SELECT shape (table +
+    /// WHERE) pinpoints the failing call site even for update/delete variants.
+    /// Never throws.
+    /// </summary>
+    private string DescribeQueryForLog()
+    {
+        try
+        {
+            var (sql, _) = BuildSelectSql();
+            return sql;
+        }
+        catch
+        {
+            try { return $"<table {GetTableName()}>"; } catch { return "<unknown>"; }
         }
     }
 
@@ -311,7 +330,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.FirstOrDefaultAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.FirstOrDefaultAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<T?>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -361,7 +380,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.ToPagedListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.ToPagedListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<PagedResult<T>>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -446,7 +465,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.CountAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.CountAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<long>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -501,7 +520,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.AverageAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.AverageAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<double>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -526,7 +545,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.DeleteAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.DeleteAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "mysql.delete_failed"));
         }
     }
@@ -607,7 +626,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync (typed) failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync (typed) failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "mysql.update_failed"));
         }
     }
@@ -661,7 +680,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "mysql.update_failed"));
         }
     }
@@ -749,7 +768,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder aggregate failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder aggregate failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<TResult>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
