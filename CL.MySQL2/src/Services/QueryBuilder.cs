@@ -187,7 +187,12 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
-    private bool ShouldCache => (_cacheTtl is not null || _smartCachePool is not null) && _transactionScope is null;
+    // Plain cache-aside requires an explicit TTL. A query that asked for
+    // SmartCache against an UNREGISTERED pool must fall through to truly
+    // uncached execution (the logged fallback) — including _smartCachePool
+    // here used to send it into the TTL branch and dereference a null
+    // _cacheTtl ("Nullable object must have a value").
+    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null;
     private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null;
 
     // ── Terminal methods ──────────────────────────────────────────────────────

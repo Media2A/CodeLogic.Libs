@@ -102,6 +102,23 @@ internal static class TypeConverter
             return Enum.ToObject(underlyingType, Convert.ChangeType(dbValue, Enum.GetUnderlyingType(underlyingType)));
         }
 
+        // BINARY column → CLR value WITHOUT [Column(StorageType)] metadata. The
+        // projection path (anonymous types / DTOs in ProjectedQuery and paged
+        // projections) lands here because projection targets carry no column
+        // attributes. A 16-byte value is a BINARY(16) UUID by convention —
+        // decode big-endian (RFC 4122), matching ToBinary/GuidToBytes. Without
+        // this, every projected Guid from a BINARY(16) column throws
+        // InvalidCastException ("Object must implement IConvertible").
+        if (dbValue is byte[] raw)
+        {
+            if (underlyingType == typeof(byte[]))
+                return raw;
+            if (underlyingType == typeof(Guid) && raw.Length == 16)
+                return GuidFromBytes(raw);
+            if (underlyingType == typeof(string) && raw.Length == 16)
+                return GuidFromBytes(raw).ToString();
+        }
+
         // Standard conversions
         try
         {
