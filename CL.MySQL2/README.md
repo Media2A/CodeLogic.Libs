@@ -54,6 +54,7 @@ Full expression translation to SQL — no magic strings in consumer code.
 | Null | `x.Col == null` → `IS NULL`; `string.IsNullOrEmpty(x.Col)` too |
 | Nullable | `x.NullableCol.Value` passthrough |
 | Join | `.Join<TRight, TKey, TResult>(leftKey, rightKey, resultSelector)` → typed equi-join |
+| Subquery | `.WhereExists<TInner>((o, i) => …)`, `.WhereIn<TInner, TKey>(col, innerCol, filter?)` |
 
 ### Typed JOINs _(new in 4.5.2)_
 
@@ -84,6 +85,33 @@ var views = await mysql.Query<Order>()
   `.SmartCache` are intentionally absent on the join. Apply ordering/paging *after*
   `.Join`. The raw-string `Join(table, condition, type)` overload is still available
   for hand-written joins.
+
+### Subquery filters — EXISTS / IN _(new in 4.5.2)_
+
+Correlated and uncorrelated subqueries in the WHERE clause, without dropping to raw SQL:
+
+```csharp
+// Orders that have at least one sent shipment (correlated EXISTS)
+await mysql.Query<Order>()
+    .WhereExists<Shipment>((o, s) => s.OrderId == o.Id && s.Status == "sent")
+    .ToListAsync();
+
+// Orders whose customer is a VIP (IN over a filtered subquery)
+await mysql.Query<Order>()
+    .WhereIn<Customer, long>(o => o.CustomerId, c => c.Id, c => c.IsVip)
+    .ToListAsync();
+```
+
+| Method | SQL |
+|---|---|
+| `WhereExists<TInner>((o, i) => …)` | `EXISTS (SELECT 1 FROM inner WHERE …)` |
+| `WhereNotExists<TInner>(…)` | `NOT EXISTS (…)` |
+| `WhereIn<TInner, TKey>(col, innerCol, filter?)` | `col IN (SELECT innerCol FROM inner [WHERE …])` |
+| `WhereNotIn<TInner, TKey>(…)` | `col NOT IN (…)` |
+
+Subquery filters compose with ordinary `.Where(...)`. They are **not cacheable**
+(the cache can't track the inner table for invalidation) and can't be combined
+with a typed `.Join`. `WhereExists` against the outer query's own table is rejected.
 
 ### Projection pushdown
 

@@ -37,11 +37,36 @@ NuGet package version of `CodeLogic.MySQL2`.
   - The single-table query path and the existing raw-string
     `Join(table, condition, type)` overload are unchanged.
 
+- **Subquery filters — `EXISTS` / `IN`.** Four new WHERE-family methods on the
+  query builder translate to real SQL subqueries:
+
+  ```csharp
+  // Correlated EXISTS — correlated + non-correlated conditions in one predicate
+  mysql.Query<Order>()
+      .WhereExists<Shipment>((o, s) => s.OrderId == o.Id && s.Status == "sent");
+
+  // IN (subquery) with an optional uncorrelated inner filter
+  mysql.Query<Order>()
+      .WhereIn<Customer, long>(o => o.CustomerId, c => c.Id, c => c.IsVip);
+  ```
+
+  - `WhereExists<TInner>` / `WhereNotExists<TInner>` →
+    `[NOT] EXISTS (SELECT 1 FROM inner WHERE …)`, correlated via the predicate.
+  - `WhereIn<TInner, TKey>` / `WhereNotIn<TInner, TKey>` →
+    `col [NOT] IN (SELECT innerCol FROM inner [WHERE innerFilter])`.
+  - Composes with ordinary `.Where(...)` and reuses the same multi-source
+    translator as joins (each source qualified by its table name).
+
 ### Notes
 
-- **No breaking changes.** Joins are a new method; the multi-source WHERE
-  translator is byte-identical to the single-table translator when no alias map
-  is supplied.
+- **No breaking changes.** Joins and subquery filters are new methods; the
+  multi-source WHERE translator is byte-identical to the single-table translator
+  when no alias map is supplied.
+- **Subquery-filtered queries are not cacheable** and cannot be turned into a
+  typed `.Join` — same single-table-version-stamping limitation as joins. Both
+  are gated explicitly (cache silently bypassed; `.Join` throws).
+- **`WhereExists` against the outer query's own table is rejected** — unqualified
+  inner columns would be ambiguous.
 - **Joins are not cacheable in this version.** The result cache stamps each entry
   with a single table's version counter, so a join entry could not be invalidated
   when the *other* joined table mutates. `.WithCache` / `.SmartCache` are
