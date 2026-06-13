@@ -53,6 +53,37 @@ Full expression translation to SQL — no magic strings in consumer code.
 | IN | `list.Contains(x.Col)` → `x.Col IN (...)` |
 | Null | `x.Col == null` → `IS NULL`; `string.IsNullOrEmpty(x.Col)` too |
 | Nullable | `x.NullableCol.Value` passthrough |
+| Join | `.Join<TRight, TKey, TResult>(leftKey, rightKey, resultSelector)` → typed equi-join |
+
+### Typed JOINs _(new in 4.6)_
+
+`Join<TRight, TKey, TResult>` translates a strongly-typed equi-join to real SQL
+with table aliases and a compiled projection — only the columns the result
+selector references cross the wire.
+
+```csharp
+var views = await mysql.Query<Order>()
+    .Where(o => o.Total > 100)                  // carried over, re-qualified to the left table
+    .Join<Customer, long, OrderView>(
+        o => o.CustomerId,                       // left key
+        c => c.Id,                               // right key
+        (o, c) => new OrderView { OrderId = o.Id, Customer = c.Name })
+    .OrderByDescending((o, c) => o.Total)
+    .Take(20)
+    .ToListAsync();
+```
+
+- **Join types:** `Inner` (default), `Left`, `Right`.
+- **Composite keys:** `o => new { o.A, o.B }` matched positionally with `c => new { c.X, c.Y }`.
+- **Fluent surface on the join:** `.Where((l, r) => …)`, `.OrderBy` / `.OrderByDescending`,
+  `.Take` / `.Skip`, and `ToListAsync` / `FirstOrDefaultAsync` / `CountAsync`.
+- **`TRight` is explicit** (`Join<Customer, long, OrderView>`) — it can't be inferred
+  from a lambda parameter.
+- **Not cacheable yet** — the result cache versions entries by a single table, so a
+  join can't be safely invalidated when the *other* table mutates. `.WithCache` /
+  `.SmartCache` are intentionally absent on the join. Apply ordering/paging *after*
+  `.Join`. The raw-string `Join(table, condition, type)` overload is still available
+  for hand-written joins.
 
 ### Projection pushdown
 

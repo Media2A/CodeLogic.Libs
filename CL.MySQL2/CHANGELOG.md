@@ -4,6 +4,52 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## [4.6.0] — 2026-06-13
+
+### Added
+
+- **Typed JOINs.** `Query<TLeft>().Join<TRight, TKey, TResult>(leftKey, rightKey,
+  resultSelector, type)` translates a strongly-typed equi-join to real SQL with
+  table aliases (left `t0`, right `t1`) and a compiled, reflection-free projection
+  into `TResult` — only the columns the selector references are transferred.
+
+  ```csharp
+  var views = await mysql.Query<Order>()
+      .Where(o => o.Total > 100)
+      .Join<Customer, long, OrderView>(
+          o => o.CustomerId,                 // left key
+          c => c.Id,                         // right key
+          (o, c) => new OrderView { OrderId = o.Id, Customer = c.Name })
+      .OrderByDescending((o, c) => o.Total)
+      .Take(20)
+      .ToListAsync();
+  ```
+
+  - **Join types:** `Inner` (default), `Left`, `Right`. `Cross` is rejected for a
+    keyed join (keys imply an equi-join).
+  - **Composite keys:** `o => new { o.A, o.B }` matched positionally with
+    `c => new { c.X, c.Y }`.
+  - **Carried filters:** `.Where(...)` calls made on the left builder *before*
+    `.Join` are re-qualified to the left table and preserved.
+  - **Fluent surface on the join:** `.Where((l, r) => …)`, `.OrderBy` /
+    `.OrderByDescending((l, r) => …)`, `.Take` / `.Skip`, and the
+    `ToListAsync` / `FirstOrDefaultAsync` / `CountAsync` terminals.
+  - The single-table query path and the existing raw-string
+    `Join(table, condition, type)` overload are unchanged.
+
+### Notes
+
+- **No breaking changes.** Joins are a new method; the multi-source WHERE
+  translator is byte-identical to the single-table translator when no alias map
+  is supplied.
+- **Joins are not cacheable in this version.** The result cache stamps each entry
+  with a single table's version counter, so a join entry could not be invalidated
+  when the *other* joined table mutates. `.WithCache` / `.SmartCache` are
+  intentionally absent on `JoinedQuery` rather than risk serving stale joins;
+  multi-table invalidation is on the roadmap.
+- **`TRight` must be specified explicitly** (e.g. `Join<Customer, long, OrderView>`)
+  — it cannot be inferred from a lambda parameter type.
+
 ## [4.5.0] — 2026-05-24
 
 ### Added

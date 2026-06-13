@@ -27,6 +27,9 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     // Builder state
     private readonly List<(string Clause, Dictionary<string, object?> Params)> _wheres = [];
+    // Raw predicate expressions, retained so a later typed .Join can re-translate them
+    // with the left-table alias (the pre-translated SQL above is alias-less).
+    private readonly List<Expression<Func<T, bool>>> _wherePredicates = [];
     private readonly List<string> _orderBys = [];
     private readonly List<string> _joins = [];
     private readonly List<string> _groupBys = [];
@@ -77,6 +80,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             clause = clause.Replace(kv.Key, newKey);
         }
         _wheres.Add((clause, rekeyed));
+        _wherePredicates.Add(predicate);
         return this;
     }
 
@@ -110,6 +114,70 @@ public sealed class QueryBuilder<T> where T : class, new()
         };
         _joins.Add($"{keyword} `{table}` ON {condition}");
         return this;
+    }
+
+    /// <summary>
+    /// Strongly-typed equi-join to <typeparamref name="TRight"/>, translated to real SQL with
+    /// table aliases (left <c>t0</c>, right <c>t1</c>) and a compiled projection into
+    /// <typeparamref name="TResult"/> — only the referenced columns are transferred.
+    /// <para>
+    /// Example:
+    /// <code>
+    /// await mysql.Query&lt;Order&gt;()
+    ///     .Where(o =&gt; o.Total &gt; 100)
+    ///     .Join&lt;Customer, long, OrderView&gt;(
+    ///         o =&gt; o.CustomerId,             // left key
+    ///         c =&gt; c.Id,                     // right key
+    ///         (o, c) =&gt; new OrderView { OrderId = o.Id, Customer = c.Name })
+    ///     .OrderByDescending((o, c) =&gt; o.Total)
+    ///     .ToListAsync();
+    /// </code>
+    /// </para>
+    /// <para>
+    /// Keys may be single members or composite anonymous keys
+    /// (<c>o =&gt; new { o.A, o.B }</c> matched with <c>c =&gt; new { c.X, c.Y }</c>).
+    /// <c>.Where(...)</c> calls made before <c>.Join</c> are carried over and re-qualified
+    /// to the left table. Apply ordering and paging <i>after</i> the join via the returned
+    /// <see cref="JoinedQuery{TLeft, TRight, TResult}"/>.
+    /// </para>
+    /// </summary>
+    public JoinedQuery<T, TRight, TResult> Join<TRight, TKey, TResult>(
+        Expression<Func<T, TKey>> leftKey,
+        Expression<Func<TRight, TKey>> rightKey,
+        Expression<Func<T, TRight, TResult>> resultSelector,
+        JoinType type = JoinType.Inner)
+        where TRight : class, new()
+    {
+        if (_orderBys.Count > 0 || _limit.HasValue || _offset.HasValue)
+            throw new InvalidOperationException(
+                "Apply OrderBy / Take / Skip after .Join, on the returned JoinedQuery — " +
+                "ordering and paging set before the join would be silently dropped.");
+        if (_joins.Count > 0 || _groupBys.Count > 0)
+            throw new InvalidOperationException(
+                "Typed .Join cannot be combined with raw .Join(string,...) or .GroupBy on the same query.");
+
+        const string leftAlias = "t0";
+        const string rightAlias = "t1";
+
+        var onClause = JoinTranslator.OnClause(leftKey, leftAlias, rightKey, rightAlias);
+
+        var aliasMap = new Dictionary<ParameterExpression, string>
+        {
+            [resultSelector.Parameters[0]] = leftAlias,
+            [resultSelector.Parameters[1]] = rightAlias,
+        };
+        var columns = JoinTranslator.ProjectionColumns(resultSelector.Body, aliasMap);
+        var projection = ProjectionCompiler.CompileFromColumns<T, TResult>(resultSelector.Body, columns);
+
+        var joined = new JoinedQuery<T, TRight, TResult>(
+            _connectionManager, _logger, _connectionId, _transactionScope, _slowQueryThresholdMs,
+            EntityMetadata<T>.TableName, EntityMetadata<TRight>.TableName, type, onClause, projection);
+
+        // Carry forward any left-side filters applied before the join.
+        foreach (var predicate in _wherePredicates)
+            joined.AddLeftPredicate(predicate);
+
+        return joined;
     }
 
     /// <summary>
