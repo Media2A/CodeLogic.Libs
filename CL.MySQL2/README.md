@@ -55,7 +55,7 @@ Full expression translation to SQL — no magic strings in consumer code.
 | Nullable | `x.NullableCol.Value` passthrough |
 | Join | `.Join<TRight, TKey, TResult>(leftKey, rightKey, resultSelector)` → typed equi-join |
 
-### Typed JOINs _(new in 4.6)_
+### Typed JOINs _(new in 4.5.2)_
 
 `Join<TRight, TKey, TResult>` translates a strongly-typed equi-join to real SQL
 with table aliases and a compiled projection — only the columns the result

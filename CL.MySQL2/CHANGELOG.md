@@ -4,7 +4,7 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
-## [4.6.0] — 2026-06-13
+## [4.5.2] — 2026-06-13
 
 ### Added
 
