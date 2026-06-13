@@ -205,6 +205,26 @@ public sealed class MySqlDatabaseConfig
     public int PreparedStatementCacheSize { get; set; } = 256;
 
     /// <summary>
+    /// How many times to automatically retry a single non-transactional statement that
+    /// fails with a transient error (deadlock 1213, lock-wait timeout 1205). 0 disables.
+    /// Default: 3. Statements inside an explicit transaction scope are never auto-retried —
+    /// the whole transaction must be retried by the caller.
+    /// </summary>
+    [ConfigField(Label = "Transient Retry Count", Min = 0, Max = 10,
+        Description = "Auto-retry deadlock / lock-wait-timeout on single statements. 0 disables.",
+        Group = "Performance", Order = 83, Collapsed = true)]
+    public int TransientRetryCount { get; set; } = 3;
+
+    /// <summary>
+    /// Base backoff in milliseconds for transient retries; the delay grows exponentially
+    /// (base × 2^attempt) with a little random jitter. Default: 50.
+    /// </summary>
+    [ConfigField(Label = "Transient Retry Base Delay (ms)", Min = 0, Max = 10_000,
+        Description = "Base backoff for transient retries; grows exponentially with jitter.",
+        Group = "Performance", Order = 84, Collapsed = true)]
+    public int TransientRetryBaseDelayMs { get; set; } = 50;
+
+    /// <summary>
     /// Warn when the same query template fires this many times inside a single request
     /// scope (AsyncLocal). 0 disables the detector.
     /// </summary>

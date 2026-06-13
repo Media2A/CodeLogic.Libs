@@ -24,6 +24,12 @@ internal static class EntityMetadata<T> where T : class
     public static readonly IReadOnlySet<string> AllColumnNames;
 
     /// <summary>
+    /// The soft-delete timestamp column when the entity carries <see cref="SoftDeleteAttribute"/>,
+    /// else null. Reads filter on <c>{column} IS NULL</c> and deletes set it to UtcNow.
+    /// </summary>
+    public static readonly ColumnMetadata? SoftDeleteColumn;
+
+    /// <summary>
     /// Compiled row materializer: reads a <see cref="MySqlDataReader"/> positioned on a row
     /// and returns a fully hydrated <typeparamref name="T"/>. Uses column ordinals resolved
     /// once per query (see <see cref="Materializer{T}.CompileForReader"/>).
@@ -54,6 +60,16 @@ internal static class EntityMetadata<T> where T : class
         AllColumnNames = cols.Select(c => c.ColumnName).ToHashSet(StringComparer.OrdinalIgnoreCase);
         PrimaryKey = cols.FirstOrDefault(c => c.Attribute?.Primary == true);
         CompositeIndexes = type.GetCustomAttributes<CompositeIndexAttribute>().ToArray();
+
+        var softDelete = type.GetCustomAttribute<SoftDeleteAttribute>();
+        if (softDelete is not null)
+        {
+            SoftDeleteColumn =
+                (ColumnsByPropertyName.TryGetValue(softDelete.TimestampColumn, out var byProp) ? byProp : null)
+                ?? (ColumnsByColumnName.TryGetValue(softDelete.TimestampColumn, out var byCol) ? byCol : null)
+                ?? throw new InvalidOperationException(
+                    $"[SoftDelete] on '{type.Name}' references '{softDelete.TimestampColumn}', which is not a mapped property/column.");
+        }
 
         Materializer = new Materializer<T>();
     }

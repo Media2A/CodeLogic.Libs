@@ -113,6 +113,48 @@ Subquery filters compose with ordinary `.Where(...)`. They are **not cacheable**
 (the cache can't track the inner table for invalidation) and can't be combined
 with a typed `.Join`. `WhereExists` against the outer query's own table is rejected.
 
+### Raw SQL escape hatch _(new in 4.5.2)_
+
+For the rare query the translator can't express, drop to SQL without losing the
+compiled materializer, observability, or the transient-retry policy:
+
+```csharp
+var rows = await mysql.SqlQueryAsync<UserRecord>(
+    "SELECT * FROM users WHERE country = @c", new() { ["@c"] = "DK" });   // materialized rows
+var n   = await mysql.SqlScalarAsync<long>("SELECT COUNT(*) FROM users"); // single value
+var hit = await mysql.ExecuteSqlAsync("UPDATE users SET active = 0 WHERE last_seen < @t",
+                                      new() { ["@t"] = cutoff });          // affected count
+```
+
+Always pass values via named parameters — never interpolate user input into the SQL.
+Raw queries are not cached.
+
+### Soft deletes _(new in 4.5.2)_
+
+Mark a nullable-`DateTime` column with `[SoftDelete]` and deletes become timestamp
+updates; reads hide the deleted rows automatically.
+
+```csharp
+[Table(Name = "accounts")]
+[SoftDelete(nameof(DeletedUtc))]
+public sealed class Account
+{
+    [Column(DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "deleted_utc", DataType = DataType.DateTime)] public DateTime? DeletedUtc { get; set; }
+}
+
+var repo = mysql.GetRepository<Account>();
+await repo.DeleteAsync(id);                 // soft: sets deleted_utc = UtcNow
+await mysql.Query<Account>().ToListAsync(); // excludes soft-deleted rows
+await mysql.Query<Account>().IncludeDeleted().ToListAsync();  // includes them
+await repo.HardDeleteAsync(id);             // physical DELETE
+```
+
+Auto-filtering covers single-table `mysql.Query<T>()` reads and the repository getters.
+It does **not** apply to joins, subqueries, or the query builder's bulk
+`UpdateAsync`/`DeleteAsync` — those stay raw so you can restore or hard-purge deleted
+rows. To restore: `Query<Account>().Where(a => a.Id == id).UpdateAsync(a => new Account { DeletedUtc = null })`.
+
 ### Projection pushdown
 
 `.Select<TResult>(x => new Foo(x.A, x.B))` emits a real column list — only the
@@ -176,6 +218,9 @@ Two things that weren't right before and now are:
 
 Cache hits and misses publish `CacheHitEvent` / `CacheMissEvent` on the
 CodeLogic event bus.
+
+**Stampede protection** _(new in 4.5.2)_ — concurrent misses on the same cold key
+collapse to a single DB hit (single-flight); the rest await that one execution.
 
 ### Smart cache pools — kept warm in the background _(new in 4.2)_
 
@@ -343,6 +388,8 @@ Two config sections are auto-generated on first run under
 | `MaxBatchInsertSize` | 500 | `InsertManyAsync` chunk size |
 | `MaxInClauseValues` | 1000 | IN-clause safety cap |
 | `PreparedStatementCacheSize` | 256 | per-connection |
+| `TransientRetryCount` | 3 | auto-retry deadlock/lock-wait on single statements (0 = off) |
+| `TransientRetryBaseDelayMs` | 50 | base backoff for transient retries (exponential + jitter) |
 | `N1DetectorThreshold` | 0 (off) | warn on repeated query in request scope |
 | `CaptureExplainOnSlowQuery` | true | attach EXPLAIN to `SlowQueryEvent` |
 | `DefaultStringSize` | 255 | VARCHAR size when no `[Column(Size)]` |

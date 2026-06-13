@@ -42,6 +42,8 @@ public sealed class QueryBuilder<T> where T : class, new()
     // second table the result cache can't track for invalidation, and they can't be
     // re-aliased into a typed .Join — both are gated on this flag.
     private bool _hasSubqueryWhere;
+    // When false (default), reads on a [SoftDelete] entity append `<col> IS NULL`.
+    private bool _includeDeleted;
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
@@ -345,6 +347,17 @@ public sealed class QueryBuilder<T> where T : class, new()
     public QueryBuilder<T> WithConnection(string connectionId)
     {
         _connectionId = connectionId;
+        return this;
+    }
+
+    /// <summary>
+    /// Includes soft-deleted rows in the results. Only meaningful when the entity carries
+    /// <see cref="Models.SoftDeleteAttribute"/>; otherwise a no-op. Reads exclude soft-deleted
+    /// rows by default.
+    /// </summary>
+    public QueryBuilder<T> IncludeDeleted()
+    {
+        _includeDeleted = true;
         return this;
     }
 
@@ -722,7 +735,8 @@ public sealed class QueryBuilder<T> where T : class, new()
         try
         {
             var tableName = GetTableName();
-            var (whereClause, parms) = BuildWhereSql();
+            // Hard delete — bypass the soft-delete read filter so it targets all matching rows.
+            var (whereClause, parms) = BuildWhereSql(applySoftDelete: false);
             var sql = $"DELETE FROM `{tableName}`{whereClause}";
 
             LogQuery(sql);
@@ -770,7 +784,8 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             var rowParam = setExpression.Parameters[0];
             var tableName = GetTableName();
-            var (whereClause, whereParms) = BuildWhereSql();
+            // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
+            var (whereClause, whereParms) = BuildWhereSql(applySoftDelete: false);
             var allParms = new Dictionary<string, object?>(whereParms);
 
             var sets = new List<string>();
@@ -849,7 +864,8 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             foreach (var key in updates.Keys) EnsureValidColumn(key);
             var tableName = GetTableName();
-            var (whereClause, whereParms) = BuildWhereSql();
+            // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
+            var (whereClause, whereParms) = BuildWhereSql(applySoftDelete: false);
             var setClauses = string.Join(", ", updates.Keys.Select(k => $"`{k}` = @upd_{k}"));
             var sql = $"UPDATE `{tableName}` SET {setClauses}{whereClause}";
 
@@ -900,10 +916,8 @@ public sealed class QueryBuilder<T> where T : class, new()
         return (sql, parms);
     }
 
-    private (string Clause, Dictionary<string, object?> Params) BuildWhereSql()
+    private (string Clause, Dictionary<string, object?> Params) BuildWhereSql(bool applySoftDelete = true)
     {
-        if (_wheres.Count == 0) return (string.Empty, new());
-
         var allParms = new Dictionary<string, object?>();
         var clauses = new List<string>();
 
@@ -914,6 +928,13 @@ public sealed class QueryBuilder<T> where T : class, new()
                 allParms[kv.Key] = kv.Value;
         }
 
+        // Reads on a [SoftDelete] entity hide deleted rows unless .IncludeDeleted() was called.
+        // Writers (UpdateAsync/DeleteAsync) pass applySoftDelete:false so they can still target
+        // or restore soft-deleted rows.
+        if (applySoftDelete && !_includeDeleted && EntityMetadata<T>.SoftDeleteColumn is { } sd)
+            clauses.Add($"`{sd.ColumnName}` IS NULL");
+
+        if (clauses.Count == 0) return (string.Empty, allParms);
         return ($" WHERE {string.Join(" AND ", clauses)}", allParms);
     }
 

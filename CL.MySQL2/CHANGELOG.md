@@ -86,6 +86,39 @@ NuGet package version of `CodeLogic.MySQL2`.
   - The default `NullCacheCoordinator` is single-node: no fan-out, always grants
     the lease — behaviour is identical to before off-cluster.
 
+- **Raw SQL escape hatch.** `mysql.SqlQueryAsync<T>(sql, parameters)` materializes
+  rows into `T` with the same compiled materializer as the query builder;
+  `ExecuteSqlAsync(sql, parameters)` runs a non-query and returns the affected count;
+  `SqlScalarAsync<T>(sql, parameters)` returns a single value. All use named
+  parameters, flow through observability, and inherit the transient-retry policy.
+
+  ```csharp
+  var rows = await mysql.SqlQueryAsync<UserRecord>(
+      "SELECT * FROM users WHERE country = @c", new() { ["@c"] = "DK" });
+  ```
+
+- **Transient-error auto-retry.** Single non-transactional statements that fail with
+  a deadlock (1213) or lock-wait timeout (1205) are retried with exponential backoff
+  + jitter. Configurable per database via `TransientRetryCount` (default 3) and
+  `TransientRetryBaseDelayMs` (default 50); 0 disables. Statements inside an explicit
+  transaction scope are never auto-retried — the whole transaction is the caller's
+  to retry.
+
+- **Cache stampede protection.** Concurrent cache misses on the same cold key now
+  collapse to a single factory execution (single-flight) instead of a thundering
+  herd of identical DB queries. Transparent — no API change.
+
+- **Soft deletes — `[SoftDelete(nameof(DeletedUtc))]`.** Marks a nullable-`DateTime`
+  column as the delete marker. `Repository.DeleteAsync` then sets it to UtcNow
+  instead of issuing a physical `DELETE`, and reads via `mysql.Query<T>()` and the
+  repository getters automatically exclude rows where it is set. Opt back in with
+  `.IncludeDeleted()` on a query, or purge for real with `Repository.HardDeleteAsync`.
+
+  ```csharp
+  [SoftDelete(nameof(DeletedUtc))]
+  public class Account { /* … */ public DateTime? DeletedUtc { get; set; } }
+  ```
+
 ### Notes
 
 - **No breaking changes.** Joins and subquery filters are new methods; the
@@ -96,6 +129,11 @@ NuGet package version of `CodeLogic.MySQL2`.
   are gated explicitly (cache silently bypassed; `.Join` throws).
 - **`WhereExists` against the outer query's own table is rejected** — unqualified
   inner columns would be ambiguous.
+- **Soft-delete auto-filtering applies to single-table reads only** —
+  `mysql.Query<T>()` terminals and the repository getters. It does NOT apply to
+  joins, subqueries, or the query builder's bulk `UpdateAsync`/`DeleteAsync` (those
+  stay raw so you can target or restore deleted rows). `QueryBuilder.DeleteAsync`
+  is a hard delete regardless of `[SoftDelete]`.
 - **Joins are not cacheable in this version.** The result cache stamps each entry
   with a single table's version counter, so a join entry could not be invalidated
   when the *other* joined table mutates. `.WithCache` / `.SmartCache` are

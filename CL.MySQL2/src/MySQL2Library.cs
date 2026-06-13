@@ -1,10 +1,13 @@
+using System.Diagnostics;
 using CL.MySQL2.Configuration;
+using CL.MySQL2.Core;
 using CL.MySQL2.Events;
 using CL.MySQL2.Localization;
 using CL.MySQL2.Models;
 using CL.MySQL2.Services;
 using CodeLogic.Core.Results;
 using CodeLogic.Framework.Libraries;
+using MySqlConnector;
 
 namespace CL.MySQL2;
 
@@ -336,6 +339,96 @@ public sealed class MySQL2Library : ILibrary
             config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
                 ? dbConfig.SlowQueryThresholdMs
                 : 1000);
+    }
+
+    // ── Raw SQL escape hatch ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Runs a raw SQL query and materializes each row into <typeparamref name="T"/> using the
+    /// same compiled materializer as the typed query builder. Use named parameters
+    /// (<c>@p</c>) and pass values via <paramref name="parameters"/> — never interpolate
+    /// user input into <paramref name="sql"/>. Flows through observability and the transient
+    /// retry policy; results are not cached.
+    /// </summary>
+    public Task<Result<List<T>>> SqlQueryAsync<T>(
+        string sql,
+        IReadOnlyDictionary<string, object?>? parameters = null,
+        string connectionId = "Default",
+        CancellationToken ct = default) where T : class, new()
+        => ExecuteRawAsync(sql, parameters, connectionId, "mysql.query_failed", ct, async cmd =>
+        {
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+            var items = new List<T>();
+            while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
+            return items;
+        });
+
+    /// <summary>
+    /// Runs a raw non-query statement (INSERT/UPDATE/DELETE/DDL) and returns the affected
+    /// row count. Same parameterization and retry/observability rules as
+    /// <see cref="SqlQueryAsync{T}"/>.
+    /// </summary>
+    public Task<Result<int>> ExecuteSqlAsync(
+        string sql,
+        IReadOnlyDictionary<string, object?>? parameters = null,
+        string connectionId = "Default",
+        CancellationToken ct = default)
+        => ExecuteRawAsync(sql, parameters, connectionId, "mysql.execute_failed", ct,
+            cmd => cmd.ExecuteNonQueryAsync(ct));
+
+    /// <summary>
+    /// Runs a raw query returning a single scalar value (the first column of the first row),
+    /// converted to <typeparamref name="T"/>. Returns <c>default</c> when there are no rows.
+    /// </summary>
+    public Task<Result<T?>> SqlScalarAsync<T>(
+        string sql,
+        IReadOnlyDictionary<string, object?>? parameters = null,
+        string connectionId = "Default",
+        CancellationToken ct = default)
+        => ExecuteRawAsync<T?>(sql, parameters, connectionId, "mysql.query_failed", ct, async cmd =>
+        {
+            var raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+            if (raw is null || raw is DBNull) return default;
+            return (T)Convert.ChangeType(raw, Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T))!;
+        });
+
+    private async Task<Result<TOut>> ExecuteRawAsync<TOut>(
+        string sql,
+        IReadOnlyDictionary<string, object?>? parameters,
+        string connectionId,
+        string errorCode,
+        CancellationToken ct,
+        Func<MySqlCommand, Task<TOut>> run)
+    {
+        try
+        {
+            var threshold = _context?.Configuration.Get<DatabaseConfiguration>()
+                .Databases.TryGetValue(connectionId, out var dbCfg) == true ? dbCfg.SlowQueryThresholdMs : 1000;
+            var sw = Stopwatch.StartNew();
+
+            var result = await ConnectionManager.ExecuteWithConnectionAsync(async conn =>
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = sql;
+                if (parameters is not null)
+                    foreach (var kv in parameters)
+                        cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
+                return await run(cmd).ConfigureAwait(false);
+            }, connectionId, ct).ConfigureAwait(false);
+
+            sw.Stop();
+            QueryObservability.RecordExecuted(connectionId, sql, sw.ElapsedMilliseconds, rowCount: -1, cacheHit: false);
+            if (sw.ElapsedMilliseconds >= threshold)
+                QueryObservability.RecordSlow(connectionId, sql, sw.ElapsedMilliseconds);
+
+            return Result<TOut>.Success(result);
+        }
+        catch (Exception ex)
+        {
+            _context?.Logger.Error($"[MySQL2] Raw SQL failed: {ex.Message} — {sql}", ex);
+            return Result<TOut>.Failure(Error.FromException(ex, errorCode));
+        }
     }
 
     /// <summary>

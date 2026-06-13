@@ -26,6 +26,10 @@ public static class QueryCache
     private static ICacheCoordinator _coordinator = NullCacheCoordinator.Instance;
     private static readonly ConcurrentDictionary<string, long> _tableVersions =
         new(StringComparer.OrdinalIgnoreCase);
+    // Stampede protection: in-flight factory executions keyed by cache key, so concurrent
+    // misses on the same cold key collapse to a single DB hit instead of a thundering herd.
+    private static readonly ConcurrentDictionary<string, Lazy<Task<object?>>> _inflight =
+        new(StringComparer.Ordinal);
 
     /// <summary>How far from <c>UtcNow</c> a DateTime parameter must be to qualify for
     /// quantization. 30 days covers typical "last N days" windows without catching
@@ -100,6 +104,25 @@ public static class QueryCache
         if (connectionId is not null)
             QueryObservability.RecordCacheMiss(connectionId, tableName, cacheKey);
 
+        // Single-flight: the first caller to miss creates the in-flight task; concurrent
+        // callers await the same one rather than each hammering the DB. The factory still
+        // runs at most once per cold key. Failure Results are not written (RunFactory guards).
+        var lazy = _inflight.GetOrAdd(cacheKey, _ =>
+            new Lazy<Task<object?>>(() => RunFactoryAsync(cacheKey, tableName, factory, ttl)));
+        try
+        {
+            var produced = await lazy.Value.ConfigureAwait(false);
+            return (T)produced!;
+        }
+        finally
+        {
+            _inflight.TryRemove(cacheKey, out _);
+        }
+    }
+
+    private static async Task<object?> RunFactoryAsync<T>(
+        string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl)
+    {
         var result = await factory().ConfigureAwait(false);
         if (result is not null && !IsFailureResult(result))
             await _store.SetAsync(cacheKey, result, ttl, tableName).ConfigureAwait(false);

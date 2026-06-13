@@ -153,6 +153,46 @@ try
     Check("cached query returns same count twice", c1.IsSuccess && c2.IsSuccess && c1.Value!.Count == c2.Value!.Count);
     Check("cache has entries for it_customer", mysql.GetCacheStats().EntriesByTable.ContainsKey("it_customer"));
 
+    // ── 8b. Raw SQL escape hatch (A1) ─────────────────────────────────────────
+    Console.WriteLine("\nRaw SQL (A1):");
+    var raw = await mysql.SqlQueryAsync<Customer>(
+        "SELECT * FROM it_customer WHERE country = @c ORDER BY id",
+        new Dictionary<string, object?> { ["@c"] = "DK" });
+    Check("SqlQueryAsync materializes rows", raw.IsSuccess && raw.Value!.Count == 1 && raw.Value[0].Name == "Alice",
+        raw.Error?.Message ?? $"count {raw.Value?.Count}");
+    var scalar = await mysql.SqlScalarAsync<long>("SELECT COUNT(*) FROM it_order");
+    Check("SqlScalarAsync returns scalar", scalar.IsSuccess && scalar.Value == 3, $"got {scalar.Value}");
+    var aff = await mysql.ExecuteSqlAsync("UPDATE it_order SET total = total WHERE total < 0");
+    Check("ExecuteSqlAsync returns affected count", aff.IsSuccess && aff.Value == 0, aff.Error?.Message);
+
+    // ── 8c. Soft deletes (F1) ─────────────────────────────────────────────────
+    Console.WriteLine("\nSoft deletes (F1):");
+    await Exec(mysql, "DROP TABLE IF EXISTS it_soft");
+    Check("sync it_soft", (await mysql.SyncTableAsync<SoftThing>(createBackup: false)).IsSuccess);
+    var sr = mysql.GetRepository<SoftThing>();
+    var s1 = (await sr.InsertAsync(new SoftThing { Label = "keep" })).Value!;
+    var s2 = (await sr.InsertAsync(new SoftThing { Label = "remove" })).Value!;
+    var del = await sr.DeleteAsync(s2.Id);
+    Check("repo.DeleteAsync soft-deletes (affected)", del.IsSuccess && del.Value);
+    var visible = (await mysql.Query<SoftThing>().ToListAsync()).Value ?? [];
+    Check("query hides soft-deleted (1 of 2)", visible.Count == 1 && visible[0].Id == s1.Id, $"got {visible.Count}");
+    var allRows = (await mysql.Query<SoftThing>().IncludeDeleted().ToListAsync()).Value ?? [];
+    Check("IncludeDeleted shows all (2)", allRows.Count == 2, $"got {allRows.Count}");
+    Check("repo.GetById hides soft-deleted", (await sr.GetByIdAsync(s2.Id)).Value is null);
+    var deletedRow = (await mysql.Query<SoftThing>().IncludeDeleted().Where(x => x.Id == s2.Id).FirstOrDefaultAsync()).Value;
+    Check("deleted_utc timestamp populated", deletedRow?.DeletedUtc is not null);
+    Check("HardDeleteAsync removes physically", (await sr.HardDeleteAsync(s2.Id)).Value);
+    Check("row gone after hard delete (1 left)",
+        (await mysql.Query<SoftThing>().IncludeDeleted().CountAsync()).Value == 1);
+
+    // ── 8d. Stampede protection (C2) — concurrent cold reads collapse, all correct ──
+    Console.WriteLine("\nStampede (C2):");
+    var herd = Enumerable.Range(0, 20)
+        .Select(_ => mysql.Query<Customer>().Where(c => c.Id > 0).WithCache(TimeSpan.FromMinutes(1)).ToListAsync());
+    var herdResults = await Task.WhenAll(herd);
+    Check("20 concurrent cached reads all succeed + consistent",
+        herdResults.All(r => r.IsSuccess && r.Value!.Count == herdResults[0].Value!.Count));
+
     // ── 9. Multi-node cache coordinator (fan-out on mutation) ─────────────────
     Console.WriteLine("\nCache coordinator:");
     var fake = new FakeCoordinator();
@@ -232,6 +272,15 @@ public class OrderView
     public long OrderId { get; set; }
     public string Customer { get; set; } = "";
     public decimal Total { get; set; }
+}
+
+[Table(Name = "it_soft")]
+[SoftDelete(nameof(DeletedUtc))]
+public class SoftThing
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "label", DataType = DataType.VarChar, Size = 50, NotNull = true)] public string Label { get; set; } = "";
+    [Column(Name = "deleted_utc", DataType = DataType.DateTime)] public DateTime? DeletedUtc { get; set; }
 }
 
 [Table(Name = "it_rename")]

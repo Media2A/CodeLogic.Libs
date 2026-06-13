@@ -230,3 +230,30 @@ public sealed class RetainDaysAttribute : Attribute
     }
 }
 
+/// <summary>
+/// Marks an entity for <b>soft deletes</b>. <see cref="Repository{T}.DeleteAsync"/> sets the
+/// named timestamp column to the current UTC time instead of issuing a physical DELETE, and
+/// reads through <c>mysql.Query&lt;T&gt;()</c> and the repository getters automatically exclude
+/// rows where that column is set (<c>WHERE col IS NULL</c>). Opt back in to deleted rows with
+/// <c>.IncludeDeleted()</c> on a query, or purge for real with
+/// <see cref="Repository{T}.HardDeleteAsync"/>.
+/// <para>
+/// The referenced property must be a nullable <see cref="System.DateTime"/> mapped to a
+/// NULL-able <c>DATETIME</c> column. Auto soft-delete filtering applies to single-table
+/// queries and repository reads — not to joins, subqueries, or bulk
+/// <c>UpdateAsync</c>/<c>DeleteAsync</c> on the query builder.
+/// </para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Class, Inherited = false)]
+public sealed class SoftDeleteAttribute : Attribute
+{
+    /// <summary>
+    /// Property name holding the soft-delete timestamp (a nullable <see cref="System.DateTime"/>),
+    /// e.g. <c>nameof(DeletedUtc)</c>.
+    /// </summary>
+    public string TimestampColumn { get; }
+
+    /// <param name="timestampColumn">Property name of the nullable DateTime soft-delete column.</param>
+    public SoftDeleteAttribute(string timestampColumn) => TimestampColumn = timestampColumn;
+}
+

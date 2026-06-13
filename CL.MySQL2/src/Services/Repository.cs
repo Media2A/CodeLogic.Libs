@@ -405,7 +405,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
-            var sql = $"SELECT * FROM `{table}` WHERE `{pk.ColumnName}` = @id LIMIT 1";
+            var sql = $"SELECT * FROM `{table}` WHERE `{pk.ColumnName}` = @id{SoftAnd()} LIMIT 1";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -440,7 +440,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var col = EntityMetadata<T>.RequireColumn(column);
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT * FROM `{table}` WHERE `{col.ColumnName}` = @val";
+            var sql = $"SELECT * FROM `{table}` WHERE `{col.ColumnName}` = @val{SoftAnd()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -475,7 +475,7 @@ public sealed class Repository<T> where T : class, new()
         try
         {
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT * FROM `{table}`";
+            var sql = $"SELECT * FROM `{table}`{SoftWhere()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -523,8 +523,8 @@ public sealed class Repository<T> where T : class, new()
                 ? $" ORDER BY `{orderCol}` {(descending ? "DESC" : "ASC")}"
                 : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM `{table}`";
-            var dataSql = $"SELECT * FROM `{table}`{orderClause} LIMIT {pageSize} OFFSET {offset}";
+            var countSql = $"SELECT COUNT(*) FROM `{table}`{SoftWhere()}";
+            var dataSql = $"SELECT * FROM `{table}`{SoftWhere()}{orderClause} LIMIT {pageSize} OFFSET {offset}";
 
             LogQuery(dataSql);
             var sw = Stopwatch.StartNew();
@@ -627,8 +627,24 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
-    /// <summary>Deletes an entity by its primary key value.</summary>
+    /// <summary>
+    /// Deletes an entity by its primary key. For a <see cref="Models.SoftDeleteAttribute"/>
+    /// entity this is a <b>soft delete</b> — it sets the timestamp column to UtcNow instead of
+    /// removing the row (no-op if already deleted). Use <see cref="HardDeleteAsync"/> to remove
+    /// the row physically. Returns true when a row was affected.
+    /// </summary>
     public async Task<Result<bool>> DeleteAsync(object id, CancellationToken ct = default)
+    {
+        var soft = EntityMetadata<T>.SoftDeleteColumn;
+        return soft is null
+            ? await HardDeleteAsync(id, ct).ConfigureAwait(false)
+            : await SoftDeleteAsync(id, soft, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Physically removes the row by primary key, even for soft-delete entities.
+    /// </summary>
+    public async Task<Result<bool>> HardDeleteAsync(object id, CancellationToken ct = default)
     {
         try
         {
@@ -651,10 +667,47 @@ public sealed class Repository<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] DeleteAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] HardDeleteAsync failed: {ex.Message}", ex);
             return Result<bool>.Failure(Error.FromException(ex, "mysql.delete_failed"));
         }
     }
+
+    private async Task<Result<bool>> SoftDeleteAsync(object id, ColumnMetadata soft, CancellationToken ct)
+    {
+        try
+        {
+            var table = EntityMetadata<T>.TableName;
+            var pk = EntityMetadata<T>.RequirePrimaryKey();
+            var sql = $"UPDATE `{table}` SET `{soft.ColumnName}` = @now " +
+                      $"WHERE `{pk.ColumnName}` = @id AND `{soft.ColumnName}` IS NULL";
+
+            LogQuery(sql);
+            var affected = await ExecuteAsync(async conn =>
+            {
+                await using var cmd = conn.CreateCommand();
+                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                cmd.CommandText = sql;
+                cmd.Parameters.AddWithValue("@now", DateTime.UtcNow);
+                cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
+                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            QueryCache.Invalidate(table);
+            return Result<bool>.Success(affected > 0);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[MySQL2] Soft DeleteAsync failed: {ex.Message}", ex);
+            return Result<bool>.Failure(Error.FromException(ex, "mysql.delete_failed"));
+        }
+    }
+
+    // Soft-delete read-filter fragments — empty when the entity has no [SoftDelete].
+    private static string SoftAnd()
+        => EntityMetadata<T>.SoftDeleteColumn is { } c ? $" AND `{c.ColumnName}` IS NULL" : string.Empty;
+
+    private static string SoftWhere()
+        => EntityMetadata<T>.SoftDeleteColumn is { } c ? $" WHERE `{c.ColumnName}` IS NULL" : string.Empty;
 
     /// <summary>
     /// Atomically adjusts a numeric column by <paramref name="delta"/>. Negative for decrement.
@@ -720,7 +773,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var (whereClause, parameters) = MySqlExpressionVisitor.Translate(predicate);
-            var sql = $"SELECT * FROM `{table}` WHERE {whereClause}";
+            var sql = $"SELECT * FROM `{table}` WHERE {whereClause}{SoftAnd()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();

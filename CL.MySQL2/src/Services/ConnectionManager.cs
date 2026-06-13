@@ -167,19 +167,50 @@ public sealed class ConnectionManager
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(action);
-        var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
-        try
+
+        var cfg = GetConfiguration(connectionId);
+        var maxRetries = Math.Max(0, cfg?.TransientRetryCount ?? 0);
+        var baseDelayMs = Math.Max(0, cfg?.TransientRetryBaseDelayMs ?? 50);
+
+        // Each attempt uses a FRESH connection: a deadlock / lock-wait-timeout aborts the
+        // server-side statement, so retrying on the same connection is wrong. Safe only for
+        // single auto-commit statements — transaction-scoped work routes around this method
+        // (it holds its own connection), so we never silently re-run half a transaction.
+        for (var attempt = 0; ; attempt++)
         {
-            return await action(conn).ConfigureAwait(false);
+            var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
+            try
+            {
+                return await action(conn).ConfigureAwait(false);
+            }
+            catch (MySqlException ex) when (attempt < maxRetries && IsTransient(ex))
+            {
+                _logger?.Warning(
+                    $"[MySQL2] Transient error {ex.Number} on '{connectionId}' (attempt {attempt + 1}/{maxRetries}); retrying: {ex.Message}");
+                await DelayForRetryAsync(baseDelayMs, attempt, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Route through CloseConnectionAsync so the open count + owner map stay in sync.
+                // Avoids the prior double-decrement where both this method and the await-using
+                // path decremented _openCounts for the same physical connection.
+                await CloseConnectionAsync(conn).ConfigureAwait(false);
+                await conn.DisposeAsync().ConfigureAwait(false);
+            }
         }
-        finally
-        {
-            // Route through CloseConnectionAsync so the open count + owner map stay in sync.
-            // Avoids the prior double-decrement where both this method and the await-using
-            // path decremented _openCounts for the same physical connection.
-            await CloseConnectionAsync(conn).ConfigureAwait(false);
-            await conn.DisposeAsync().ConfigureAwait(false);
-        }
+    }
+
+    /// <summary>MySQL transient errors that are safe to retry: 1213 deadlock, 1205 lock-wait timeout.</summary>
+    private static bool IsTransient(MySqlException ex) => ex.Number is 1213 or 1205;
+
+    private static async Task DelayForRetryAsync(int baseDelayMs, int attempt, CancellationToken ct)
+    {
+        if (baseDelayMs == 0) return;
+        // Exponential backoff with jitter: base * 2^attempt ± up to 50%.
+        var backoff = baseDelayMs * (1L << attempt);
+        var jitter = (long)(backoff * (Random.Shared.NextDouble() - 0.5));
+        var delay = Math.Clamp(backoff + jitter, 1, 30_000);
+        await Task.Delay(TimeSpan.FromMilliseconds(delay), ct).ConfigureAwait(false);
     }
 
     /// <summary>
