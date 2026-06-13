@@ -32,6 +32,14 @@ public sealed class ColumnAttribute : Attribute
     /// <summary>Custom column name. Defaults to the property name if null.</summary>
     public string? Name { get; set; }
 
+    /// <summary>
+    /// Former column name, used by schema sync to <c>CHANGE COLUMN</c> (rename in place,
+    /// preserving data) instead of drop-old + add-new. Set this to the previous column
+    /// name when you rename a property/column; remove it once every environment has
+    /// synced. Default: null (no rename).
+    /// </summary>
+    public string? PreviousName { get; set; } = null;
+
     /// <summary>MySQL data type for the column.</summary>
     public DataType DataType { get; set; }
 

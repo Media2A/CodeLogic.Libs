@@ -172,10 +172,26 @@ internal sealed class SchemaAnalyzer
 
             if (!existingColumns.ContainsKey(colName))
             {
-                // Column missing — ADD COLUMN
-                var colDef = BuildColumnDef(prop, colAttr, colName);
-                alterStatements.Add($"ALTER TABLE `{tableName}` ADD COLUMN {colDef};");
-                _logger?.Debug($"[MySQL2] Will add column `{tableName}`.`{colName}`");
+                var previous = colAttr?.PreviousName;
+                if (!string.IsNullOrEmpty(previous)
+                    && !string.Equals(previous, colName, StringComparison.OrdinalIgnoreCase)
+                    && existingColumns.ContainsKey(previous))
+                {
+                    // Renamed property — CHANGE COLUMN preserves the data instead of the
+                    // drop-old + add-new that would otherwise lose it. Works at Safe+.
+                    var colDef = BuildColumnDef(prop, colAttr, colName);
+                    alterStatements.Add($"ALTER TABLE `{tableName}` CHANGE COLUMN `{previous}` {colDef};");
+                    // The old name is consumed by the rename — keep it out of the Full drop set.
+                    modelColumnNames.Add(previous);
+                    _logger?.Info($"[MySQL2] Will rename column `{tableName}`.`{previous}` → `{colName}`");
+                }
+                else
+                {
+                    // Column missing — ADD COLUMN
+                    var colDef = BuildColumnDef(prop, colAttr, colName);
+                    alterStatements.Add($"ALTER TABLE `{tableName}` ADD COLUMN {colDef};");
+                    _logger?.Debug($"[MySQL2] Will add column `{tableName}`.`{colName}`");
+                }
             }
             else
             {

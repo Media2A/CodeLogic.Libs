@@ -57,6 +57,17 @@ NuGet package version of `CodeLogic.MySQL2`.
   - Composes with ordinary `.Where(...)` and reuses the same multi-source
     translator as joins (each source qualified by its table name).
 
+- **Column rename — `[Column(PreviousName = "old_col")]`.** Schema sync now emits
+  `CHANGE COLUMN old_col new_col …` to rename in place and **preserve the data**,
+  instead of the drop-old + add-new that silently lost it (orphan column at Safe;
+  data loss at Full). Works at `Safe` and above; remove `PreviousName` once every
+  environment has synced.
+
+  ```csharp
+  [Column(Name = "email_address", PreviousName = "email")]
+  public string EmailAddress { get; set; } = "";
+  ```
+
 ### Notes
 
 - **No breaking changes.** Joins and subquery filters are new methods; the

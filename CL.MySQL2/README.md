@@ -284,12 +284,28 @@ Attributes supported:
 | Attribute | Purpose |
 |---|---|
 | `[Table]` | table name, engine, charset, collation, comment |
-| `[Column]` | type, size, nullability, default, PK/AI/Unique/Index |
+| `[Column]` | type, size, nullability, default, PK/AI/Unique/Index, `PreviousName` (rename) |
 | `[Index]` | **new** — named, unique, covering (`Include`) |
 | `[CompositeIndex]` | multi-column named index on the class |
 | `[ForeignKey]` | FK with ON DELETE/UPDATE actions |
 | `[RetainDays]` | **new** — background purge job for time-series tables |
 | `[Ignore]` | skip property for schema / read / write |
+
+**Sync levels** (`SchemaSyncLevel`, per database): `None` (off) · `Safe` (default —
+add columns/indexes/FKs, **modify** existing columns, **rename** via `PreviousName`;
+never drops) · `Additive` (Safe + drop indexes/FKs no longer in the model) · `Full`
+(Additive + drop removed columns; dev only).
+
+**Renaming a column** _(new in 4.5.2)_ — set `PreviousName` so the rename preserves data:
+
+```csharp
+[Column(Name = "email_address", PreviousName = "email")]   // → CHANGE COLUMN email email_address …
+public string EmailAddress { get; set; } = "";
+```
+
+Without `PreviousName`, a rename looks like a new column plus an orphaned old one
+(and a data-losing `DROP` at `Full`). Drop the `PreviousName` once every environment
+has synced.
 
 ### Observability
 
