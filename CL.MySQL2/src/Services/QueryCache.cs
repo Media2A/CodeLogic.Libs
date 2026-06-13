@@ -23,6 +23,7 @@ namespace CL.MySQL2.Services;
 public static class QueryCache
 {
     private static ICacheStore _store = new InProcessCacheStore();
+    private static ICacheCoordinator _coordinator = NullCacheCoordinator.Instance;
     private static readonly ConcurrentDictionary<string, long> _tableVersions =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -40,6 +41,21 @@ public static class QueryCache
     /// <summary>Replace the underlying store (e.g. with a Redis adapter).</summary>
     public static void UseStore(ICacheStore store) =>
         _store = store ?? throw new ArgumentNullException(nameof(store));
+
+    /// <summary>
+    /// Installs a multi-node <see cref="ICacheCoordinator"/> (e.g. a Redis pub/sub adapter)
+    /// so mutations fan out to peers and smart-cache pools refresh single-flight. Wires the
+    /// coordinator's peer-invalidation callback to the local (non-broadcasting) invalidation
+    /// path. Pair with a shared <see cref="ICacheStore"/> via <see cref="UseStore"/>.
+    /// </summary>
+    public static void UseCoordinator(ICacheCoordinator coordinator)
+    {
+        _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
+        _coordinator.OnInvalidation(InvalidateFromPeer);
+    }
+
+    /// <summary>The active coordinator. Single-node no-op unless <see cref="UseCoordinator"/> ran.</summary>
+    internal static ICacheCoordinator Coordinator => _coordinator;
 
     /// <summary>Apply runtime configuration from <see cref="Configuration.CacheConfiguration"/>.</summary>
     public static void Configure(bool enabled, int maxEntries, int timeQuantizeSeconds)
@@ -154,6 +170,27 @@ public static class QueryCache
         if (SmartCachePoolRegistry.HasEntriesForTable(tableName))
             return;
 
+        BumpAndEvict(tableName);
+
+        // Fan the mutation out to peer nodes so they invalidate too. No-op on
+        // the single-node default coordinator. Fire-and-forget — a transport
+        // hiccup must never fail the mutation that triggered it.
+        _ = _coordinator.PublishInvalidationAsync(tableName);
+    }
+
+    /// <summary>
+    /// Applies an invalidation broadcast by a peer node. Same effect as
+    /// <see cref="Invalidate(string)"/> but does NOT re-broadcast (that would loop).
+    /// </summary>
+    private static void InvalidateFromPeer(string tableName)
+    {
+        if (SmartCachePoolRegistry.HasEntriesForTable(tableName))
+            return;
+        BumpAndEvict(tableName);
+    }
+
+    private static void BumpAndEvict(string tableName)
+    {
         _tableVersions.AddOrUpdate(tableName, 1L, (_, v) => v + 1);
         _ = _store.EvictByTableAsync(tableName);
     }

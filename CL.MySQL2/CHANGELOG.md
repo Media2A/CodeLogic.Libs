@@ -68,6 +68,24 @@ NuGet package version of `CodeLogic.MySQL2`.
   public string EmailAddress { get; set; } = "";
   ```
 
+- **Multi-node cache coordination — `ICacheCoordinator`.** A pluggable coordination
+  seam (same model as `ICacheStore`: interface + in-process default, distributed
+  adapter supplied by the consumer) that closes the single-node limitation called
+  out in 4.1.2's notes. Install with `QueryCache.UseCoordinator(...)`.
+
+  - **Cross-node invalidation** — a local mutation now fans out via
+    `PublishInvalidationAsync`; a peer's broadcast bumps this node's table-version
+    counter and evicts matching entries (without re-broadcasting). Previously the
+    version counter was per-process, so a mutation on one node never invalidated
+    the others.
+  - **Single-flight pool refresh** — `SmartCachePool` ticks now acquire a refresh
+    lease via `TryAcquireRefreshLeaseAsync`; only the lease holder hits the DB, so
+    N nodes don't all refresh the same pool. Idle-entry retirement still runs on
+    every node. Pair with a shared `ICacheStore` (e.g. Redis) so non-leaders read
+    the entry the leader writes.
+  - The default `NullCacheCoordinator` is single-node: no fan-out, always grants
+    the lease — behaviour is identical to before off-cluster.
+
 ### Notes
 
 - **No breaking changes.** Joins and subquery filters are new methods; the

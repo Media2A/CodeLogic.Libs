@@ -162,6 +162,14 @@ public sealed class SmartCachePool : IAsyncDisposable
         _lastTickUtc = DateTime.UtcNow;
         Interlocked.Increment(ref _ticksFired);
 
+        // Single-flight across nodes: only the lease holder hits the DB this tick. With a
+        // shared cache store (Redis) the others read the entry the leader writes. The
+        // single-node default coordinator always grants the lease, so behaviour is
+        // unchanged off-cluster. Idle accounting below still runs on every node so unread
+        // entries retire locally regardless of who refreshes.
+        var isLeader = await QueryCache.Coordinator
+            .TryAcquireRefreshLeaseAsync(Name, RefreshEvery, ct).ConfigureAwait(false);
+
         foreach (var kv in _entries)
         {
             if (ct.IsCancellationRequested) return;
@@ -173,6 +181,8 @@ public sealed class SmartCachePool : IAsyncDisposable
                 _entries.TryRemove(kv);
                 continue;
             }
+
+            if (!isLeader) continue; // a peer owns the refresh this tick
 
             try
             {

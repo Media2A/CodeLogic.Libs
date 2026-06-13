@@ -231,9 +231,12 @@ How it behaves:
 - **Falls back gracefully** — an unknown pool name on `.SmartCache(name)`
   logs a warning and the query runs uncached. No exception.
 - **Skipped inside transactions** — same rule as `.WithCache`.
-- **Single-node only** — coordination across multiple app instances is on
-  the roadmap. With a Redis-backed `ICacheStore` today, every node will run
-  its own refresh timer; that's safe but wasteful at high node counts.
+- **Multi-node coordination** _(new in 4.5.2)_ — install an `ICacheCoordinator`
+  via `QueryCache.UseCoordinator(...)` so mutations fan out to peers and pool
+  refreshes run single-flight (only the lease-holding node hits the DB). Pair it
+  with a shared `ICacheStore` (Redis). Without a coordinator the default is
+  single-node — every node runs its own refresh timer, which is safe but
+  wasteful at high node counts.
 
 ### Bulk writes / predicate mutations
 
