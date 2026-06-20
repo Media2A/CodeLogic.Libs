@@ -10,19 +10,34 @@
   </PropertyGroup>
 
   <!--
-    Stable assembly binding across patches. NuGet `<Version>` bumps each
-    release (4.5.0 → 4.5.1 → …) so consumers can track updates, but the
-    CLR assembly binding must stay fixed per minor version so transitive
-    dependencies don't demand an exact patch match at load time.
+    Version is COMPOSED at build time, never hardcoded in a csproj.
 
-    AssemblyVersion = binding identity. Derived in Directory.Build.targets
-      as <Major>.<Minor>.0.0 from <Version>. Every patch loads interchangeably.
-    FileVersion     = deploy fingerprint. Mirrors <Version> so file hash
-      checks can still tell patches apart on disk.
-    InformationalVersion = display string. Also mirrors <Version>.
+      Major.Minor  ← repo-root version.txt (e.g. "4.6"), hand-controlled.
+      Patch        ← the $(Patch) property. CI passes the GitHub run number
+                     (-p:Patch=<run_number> or the whole -p:Version=...);
+                     a local/dev build leaves it 0, giving a stable "4.6.0".
+
+    CI publishes 4.6.<run_number>+<short-sha> (release) or
+    4.6.<run_number>-preview+<short-sha> (prerelease). The run number is the
+    monotonic, NuGet-orderable component (NuGet Patch is an Int32). The git
+    sha is SemVer build-metadata: it is stripped by nuget.org and ignored for
+    ordering, so it serves only as provenance — and it survives in
+    InformationalVersion (hence InternalLibraryVersion.Current).
+
+    AssemblyVersion / FileVersion are Win32 UInt16-per-field and cannot carry a
+    -prerelease or +metadata suffix, so they are pinned to Major.Minor.0.0.
+    That also keeps CLR assembly binding fixed per minor version, so every
+    patch loads interchangeably (no exact-patch binding demands on consumers).
+    AssemblyVersion itself is derived in Directory.Build.targets.
   -->
   <PropertyGroup>
-    <FileVersion>$(Version)</FileVersion>
+    <_RootVersion>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)version.txt').Trim())</_RootVersion>
+    <Patch Condition="'$(Patch)' == ''">0</Patch>
+    <!-- Set only when not supplied: CI's explicit -p:Version=/-p:PackageVersion= still wins. -->
+    <Version Condition="'$(Version)' == ''">$(_RootVersion).$(Patch)</Version>
+    <!-- Suffix-free, UInt16-safe Win32 file version. -->
+    <FileVersion>$(_RootVersion).0.0</FileVersion>
+    <!-- Full composed string incl. any +sha; read at runtime by InternalLibraryVersion. -->
     <InformationalVersion>$(Version)</InformationalVersion>
   </PropertyGroup>
 

@@ -103,6 +103,17 @@ public sealed class DiscordWebhookService : IDisposable
             return Result.Failure(Error.Validation("social.discord.no_url", msg));
         }
 
+        // Enforce Discord's hard limits up front so over-limit payloads fail with a clear
+        // message instead of a wasted round-trip and an opaque HTTP 400.
+        if (message.Content is { Length: > 2000 })
+            return Result.Failure(Error.Validation(
+                "social.discord.content_too_long",
+                $"Message content is {message.Content.Length} characters; Discord allows at most 2000."));
+        if (message.Embeds is { Count: > 10 })
+            return Result.Failure(Error.Validation(
+                "social.discord.too_many_embeds",
+                $"Message has {message.Embeds.Count} embeds; Discord allows at most 10."));
+
         var sentAt = DateTime.UtcNow;
 
         try

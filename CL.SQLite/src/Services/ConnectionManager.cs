@@ -58,22 +58,36 @@ public sealed class ConnectionManager : IDisposable
 
         var state = RequireState(connectionId);
 
-        while (state.Pool.TryPop(out var pooled))
+        // Bound the number of live connections to MaxPoolSize. Without this gate,
+        // GetConnectionAsync would open an unbounded number of connections under load
+        // (the pool only caps how many are *returned*, not how many are handed out).
+        await state.Gate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            if (pooled.IsValid() && !pooled.IsIdleTooLong())
+            while (state.Pool.TryPop(out var pooled))
             {
-                pooled.MarkInUse();
-                Interlocked.Increment(ref state.ActiveCount);
-                _logger?.Debug($"[SQLite] Reused pooled connection for '{connectionId}'");
-                return pooled.Connection;
+                if (pooled.IsValid() && !pooled.IsIdleTooLong())
+                {
+                    pooled.MarkInUse();
+                    Interlocked.Increment(ref state.ActiveCount);
+                    _logger?.Debug($"[SQLite] Reused pooled connection for '{connectionId}'");
+                    return pooled.Connection;
+                }
+
+                pooled.Connection.Dispose();
             }
 
-            pooled.Connection.Dispose();
+            var conn = await CreateConnectionAsync(state, ct).ConfigureAwait(false);
+            Interlocked.Increment(ref state.ActiveCount);
+            return conn;
         }
-
-        var conn = await CreateConnectionAsync(state, ct).ConfigureAwait(false);
-        Interlocked.Increment(ref state.ActiveCount);
-        return conn;
+        catch
+        {
+            // Acquisition failed (cancellation / open error) — give the permit back so
+            // the slot isn't leaked, since no matching ReleaseConnectionAsync will run.
+            state.Gate.Release();
+            throw;
+        }
     }
 
     public Task ReleaseConnectionAsync(
@@ -104,6 +118,8 @@ public sealed class ConnectionManager : IDisposable
             connection.Dispose();
         }
 
+        // Release the live-connection slot acquired in GetConnectionAsync.
+        state.Gate.Release();
         return Task.CompletedTask;
     }
 
@@ -235,6 +251,8 @@ public sealed class ConnectionManager : IDisposable
         {
             Config = config;
             DatabasePath = databasePath;
+            var max = Math.Max(1, config.MaxPoolSize);
+            Gate = new SemaphoreSlim(max, max);
         }
 
         public SQLiteDatabaseConfig Config { get; }
@@ -242,10 +260,14 @@ public sealed class ConnectionManager : IDisposable
         public ConcurrentStack<PooledConnection> Pool { get; } = new();
         public int ActiveCount;
 
+        // Caps concurrent live connections (in-use + being created) at MaxPoolSize.
+        public SemaphoreSlim Gate { get; }
+
         public void Dispose()
         {
             while (Pool.TryPop(out var pooled))
                 pooled.Connection.Dispose();
+            Gate.Dispose();
         }
     }
 

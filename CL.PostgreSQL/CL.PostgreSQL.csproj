@@ -8,7 +8,6 @@
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>CS1591</NoWarn>
-    <Version>4.5.2-preview.68</Version>
     <PackageId>CodeLogic.PostgreSQL</PackageId>
     <PackageTags>postgresql;database;orm;linq</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -17,8 +16,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Npgsql" Version="9.*" />
-  </ItemGroup>
-  <ItemGroup>
+  </ItemGroup>  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

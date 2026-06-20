@@ -3,6 +3,35 @@
 All notable changes to **CodeLogic.GitHelper** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Fixed
+
+- SSH is not supported by the bundled LibGit2Sharp transport; configuring an SSH
+  key now logs a clear warning and cloning an SSH URL (`git@…` / `ssh://…`)
+  fails fast with an explanatory message instead of silently doing nothing.
+- `EnsureUpToDateAsync` now refuses to hard-reset (and discard) a dirty working
+  tree unless called with `discardLocalChanges: true`, preventing accidental
+  data loss.
+- The repository cache now expires entries by idle time rather than absolute
+  age, so a repository in active use is no longer disposed out from under a
+  caller; batch concurrency is clamped to at least 1; `CommitOptions` gained a
+  `CancellationToken`.
+
+### Documentation
+
+- Full house-style rewrite of the README and the `docs/libs/githelper.md` deep guide.
+- Documented the repository workflow around `GetRepositoryAsync` and highlighted
+  `EnsureUpToDateAsync` as the idempotent clone-or-update easy path.
+- Documented the per-operation options models (`GitCloneOptions`, `GitFetchOptions`,
+  `GitPullOptions`, `GitPushOptions`, `GitCommitOptions`) and the `MergeStrategy` enum.
+- Documented the `GitResult<T>` / `GitDiagnostics` contract and the result-bearing models
+  (`RepositoryInfo`, `CommitInfo`, `BranchInfo`, `RepositoryStatus`, `FileStatusEntry`).
+- Documented manager batch operations (`FetchAllAsync`, `GetAllStatusAsync`), runtime
+  registration, repository caching (`CacheStats` / `CacheEntryStats`), and the health check.
+- Clarified authentication: HTTPS only, PAT-only auth sends `x-access-token`, and the SSH
+  key fields are present in config but not currently wired.
+
 ## [4.5.2] — 2026-06-20
 
 ### Documentation

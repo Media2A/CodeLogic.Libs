@@ -1,14 +1,11 @@
 # CodeLogic.Common
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Common)](https://www.nuget.org/packages/CodeLogic.Common)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-General-purpose utility toolkit for [CodeLogic](https://github.com/Media2A/CodeLogic) applications.
-A broad collection of stateless, thread-safe helpers covering security, ID/password
-generation, caching, compression, imaging, data (JSON), file handling, type conversion,
-cron parsing, date/time, strings, web, networking, and reflection.
+> A broad, stateless utility toolkit for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — security, ID/password generation, JSON, compression, imaging, strings, time, web, networking, caching, file handling, and reflection.
 
-Operations that can fail return `CodeLogic.Core.Results.Result` / `Result<T>` rather than
-throwing, so callers rarely need `try`/`catch`.
+`CodeLogic.Common` is a grab-bag of small, dependency-light helpers used across CodeLogic applications. Almost everything is exposed as **static helper classes** grouped by namespace, so you call them directly — `Hashing.Sha256(...)`, `IdGenerator.NanoId()`, `JsonHelper.Serialize(...)` — with no library instance to wire up. Many fallible operations return a framework `Result` / `Result<T>` instead of throwing, while simple helpers return plain values (`string`, `bool`, `byte[]`). The package also ships a `CommonLibrary` (`ILibrary`) so it participates in the CodeLogic lifecycle and health system.
 
 ## Install
 
@@ -16,145 +13,66 @@ throwing, so callers rarely need `try`/`catch`.
 dotnet add package CodeLogic.Common
 ```
 
-## Features
+## Quick start
 
-| Area | Type(s) | What it does |
-| --- | --- | --- |
-| **Security — hashing** | `CL.Common.Security.Hashing` | SHA-256/512, MD5 (obsolete), PBKDF2 password hash/verify, salt generation, HMAC-SHA256/512 |
-| **Security — encryption** | `CL.Common.Security.Encryption` | AES-256-GCM authenticated encrypt/decrypt (string & bytes) with PBKDF2 key derivation, random key generation |
-| **Generators — IDs** | `CL.Common.Generators.IdGenerator` | GUIDs, sequential, timestamp, random alphanumeric/hex/Base64, URL-safe, NanoID, sortable IDs |
-| **Generators — passwords** | `CL.Common.Generators.PasswordGenerator` | Random passwords, strong passwords, passphrases, PINs, strength estimation |
-| **Caching** | `CL.Common.Caching.ICache`, `MemoryCache` | Async typed in-process cache with per-entry TTL, prefix removal, count, background eviction |
-| **Compression** | `CL.Common.Compression.CompressionHelper` | GZip, Brotli, and LZ4 (byte arrays) plus GZip-to-Base64 string helpers |
-| **Imaging** | `CL.Common.Imaging.CLU_Imaging` | Resize, crop, format conversion (JPEG/PNG/WebP), thumbnails, dimensions, Base64 — via SkiaSharp |
-| **Data — JSON** | `CL.Common.Data.JsonHelper` | Serialize/deserialize, file I/O, validation, merge, property extraction (System.Text.Json) |
-| **Conversion** | `CL.Common.Conversion.TypeConverter` | Safe `Result`-based conversion to int/long/double/bool/decimal/DateTime/Guid/enum |
-| **File handling** | `CL.Common.FileHandling.FileSystem` | Async read/write/copy/move/delete, directory create, listing, size, existence |
-| **Cron** | `CL.Common.Parser.CronParser`, `CronExpression` | Parse/validate 5-field cron and compute the next UTC occurrence |
-| **Date/time** | `CL.Common.Time.DateTimeHelper` | Unix timestamps, ISO 8601, age, business days, boundary helpers, relative strings |
-| **Strings** | `CL.Common.Strings.StringHelper`, `StringValidator` | Truncate, slug, case conversion, HTML strip; email/URL/phone/IP/GUID validation |
-| **Web** | `CL.Common.Web.UrlHelper`, `HtmlHelper`, `HttpClientHelper`, `HttpHeaderHelper` | URL build/parse/encode, HTML sanitize/encode, typed HTTP requests, header/IP/UA helpers |
-| **Networking** | `CL.Common.Networking.NetworkPing`, `NetworkDns`, `SubnetCalculator`, `TraceRoute` | ICMP ping, DNS lookup, IPv4 subnet math, traceroute |
-| **Reflection** | `CL.Common.Assemblies.AssemblyHelper`, `ReflectionHelper` | Assembly metadata/loading, type discovery, embedded resources, dynamic property/method access |
-
-## Quick Start
+The static helpers need no setup — import a namespace and call:
 
 ```csharp
-using CL.Common.Imaging;
 using CL.Common.Security;
+using CL.Common.Generators;
+using CL.Common.Data;
 
-// Convert any image to WebP
-using var input = File.OpenRead("photo.jpg");
-var result = CLU_Imaging.ConvertImage(input, ImageFormat.Webp);
-if (result.IsSuccess)
-    await File.WriteAllBytesAsync("photo.webp", result.Value!.ToArray());
-
-// Hash a string (lowercase hex)
+// Hashing — plain string return (lowercase hex)
 string digest = Hashing.Sha256("my-secret-data");
-```
-
-## Security
-
-```csharp
-using CL.Common.Security;
-
-// PBKDF2 password hashing (salt is embedded in the returned string)
-string stored = Hashing.HashPassword("hunter2");
-bool ok = Hashing.VerifyPassword("hunter2", stored);   // true
 
 // AES-256-GCM authenticated encryption — tampering is detected on decrypt
 string cipher = Encryption.EncryptAes("top secret", "passphrase");
 string plain  = Encryption.DecryptAes(cipher, "passphrase");
+
+// A URL-safe, collision-resistant id — plain string return
+string id = IdGenerator.NanoId();   // e.g. "V1StGXR8_Z5jdHi6B-myT"
+
+// JSON — Result-based (never throws)
+Result<string> json = JsonHelper.Serialize(new { name = "Ada" });   // {"name":"Ada"}
 ```
 
-## Generators
+To participate in the CodeLogic lifecycle and health checks, load the library as usual — the static helpers remain available either way:
 
 ```csharp
-using CL.Common.Generators;
+using CL.Common;
 
-string id   = IdGenerator.NanoId();              // e.g. "V1StGXR8_Z5jdHi6B-myT"
-string sort = IdGenerator.Sortable();            // lexicographically sortable
-string pw   = PasswordGenerator.GenerateStrong(20);
-string pass = PasswordGenerator.GeneratePassphrase(wordCount: 4);  // "Apple-Bridge-..."
-PasswordStrength strength = PasswordGenerator.CalculateStrength(pw);
+await Libraries.LoadAsync<CommonLibrary>();   // register before ConfigureAsync()
+await CodeLogic.ConfigureAsync();
+await CodeLogic.StartAsync();
 ```
 
-## Caching
+## Features
 
-```csharp
-using CL.Common.Caching;
-
-ICache cache = new MemoryCache();                       // background eviction loop runs internally
-await cache.SetAsync("user:1", userObj, TimeSpan.FromMinutes(5));
-var cached = await cache.GetAsync<User>("user:1");      // null if missing/expired
-await cache.RemoveByPrefixAsync("user:");
-```
-
-## Compression
-
-```csharp
-using CL.Common.Compression;
-
-var packed = CompressionHelper.CompressLz4(payloadBytes);
-if (packed.IsSuccess)
-    byte[] original = CompressionHelper.DecompressLz4(packed.Value!).Value!;
-
-// Text → Base64 (GZip)
-string blob = CompressionHelper.CompressString("a lot of repeated text...").Value!;
-```
-
-## JSON & Conversion
-
-```csharp
-using CL.Common.Data;
-using CL.Common.Conversion;
-
-string json = JsonHelper.Serialize(new { name = "Ada" }).Value!;   // {"name":"Ada"}
-var person  = JsonHelper.Deserialize<Person>(json);
-
-var n = TypeConverter.ToInt("42");          // Result<int>
-if (TypeConverter.TryConvert<double>("3.14", out var d)) { /* ... */ }
-```
-
-## Cron, Date/Time & Strings
-
-```csharp
-using CL.Common.Parser;
-using CL.Common.Time;
-using CL.Common.Strings;
-
-var next = CronParser.GetNextOccurrence("0 */6 * * *");   // Result<DateTime> (UTC)
-long unix = DateTimeHelper.ToUnixTimestamp(DateTime.UtcNow);
-string rel = DateTimeHelper.ToRelativeString(DateTime.UtcNow.AddMinutes(-3)); // "3 minutes ago"
-
-string slug = StringHelper.ToSlug("Hello, World!");       // "hello-world"
-bool valid  = StringValidator.IsEmail("a@b.com");
-```
-
-## Web & Networking
-
-```csharp
-using CL.Common.Web;
-using CL.Common.Networking;
-
-string url = UrlHelper.AppendQuery("https://api.example.com/search",
-    new() { ["q"] = "cats", ["page"] = "2" });
-
-using var http = new HttpClient();
-var data = await HttpClientHelper.GetJsonAsync<MyDto>(http, url);
-
-var ping = await NetworkPing.PingAsync("example.com");    // Result<PingResult>
-var ips  = await NetworkDns.LookupAsync("example.com");   // Result<string[]>
-```
+- **Security** — `Hashing` (SHA-256/512, PBKDF2 password hash/verify, HMAC) and `Encryption` (AES-256-GCM for strings and bytes, key generation).
+- **Generators** — `IdGenerator` (GUID, sequential, timestamp, NanoID, URL-safe, sortable) and `PasswordGenerator` (passwords, passphrases, PINs, strength estimation).
+- **Data & JSON** — `JsonHelper` serialize/deserialize, file I/O, validation, merge, property extraction.
+- **Conversion** — `TypeConverter` safe `Result`-based conversion to int/long/double/bool/decimal/DateTime/Guid/enum.
+- **Compression** — `CompressionHelper` GZip, Brotli, and LZ4 for bytes, plus GZip-to-Base64 string helpers.
+- **Strings** — `StringHelper` (truncate, slug, case conversion, HTML strip) and `StringValidator` (email/URL/phone/IP/GUID checks).
+- **Time** — `DateTimeHelper` Unix timestamps, ISO 8601, age, business days, boundaries, relative strings.
+- **Web** — `HtmlHelper`, `HttpClientHelper`, `HttpHeaderHelper`, `UrlHelper` for HTML sanitization, typed HTTP requests, header/IP/UA parsing, and URL building.
+- **Networking** — `NetworkPing`, `NetworkDns`, `SubnetCalculator`, `TraceRoute`.
+- **Parser / Cron** — `CronParser` parse/validate 5-field cron and compute the next UTC occurrence.
+- **Imaging** — `CLU_Imaging` resize, crop, format conversion (JPEG/PNG/WebP), thumbnails, dimensions, Base64 — via SkiaSharp.
+- **Caching** — `ICache` / `MemoryCache` async typed in-process cache with per-entry TTL.
+- **File handling** — `FileSystem` async read/write/copy/move/delete, directory create, listing, size, existence.
+- **Reflection** — `AssemblyHelper` and `ReflectionHelper` for assembly metadata, type discovery, embedded resources, and dynamic property/method access.
 
 ## Documentation
 
-- [API Reference](../docs-output/api/CL.Common.html)
+Full guide: **[CL.Common documentation](https://media2a.github.io/CodeLogic.Libs/libs/common/index.html)**
 
 ## Requirements
 
-- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- No configuration required — `CL.Common` is a stateless utility library and writes no config file.
+- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- SkiaSharp 3.x (imaging) · K4os.Compression.LZ4 1.x (LZ4) · Newtonsoft.Json 13.x
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).

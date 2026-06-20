@@ -3,6 +3,20 @@
 All notable changes to **CodeLogic.StorageS3** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the `docs/libs/storages3.md` guide to the shared
+  house style: concise NuGet-rendered README (badges, tagline, install, quick
+  start, features, configuration table + JSON, requirements) and a single deep
+  documentation page covering the multi-provider story (AWS S3 / MinIO /
+  Cloudflare R2) with a provider-settings comparison, bucket and object
+  operations, byte/stream upload and download, `UploadOptions` / `DownloadOptions`
+  references, the `S3ObjectInfo` / `BucketInfo` / `ListObjectsResult` models,
+  pagination and prefixes, copy, presigned URLs, events, and the per-connection
+  health check. No API changes.
+
 ## [4.5.2] — 2026-06-20
 
 ### Documentation

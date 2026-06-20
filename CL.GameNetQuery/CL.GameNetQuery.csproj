@@ -7,14 +7,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>4.5.2-preview.68</Version>
     <PackageId>CodeLogic.GameNetQuery</PackageId>
     <PackageTags>gameserver;valve;source;minecraft;rcon;query</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Authors>Media2A</Authors>
     <Description>Game server query library — Valve Source Engine (CSS/CS2), Minecraft UDP/RCON queries</Description>
-  </PropertyGroup>
-  <ItemGroup>
+  </PropertyGroup>  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

@@ -136,6 +136,34 @@ try
         .CountAsync()).Value;
     Check("WhereNotIn VIP (Bob's o3)", notInCount == 1, $"got {notInCount}");
 
+    // ── 6b. Regression: 11+ parameters in one predicate (param rekey @p1 vs @p10) ─
+    // A single predicate emitting 11+ parameters used to corrupt the SQL because the
+    // rekey loop replaced "@p1" inside "@p10"/"@p11" (substring collision), leaving
+    // orphaned placeholders with no bound value. Build a 12-term OR chain (params
+    // @p0…@p11) and confirm it executes and matches exactly the intended rows.
+    Console.WriteLine("\n12-param predicate (rekey regression):");
+    var manyIds = new List<long>();
+    for (var i = 0; i < 12; i++)
+        manyIds.Add((await ord.InsertAsync(new Order { CustomerId = alice.Id, Total = 10m + i })).Value!.Id);
+    // Build (Id == manyIds[0] || Id == manyIds[1] || … || Id == manyIds[11]) as an expression tree.
+    var p = System.Linq.Expressions.Expression.Parameter(typeof(Order), "o");
+    var idProp = System.Linq.Expressions.Expression.Property(p, nameof(Order.Id));
+    System.Linq.Expressions.Expression body = System.Linq.Expressions.Expression.Equal(
+        idProp, System.Linq.Expressions.Expression.Constant(manyIds[0]));
+    for (var i = 1; i < manyIds.Count; i++)
+        body = System.Linq.Expressions.Expression.OrElse(body,
+            System.Linq.Expressions.Expression.Equal(idProp,
+                System.Linq.Expressions.Expression.Constant(manyIds[i])));
+    var manyPredicate = System.Linq.Expressions.Expression.Lambda<Func<Order, bool>>(body, p);
+    var manyParamRes = await mysql.Query<Order>().Where(manyPredicate).ToListAsync();
+    Check("12-param OR-chain query succeeds (no param mismatch)",
+        manyParamRes.IsSuccess, manyParamRes.Error?.Message);
+    Check("12-param OR-chain returns all 12 rows",
+        manyParamRes.IsSuccess && manyParamRes.Value!.Count == 12, $"got {manyParamRes.Value?.Count}");
+    // Clean up the 12 extra orders so later count-based checks see only the seeded rows.
+    foreach (var id in manyIds)
+        await ord.DeleteAsync(id);
+
     // ── 7. Column rename (data preserved) ─────────────────────────────────────
     Console.WriteLine("\nColumn rename:");
     Check("sync it_rename v1 (email)", (await mysql.SyncTableAsync<RenameV1>(createBackup: false)).IsSuccess);

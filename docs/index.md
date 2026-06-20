@@ -2,92 +2,139 @@
 _layout: landing
 ---
 
-# CodeLogic Libraries
+<div class="cl-hero">
+  <img src="images/logo.svg" alt="CodeLogic Libraries logo" />
+  <h1>CodeLogic Libraries</h1>
+  <p class="lead">
+    Twelve production-ready .NET 10 libraries for the
+    <a href="https://github.com/Media2A/CodeLogic">CodeLogic 4</a> framework.
+    Databases, email, storage, security, monitoring, and more — each a self-contained
+    <code>ILibrary</code> that manages its own configuration, lifecycle, and health checks.
+  </p>
+  <div class="cl-badges">
+    <a href="https://www.nuget.org/profiles/Media2A"><img src="https://img.shields.io/badge/NuGet-CodeLogic.*-2f86ad" alt="NuGet" /></a>
+    <img src="https://img.shields.io/badge/.NET-10-512bd4" alt=".NET 10" />
+    <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" />
+  </div>
+</div>
 
-**CodeLogic Libraries** (`CL.*`) is a suite of 12 production-ready .NET 10 libraries designed to integrate seamlessly with the [CodeLogic 4 framework](https://media2a.github.io/CodeLogic). Each library is a self-contained CodeLogic library that manages its own configuration, lifecycle, and health checks.
-
----
-
-## What are CL.* Libraries?
-
-Each `CL.*` package is a `ILibrary` implementation that plugs directly into the CodeLogic 4 boot sequence. You register it with `Libraries.LoadAsync<T>()`, configure it via the auto-generated JSON config file, and the framework handles initialization, dependency ordering, and graceful shutdown.
+Every `CL.*` package plugs directly into the CodeLogic 4 boot sequence. You load it with
+`Libraries.LoadAsync<T>()`, configure it through an auto-generated JSON file, and the framework
+handles initialization order, dependency wiring, and graceful shutdown.
 
 ```csharp
-// Program.cs
 await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
 await Libraries.LoadAsync<CL.Mail.MailLibrary>();
 await Libraries.LoadAsync<CL.TwoFactorAuth.TwoFactorAuthLibrary>();
 
-CodeLogic.RegisterApplication(new MyApp());
 await CodeLogic.ConfigureAsync();
 await CodeLogic.StartAsync();
+
+var mysql = Libraries.Get<CL.MySQL2.MySQL2Library>();
 ```
 
+[Get started →](getting-started.md) &nbsp;·&nbsp; [Browse all libraries →](libs/index.md)
+
+<div class="cl-group">Databases</div>
+<div class="lib-grid">
+  <a class="lib-card" href="libs/mysql2/index.md">
+    <div class="lib-name">CL.MySQL2</div>
+    <div class="lib-pkg">CodeLogic.MySQL2</div>
+    <p class="lib-desc">MySQL / MariaDB / Percona with typed LINQ → SQL, a working result cache, schema sync modes, and migrations.</p>
+  </a>
+  <a class="lib-card" href="libs/postgresql/index.md">
+    <div class="lib-name">CL.PostgreSQL</div>
+    <div class="lib-pkg">CodeLogic.PostgreSQL</div>
+    <p class="lib-desc">PostgreSQL with multi-database support, the <code>Repository&lt;T&gt;</code> + query-builder pattern, table sync, and backups.</p>
+  </a>
+  <a class="lib-card" href="libs/sqlite/index.md">
+    <div class="lib-name">CL.SQLite</div>
+    <div class="lib-pkg">CodeLogic.SQLite</div>
+    <p class="lib-desc">SQLite with a custom connection pool, WAL, repository + query builder, and a migration runner.</p>
+  </a>
+</div>
+
+<div class="cl-group">Communication</div>
+<div class="lib-grid">
+  <a class="lib-card" href="libs/mail/index.md">
+    <div class="lib-name">CL.Mail</div>
+    <div class="lib-pkg">CodeLogic.Mail</div>
+    <p class="lib-desc">SMTP send + IMAP read (with IDLE) and a lightweight template engine for HTML and plain-text mail.</p>
+  </a>
+  <a class="lib-card" href="libs/socialconnect.md">
+    <div class="lib-name">CL.SocialConnect</div>
+    <div class="lib-pkg">CodeLogic.SocialConnect</div>
+    <p class="lib-desc">Discord webhooks plus Steam Web API profile, ban, and ticket-authentication lookups.</p>
+  </a>
+</div>
+
+<div class="cl-group">Storage</div>
+<div class="lib-grid">
+  <a class="lib-card" href="libs/storages3.md">
+    <div class="lib-name">CL.StorageS3</div>
+    <div class="lib-pkg">CodeLogic.StorageS3</div>
+    <p class="lib-desc">Amazon S3 and S3-compatible object storage (MinIO, Cloudflare R2): upload, download, copy, list, presigned URLs.</p>
+  </a>
+</div>
+
+<div class="cl-group">Security</div>
+<div class="lib-grid">
+  <a class="lib-card" href="libs/twofactorauth.md">
+    <div class="lib-name">CL.TwoFactorAuth</div>
+    <div class="lib-pkg">CodeLogic.TwoFactorAuth</div>
+    <p class="lib-desc">TOTP two-factor auth with QR-code generation — compatible with Google Authenticator, Authy, and 1Password.</p>
+  </a>
+</div>
+
+<div class="cl-group">Networking &amp; Game</div>
+<div class="lib-grid">
+  <a class="lib-card" href="libs/netutils.md">
+    <div class="lib-name">CL.NetUtils</div>
+    <div class="lib-pkg">CodeLogic.NetUtils</div>
+    <p class="lib-desc">DNSBL blacklist checks and MaxMind GeoIP2 location lookups for IP intelligence.</p>
+  </a>
+  <a class="lib-card" href="libs/gamenetquery.md">
+    <div class="lib-name">CL.GameNetQuery</div>
+    <div class="lib-pkg">CodeLogic.GameNetQuery</div>
+    <p class="lib-desc">Game-server queries: Valve Source (A2S) UDP, Source RCON (CS2/CSS), and Minecraft UDP/RCON.</p>
+  </a>
+</div>
+
+<div class="cl-group">Ops &amp; Tooling</div>
+<div class="lib-grid">
+  <a class="lib-card" href="libs/systemstats.md">
+    <div class="lib-name">CL.SystemStats</div>
+    <div class="lib-pkg">CodeLogic.SystemStats</div>
+    <p class="lib-desc">Cross-platform CPU, memory, process, and uptime stats — Windows and Linux (<code>/proc</code>).</p>
+  </a>
+  <a class="lib-card" href="libs/githelper.md">
+    <div class="lib-name">CL.GitHelper</div>
+    <div class="lib-pkg">CodeLogic.GitHelper</div>
+    <p class="lib-desc">Git repository automation via LibGit2Sharp: clone, fetch, pull, push, branch, commit, log.</p>
+  </a>
+</div>
+
+<div class="cl-group">Utilities</div>
+<div class="lib-grid">
+  <a class="lib-card" href="libs/common/index.md">
+    <div class="lib-name">CL.Common</div>
+    <div class="lib-pkg">CodeLogic.Common</div>
+    <p class="lib-desc">A utility toolkit: encryption, hashing, ID/password generation, JSON, cron, networking, imaging, and more.</p>
+  </a>
+</div>
+
 ---
 
-## Library Reference
+## Why CL.* libraries
 
-| Library | Description |
-|---------|-------------|
-| [CL.Common](articles/getting-started.md) | General-purpose utilities: hashing (SHA-256/SHA-512/MD5/bcrypt), ID generation (ULID, UUID), string extensions, date helpers |
-| [CL.GitHelper](articles/getting-started.md) | Git repository operations and automation: clone, pull, commit, push, branch management via LibGit2Sharp |
-| [CL.Mail](articles/mail.md) | SMTP/IMAP email with Handlebars-style template engine, HTML and plain-text, attachments |
-| [CL.MySQL2](articles/database-libraries.md) | MySQL with connection pooling, `Repository<T>` CRUD, `QueryBuilder<T>` LINQ-style queries, migrations |
-| [CL.NetUtils](articles/getting-started.md) | DNSBL spam checking and MaxMind GeoIP2 database lookup for IP intelligence |
-| [CL.PostgreSQL](articles/database-libraries.md) | PostgreSQL with multi-database support, `Repository<T>`, `QueryBuilder<T>`, schema migrations |
-| [CL.SQLite](articles/database-libraries.md) | SQLite with custom connection pool, `Repository<T>`, `QueryBuilder<T>`, migration runner |
-| [CL.SocialConnect](articles/social.md) | Discord webhooks plus Steam Web API profile lookups and ticket-based authentication |
-| [CL.StorageS3](articles/storage.md) | Amazon S3 and MinIO object storage: upload, download, delete, presigned URLs, bucket management |
-| [CL.SystemStats](articles/system-monitoring.md) | Cross-platform CPU usage, memory (total/available/used), and per-process statistics |
-| [CL.TwoFactorAuth](articles/security.md) | TOTP-based 2FA with QR code generation (compatible with Google Authenticator, Authy) |
-| [CL.GameNetQuery](articles/game-queries.md) | Game server queries: Valve RCON, Source UDP (A2S), Minecraft UDP/RCON |
+- **CodeLogic-native** — each implements `ILibrary` with the full four-phase lifecycle (Configure → Initialize → Start → Stop).
+- **Self-configuring** — config files are auto-generated with sane defaults on first run.
+- **Health-aware** — every library implements `HealthCheckAsync()` for operational monitoring.
+- **Isolated** — each library owns its own config, log, and data directories.
+- **Result-based** — operations return `Result` / `Result<T>` instead of throwing for expected failures.
 
----
+## Next steps
 
-## Design Principles
-
-- **CodeLogic-native** — each library implements `ILibrary` with the full 4-phase lifecycle
-- **Zero shared state** — each library owns its config directory, log directory, and data directory
-- **Self-configuring** — config files are auto-generated with defaults on first run
-- **Health-aware** — every library implements `HealthCheckAsync()` for operational monitoring
-- **Dependency-safe** — `LibraryManifest.Dependencies` declares ordering requirements
-
----
-
-## Quick Integration Example
-
-```csharp
-// 1. Reference the library project
-// <ProjectReference Include="path/to/CodeLogic.Libs/CL.MySQL2/CL.MySQL2.csproj" />
-
-// 2. Load it
-await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
-
-// 3. After StartAsync(), use it from your application or other libraries
-public class MyApp : IApplication
-{
-    private IMySqlRepository<User> _users = null!;
-
-    public async Task RunAsync(ApplicationContext context)
-    {
-        var mysql = context.GetLibrary<CL.MySQL2.MySQL2Library>();
-        _users = mysql.GetRepository<User>();
-
-        var user = await _users.FindAsync(u => u.Email == "alice@example.com");
-    }
-}
-```
-
----
-
-## Next Steps
-
-- [Getting Started](articles/getting-started.md) — how to reference, register, and use any CL.* library
-- [Database Libraries](articles/database-libraries.md) — MySQL, PostgreSQL, SQLite with Repository pattern
-- [Mail](articles/mail.md) — sending email with templates
-- [Storage](articles/storage.md) — S3 and MinIO object storage
-- [Security](articles/security.md) — TOTP two-factor authentication
-- [System Monitoring](articles/system-monitoring.md) — CPU and memory stats
-- [Social](articles/social.md) — Discord webhooks and Steam auth
-- [Game Server Queries](articles/game-queries.md) — Valve RCON, Source UDP, Minecraft
-- [API Reference](api/index.md) — full API documentation
+- **[Getting Started](getting-started.md)** — reference, register, configure, and use any `CL.*` library.
+- **[Libraries](libs/index.md)** — the full catalog with per-library guides.
+- **[API Reference](api/index.md)** — types and members generated from the source XML docs.

@@ -62,7 +62,7 @@ internal static class SQLiteExpressionVisitor
         // Handle null comparisons
         if (expr.Right is ConstantExpression { Value: null } or DefaultExpression)
         {
-            var leftSide = GetMemberName(expr.Left);
+            var leftSide = GetQuotedColumn(expr.Left);
             return expr.NodeType == ExpressionType.Equal
                 ? $"{leftSide} IS NULL"
                 : $"{leftSide} IS NOT NULL";
@@ -70,7 +70,7 @@ internal static class SQLiteExpressionVisitor
 
         if (expr.Left is ConstantExpression { Value: null } or DefaultExpression)
         {
-            var rightSide = GetMemberName(expr.Right);
+            var rightSide = GetQuotedColumn(expr.Right);
             return expr.NodeType == ExpressionType.Equal
                 ? $"{rightSide} IS NULL"
                 : $"{rightSide} IS NOT NULL";
@@ -99,7 +99,7 @@ internal static class SQLiteExpressionVisitor
         }
         else
         {
-            var colName = GetMemberName(expr.Left);
+            var colName = GetQuotedColumn(expr.Left);
             var value = GetValue(expr.Right);
             var paramName = $"@p{parameters.Count}";
             parameters[paramName] = value;
@@ -121,7 +121,7 @@ internal static class SQLiteExpressionVisitor
         // Boolean property used directly as condition
         if (expr.Type == typeof(bool))
         {
-            var colName = GetColumnNameFromMember(expr.Member);
+            var colName = $"\"{GetColumnNameFromMember(expr.Member)}\"";
             var paramName = $"@p{parameters.Count}";
             parameters[paramName] = true;
             return $"{colName} = {paramName}";
@@ -149,7 +149,7 @@ internal static class SQLiteExpressionVisitor
             {
                 case "Contains":
                 {
-                    var col = GetMemberName(expr.Object!);
+                    var col = GetQuotedColumn(expr.Object!);
                     var val = GetValue(expr.Arguments[0])?.ToString() ?? "";
                     var p = $"@p{parameters.Count}";
                     parameters[p] = $"%{val}%";
@@ -157,7 +157,7 @@ internal static class SQLiteExpressionVisitor
                 }
                 case "StartsWith":
                 {
-                    var col = GetMemberName(expr.Object!);
+                    var col = GetQuotedColumn(expr.Object!);
                     var val = GetValue(expr.Arguments[0])?.ToString() ?? "";
                     var p = $"@p{parameters.Count}";
                     parameters[p] = $"{val}%";
@@ -165,7 +165,7 @@ internal static class SQLiteExpressionVisitor
                 }
                 case "EndsWith":
                 {
-                    var col = GetMemberName(expr.Object!);
+                    var col = GetQuotedColumn(expr.Object!);
                     var val = GetValue(expr.Arguments[0])?.ToString() ?? "";
                     var p = $"@p{parameters.Count}";
                     parameters[p] = $"%{val}";
@@ -178,7 +178,7 @@ internal static class SQLiteExpressionVisitor
         {
             // list.Contains(x.Prop)
             var collection = GetValue(expr.Arguments[0]);
-            var col = GetMemberName(expr.Arguments.Count > 1 ? expr.Arguments[1] : expr.Object!);
+            var col = GetQuotedColumn(expr.Arguments.Count > 1 ? expr.Arguments[1] : expr.Object!);
             if (collection is System.Collections.IEnumerable items)
             {
                 var inParams = new List<string>();
@@ -213,6 +213,13 @@ internal static class SQLiteExpressionVisitor
         var colAttr = member.GetCustomAttribute<SQLiteColumnAttribute>();
         return colAttr?.ColumnName ?? member.Name;
     }
+
+    /// <summary>
+    /// Returns a member's column name wrapped in double quotes so reserved words
+    /// (e.g. <c>Order</c>, <c>Group</c>, <c>Index</c>) are valid SQL identifiers.
+    /// Used at WHERE-clause emission sites; ORDER BY / SELECT quote separately.
+    /// </summary>
+    private static string GetQuotedColumn(Expression expr) => $"\"{GetMemberName(expr)}\"";
 
     private static object? GetValue(Expression expr)
     {

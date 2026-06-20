@@ -1,67 +1,23 @@
 # API Reference
 
-This section contains the complete API reference for all CodeLogic Libraries (`CL.*`), generated from XML documentation comments in the source code.
+The complete, generated API reference for every CodeLogic library (`CL.*`), produced from the XML
+documentation comments in the source. Use the sidebar to browse namespaces, types, and members.
 
-## Libraries
+For task-oriented guides and examples, start with the [Libraries](../libs/index.md) section.
 
-| Library | Root Namespace | Description |
-|---------|---------------|-------------|
-| CL.Common | `CL.Common` | Utilities: hashing, ID generation, extensions |
-| CL.GitHelper | `CL.GitHelper` | Git operations via LibGit2Sharp |
-| CL.Mail | `CL.Mail` | SMTP/IMAP email with templates |
-| CL.MySQL2 | `CL.MySQL2` | MySQL with pooling and Repository pattern |
-| CL.NetUtils | `CL.NetUtils` | DNSBL and GeoIP2 lookups |
-| CL.PostgreSQL | `CL.PostgreSQL` | PostgreSQL with multi-database support |
-| CL.SQLite | `CL.SQLite` | SQLite with custom pool and migrations |
-| CL.SocialConnect | `CL.SocialConnect` | Discord and Steam integrations |
-| CL.StorageS3 | `CL.StorageS3` | Amazon S3 and MinIO storage |
-| CL.SystemStats | `CL.SystemStats` | CPU and memory monitoring |
-| CL.TwoFactorAuth | `CL.TwoFactorAuth` | TOTP 2FA with QR codes |
+## Packages
 
-## Common Patterns
-
-### Repository Pattern
-
-The database libraries (CL.MySQL2, CL.PostgreSQL, CL.SQLite) share a consistent `Repository<T>` pattern:
-
-```csharp
-// All three database libraries expose:
-Repository<T> GetRepository<T>(string connectionId = "Default") where T : class, new();
-
-// Repository methods:
-Task<T?> FindAsync(Expression<Func<T, bool>> predicate);
-Task<IEnumerable<T>> QueryAsync(Expression<Func<T, bool>> predicate);
-Task<T> InsertAsync(T entity);
-Task<T> UpdateAsync(T entity);
-Task<bool> DeleteAsync(Expression<Func<T, bool>> predicate);
-Task<int> CountAsync(Expression<Func<T, bool>>? predicate = null);
-```
-
-### QueryBuilder Pattern
-
-```csharp
-// MySQL2 / PostgreSQL
-var results = await library.Query<User>()
-    .Where(u => u.IsActive)
-    .OrderBy(u => u.CreatedAt)
-    .Limit(20)
-    .ToListAsync();
-
-// SQLite
-var sqliteResults = await sqlite.GetQueryBuilder<User>("Default")
-    .Where(u => u.IsActive)
-    .OrderBy(u => u.CreatedAt)
-    .Limit(20)
-    .ToListAsync();
-```
-
-### Health Check Pattern
-
-All libraries implement `HealthCheckAsync()` returning `HealthStatus`:
-
-```csharp
-var status = await library.HealthCheckAsync();
-// status.Status: Healthy | Degraded | Unhealthy
-// status.Message: human-readable description
-// status.Data: optional structured metrics
-```
+| Library | Root namespace | NuGet |
+|---------|---------------|-------|
+| CL.Common | `CL.Common` | `CodeLogic.Common` |
+| CL.GitHelper | `CL.GitHelper` | `CodeLogic.GitHelper` |
+| CL.Mail | `CL.Mail` | `CodeLogic.Mail` |
+| CL.MySQL2 | `CL.MySQL2` | `CodeLogic.MySQL2` |
+| CL.NetUtils | `CL.NetUtils` | `CodeLogic.NetUtils` |
+| CL.PostgreSQL | `CL.PostgreSQL` | `CodeLogic.PostgreSQL` |
+| CL.SQLite | `CL.SQLite` | `CodeLogic.SQLite` |
+| CL.SocialConnect | `CL.SocialConnect` | `CodeLogic.SocialConnect` |
+| CL.StorageS3 | `CL.StorageS3` | `CodeLogic.StorageS3` |
+| CL.SystemStats | `CL.SystemStats` | `CodeLogic.SystemStats` |
+| CL.TwoFactorAuth | `CL.TwoFactorAuth` | `CodeLogic.TwoFactorAuth` |
+| CL.GameNetQuery | `CL.GameNetQuery` | `CodeLogic.GameNetQuery` |

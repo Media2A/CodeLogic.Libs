@@ -3,6 +3,33 @@
 All notable changes to **CodeLogic.SystemStats** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Fixed
+
+- `GetTopProcessesByCpuAsync` now measures real per-process CPU usage by
+  sampling each process's processor time over an interval, instead of sorting by
+  a value that was always 0 (which returned an arbitrary order). Sampling uses
+  the configured `CpuSamplingIntervalMs`.
+
+### Documentation
+
+- Full rewrite of the README and the system-stats guide to the shared house
+  style: concise NuGet-friendly README (badges, tagline, install, quick start,
+  features, configuration table, docs link, requirements) and a single deep docs
+  page at `docs/libs/systemstats.md`.
+- Documented the cross-platform provider split (Windows registry / PerformanceCounter /
+  `GlobalMemoryStatusEx` / `TickCount64` vs. Linux `/proc`), with the unknown-platform
+  fall back to the Linux provider.
+- Covered every method as `Task<Result<T>>` and the `SystemStatsLibrary` forwarding
+  surface alongside the `Stats` service (`ClearCache`, `GetPlatformInfo`, `IsInitialized`).
+- Clarified that per-process `CpuUsagePercent` is `0.0` on both platforms
+  (point-in-time, not sampled), that `HandleCount` is the fd count on Linux, and
+  that `CachedBytes` / `BuffersBytes` are `0` on Windows.
+- Documented which calls are cached vs. uncached, the published events and which
+  methods trigger threshold checks, the validated `config.systemstats.json`
+  fields with ranges, and the health-check states.
+
 ## [4.5.1] — 2026-06-20
 
 ### Documentation

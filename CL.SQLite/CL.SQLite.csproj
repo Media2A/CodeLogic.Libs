@@ -7,7 +7,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>4.5.2-preview.68</Version>
     <PackageId>CodeLogic.SQLite</PackageId>
     <PackageTags>sqlite;database;orm;linq</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -17,8 +16,12 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.*" />
-  </ItemGroup>
-  <ItemGroup>
+    <!-- Microsoft.Data.Sqlite 9.0.x pins SQLitePCLRaw 2.1.10, whose native e_sqlite3 binary
+         carries the high-severity advisory GHSA-2m69-gcr7-jv3q (affects lib.e_sqlite3 <= 2.1.11).
+         The fixed native binary ships as lib.e_sqlite3 3.50.3, brought in by the 3.0.3 managed
+         bundle. Pin it directly so it overrides the transitive 2.1.10 family. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+  </ItemGroup>  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

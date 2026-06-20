@@ -62,9 +62,10 @@ public sealed class QueryBuilder<T> where T : class, new()
     public QueryBuilder<T> Where(Expression<Func<T, bool>> predicate)
     {
         var (clause, parms) = SQLiteExpressionVisitor.Parse(predicate);
-        // Re-key parameters to avoid collisions
+        // Re-key parameters to avoid collisions. Longer parameter names are replaced
+        // first so @p1 can't clobber a substring of @p10/@p11 (predicates with 11+ params).
         var rekeyed = new Dictionary<string, object?>();
-        foreach (var kv in parms)
+        foreach (var kv in parms.OrderByDescending(k => k.Key.Length))
         {
             var newKey = $"@qb_{_paramCounter++}";
             rekeyed[newKey] = kv.Value;
@@ -253,6 +254,9 @@ public sealed class QueryBuilder<T> where T : class, new()
         int pageSize,
         CancellationToken ct = default)
     {
+        if (page < 1 || pageSize < 1)
+            return Result<PagedResult<T>>.Failure(Error.Validation(
+                "sqlite.paging", "page and pageSize must both be >= 1."));
         try
         {
             var tableName = GetTableName();

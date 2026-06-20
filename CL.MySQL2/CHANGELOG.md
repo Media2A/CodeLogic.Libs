@@ -4,6 +4,37 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## 2026-06-20
+
+### Fixed
+
+- Query-builder parameter re-keying could corrupt SQL when a single predicate
+  emitted 11 or more parameters: the rename used a substring replace, so `@p1`
+  also rewrote `@p10`/`@p11`, leaving placeholders with no bound value.
+  Parameters are now renamed longest-name-first in `QueryBuilder.Where` and
+  `JoinedQuery`, matching the existing subquery path. Covered by a new
+  integration test (12-parameter predicate).
+
+### Documentation
+
+- **Full README + multi-page docs rewrite to the unified house style.** The
+  README is now concise — title, NuGet + license badges, one-line tagline, a
+  short intro, `Install`, `Quick start`, `Features`, `Configuration` (table +
+  JSON), `Documentation`, `Requirements`, and `License` — and renders correctly
+  on both GitHub and NuGet (Markdown only, absolute `https://` links, no raw
+  HTML or relative paths). The full API now lives in the docs site rather than
+  the README.
+- **Docs site pages rewritten** to match the house style across the four-page
+  structure: [`index`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/index.html)
+  (overview, load, repository basics, entry points, config, health, events),
+  [`queries`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/queries.html),
+  [`schema-migrations`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/schema-migrations.html),
+  and [`performance`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/performance.html).
+  Each sub-page now opens with a tagline and an overview breadcrumb and closes
+  with a consistent "See also" footer.
+- **No API changes.** Documentation only — no behaviour, signatures, config
+  keys, or version numbers were altered.
+
 ## [4.5.3] — 2026-06-20
 
 ### Added

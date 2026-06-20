@@ -3,6 +3,35 @@
 All notable changes to **CodeLogic.SocialConnect** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Fixed
+
+- Discord sends now validate the 2000-character content limit and 10-embed limit
+  up front, returning a clear validation error instead of a failed HTTP
+  round-trip.
+- Corrected the `CommunityVisibilityState` documentation comment (the Steam Web
+  API returns 1 = not visible / 3 = public to third parties; the previous
+  comment listed nonexistent levels).
+
+### Documentation
+
+- Full rewrite of the README and the `docs/libs/socialconnect.md` guide to the
+  current house style.
+- README restructured to the standard layout (badges, tagline, intro, Install,
+  Quick start, Features, Configuration with table + JSON, Documentation,
+  Requirements, License) and now links the published docs page.
+- Corrected the `Result` contract throughout: Discord methods return `Result`
+  (no value); Steam profile and auth methods return `Result<T>`. Examples use
+  `IsSuccess` / `IsFailure`, `.Value`, and `Error?.Message`.
+- Documented the canonical load sequence (`LoadAsync` → `ConfigureAsync` →
+  `StartAsync` → `Libraries.Get`) and the `HasDiscord` / `HasSteam` /
+  `HasSteamAuth` guards (Steam disabled by default).
+- Added a deep guide covering the three services, Discord webhook methods and
+  full model reference (with a rich-embed example), the Steam profile/bans/games
+  models and computed properties, Steam ticket authentication, caching
+  (`CacheTtlSeconds`, `ClearCache`), configuration, events, and the health check.
+
 ## [4.5.2] — 2026-06-20
 
 ### Documentation

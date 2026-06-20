@@ -3,6 +3,24 @@
 All notable changes to **CodeLogic.GameNetQuery** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the `docs/libs/gamenetquery.md` deep-dive to the current
+  CodeLogic house style.
+- Clarified that the library is zero-config and that the query clients (`ValveUdpQuery`,
+  `ValveRconClient`, `CounterStrike2`/`CounterStrikeSource`, the status parsers, and the
+  Minecraft clients) are used directly by namespace — the `GameNetQueryLibrary` instance is
+  only needed for lifecycle/health integration.
+- Documented that the query clients return model types directly (`ServerInfo?`,
+  `List<PlayerInfo>`, response strings) rather than the framework `Result`, including the
+  no-throw failure contracts.
+- Added field tables for `ServerInfo` and `PlayerInfo`, method tables for both Counter-Strike
+  wrappers (shared set vs. CS2-only extras), and the `ValveStatusParser` /
+  `ValveStatusParserCS2` parser surfaces.
+- No functional code changes.
+
 ## [4.5.2] — 2026-06-20
 
 ### Documentation

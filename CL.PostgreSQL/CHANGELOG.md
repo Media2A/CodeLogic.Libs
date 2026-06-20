@@ -3,6 +3,34 @@
 All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Fixed
+
+- Query-builder parameter re-keying could corrupt SQL when a predicate emitted
+  11+ parameters (`@p1` substring-collided with `@p10`/`@p11`); parameters are
+  now renamed longest-name-first.
+- The expression translator wiped the entire WHERE buffer for a `null == x.Prop`
+  comparison (it called `_sql.Clear()`), producing malformed SQL when combined
+  with other clauses; null comparisons in both operand orders now translate to
+  `IS [NOT] NULL` without discarding accumulated SQL.
+
+### Documentation
+
+- Full README rewrite to the unified house style: concise NuGet + MIT badges,
+  one-line tagline, `Install` / `Quick start` / `Features` / `Configuration`
+  (table + JSON) / `Documentation` / `Requirements` / `License`, with the API
+  detail moved to the docs site (no full API dump in the README).
+- Replaced the single `docs/libs/postgresql.md` guide with a three-page docs set
+  mirroring CL.MySQL2's depth model: **Overview** (load, multi-database,
+  repository CRUD, entry points, config, health, events), **Query Builder**
+  (fluent methods, terminals, aggregates, bulk update/delete, raw SQL via
+  `QueryRaw`/repository raw, transactions), and **Schema & Sync** (entity
+  attributes, the `DataType` enum, table/set/namespace sync, `SyncResult`,
+  schema backups, the migration tracker).
+- The old `docs/libs/postgresql.md` is now a thin redirect to the new Overview.
+- No API changes — documentation only.
+
 ## [4.5.2] — 2026-06-20
 
 ### Documentation

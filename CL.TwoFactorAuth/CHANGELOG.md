@@ -3,6 +3,18 @@
 All notable changes to **CodeLogic.TwoFactorAuth** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the `docs/libs/twofactorauth.md` guide to the
+  shared house style: a concise, NuGet-rendered README (badges, tagline, install,
+  quick start, features, configuration table + JSON, requirements) and a single
+  deep documentation page covering the enrolment flow, sign-in validation, the
+  `Authenticator` and `QrCode` services, the `TwoFactorKey` /
+  `TotpValidationResult` shapes, configuration, events, and the health check.
+  No API changes.
+
 ## [4.5.2] — 2026-06-20
 
 ### Documentation

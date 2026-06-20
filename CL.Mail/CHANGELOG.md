@@ -3,6 +3,17 @@
 All notable changes to **CodeLogic.Mail** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the multi-page docs set to the CodeLogic.Libs
+  house style. The README is now concise, Markdown-only, and NuGet-safe; the
+  guide is split into **Overview & Sending** (`docs/libs/mail/index.md`) and
+  **Receiving & Templates** (`docs/libs/mail/receiving-templates.md`), with the
+  old `docs/libs/mail.md` reduced to a redirect stub and the docs navigation
+  updated accordingly. No API changes.
+
 ## [4.5.1] — 2026-06-20
 
 ### Documentation
