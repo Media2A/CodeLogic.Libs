@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-<Version>4.5.1</Version>
+    <Version>4.5.2-preview.68</Version>
     <PackageId>CodeLogic.NetUtils</PackageId>
     <PackageTags>dns;dnsbl;geoip;geolocation</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -18,7 +18,8 @@
   <ItemGroup>
     <PackageReference Include="MaxMind.GeoIP2" Version="5.*" />
     <PackageReference Include="SharpCompress" Version="0.*" />
-  </ItemGroup>  <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

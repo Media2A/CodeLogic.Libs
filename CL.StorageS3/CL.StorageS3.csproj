@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-<Version>4.5.1</Version>
+    <Version>4.5.2-preview.68</Version>
     <PackageId>CodeLogic.StorageS3</PackageId>
     <PackageTags>s3;storage;cloudflare-r2;aws;object-storage</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -17,7 +17,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.*" />
-  </ItemGroup>  <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>
