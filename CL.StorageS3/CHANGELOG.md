@@ -3,6 +3,38 @@
 All notable changes to **CodeLogic.StorageS3** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the `docs/libs/storages3.md` guide to the shared
+  house style: concise NuGet-rendered README (badges, tagline, install, quick
+  start, features, configuration table + JSON, requirements) and a single deep
+  documentation page covering the multi-provider story (AWS S3 / MinIO /
+  Cloudflare R2) with a provider-settings comparison, bucket and object
+  operations, byte/stream upload and download, `UploadOptions` / `DownloadOptions`
+  references, the `S3ObjectInfo` / `BucketInfo` / `ListObjectsResult` models,
+  pagination and prefixes, copy, presigned URLs, events, and the per-connection
+  health check. No API changes.
+
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Rewrote the storage guide and Quick Start to match the real `S3StorageService`
+  API: every operation returns `Result` / `Result<T>` (existence checks return
+  `bool`), uploads/downloads take `UploadOptions` / `DownloadOptions`, and the
+  config file is `config.storages3.json` with camelCase keys and a `connections`
+  array.
+- Documented previously undocumented surface: `GetService` / `DefaultService`
+  connection access, `CopyObjectAsync`, `GetObjectInfoAsync`,
+  `GetObjectStreamAsync`, byte-range and `VersionId` downloads, `UploadOptions`
+  fields (cache-control, content-disposition, storage class, public-read ACL,
+  metadata), paginated `ListObjectsResult`, the `ObjectUploadedEvent` /
+  `ObjectDeletedEvent` / `BucketCreatedEvent` events, low-level
+  `ConnectionManager.GetClient` access, and the per-connection health check
+  (Healthy / Degraded / Unhealthy).
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

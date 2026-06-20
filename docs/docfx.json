@@ -31,7 +31,7 @@
         "files": ["api/**.yml", "api/index.md"]
       },
       {
-        "files": ["articles/**.md", "articles/**/toc.yml", "toc.yml", "*.md"]
+        "files": ["libs/**.md", "libs/**/toc.yml", "toc.yml", "getting-started.md", "index.md"]
       }
     ],
     "resource": [
@@ -43,12 +43,13 @@
     "globalMetadata": {
       "_appTitle": "CodeLogic Libraries",
       "_appLogoPath": "images/logo.svg",
-      "_appFaviconPath": "images/favicon.ico",
+      "_appFaviconPath": "images/logo.svg",
       "_enableSearch": true,
-      "_appFooter": "Copyright &copy; 2026 Media2A. Built with <a href='https://dotnet.github.io/docfx'>DocFX</a>.",
-      "_appName": "CodeLogic Libraries"
+      "_appFooter": "Copyright &copy; 2026 Media2A &middot; MIT-licensed &middot; Built with <a href='https://dotnet.github.io/docfx'>DocFX</a>.",
+      "_appName": "CodeLogic Libraries",
+      "_disableContribution": false
     },
-    "template": ["default", "modern"],
+    "template": ["default", "modern", "templates/cl"],
     "sitemap": {
       "baseUrl": "https://media2a.github.io/CodeLogic.Libs"
     },

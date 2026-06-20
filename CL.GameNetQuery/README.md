@@ -1,58 +1,72 @@
 # CodeLogic.GameNetQuery
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.GameNetQuery)](https://www.nuget.org/packages/CodeLogic.GameNetQuery)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-Game server query library for [CodeLogic](https://github.com/Media2A/CodeLogic) — Valve Source Engine (CSS, CS2) and Minecraft server queries via UDP and RCON.
+> Query and administer game servers from [CodeLogic 4](https://github.com/Media2A/CodeLogic) — Valve A2S over UDP, Source RCON, and Minecraft GameSpy4 / RCON.
+
+Speaks the wire protocols used by Source-engine and Minecraft servers: A2S over UDP for live server info and player lists, the Source RCON TCP protocol for remote console commands (with high-level Counter-Strike 2 / Counter-Strike: Source admin wrappers), and Minecraft's GameSpy4 UDP query plus RCON. No external NuGet dependencies.
 
 ## Install
 
-```
+```bash
 dotnet add package CodeLogic.GameNetQuery
 ```
 
-## Quick Start
+## Quick start
+
+The query clients are used **directly by namespace** — they don't need a library instance. Load the library only when you want its lifecycle and health-check integration.
 
 ```csharp
-// Valve Source Engine -- UDP query (no password needed)
-var serverInfo = await ValveUdpQuery.GetServerInfoAsync("192.168.1.10", 27015);
-Console.WriteLine($"{serverInfo?.Hostname} - {serverInfo?.PlayerCount}/{serverInfo?.MaxPlayers}");
+using CL.GameNetQuery.Valve;
+using CL.GameNetQuery.Models;
 
-var players = await ValveUdpQuery.GetPlayerListAsync("192.168.1.10", 27015);
+// A2S UDP — live server info (no library load required)
+ServerInfo? info = await ValveUdpQuery.GetServerInfoAsync("203.0.113.10", 27015);
+if (info is { IsOnline: true })
+    Console.WriteLine($"{info.Hostname} — {info.Map} ({info.PlayerCount}/{info.MaxPlayers})");
 
-// Valve RCON -- authenticated commands
-using var rcon = new ValveRconClient("192.168.1.10", 27015, "rconpassword");
+List<PlayerInfo> players = await ValveUdpQuery.GetPlayerListAsync("203.0.113.10", 27015);
+foreach (var p in players)
+    Console.WriteLine($"{p.Name}  score {p.Score}  {p.Ping}ms");
+
+// Source RCON — remote console command
+using var rcon = new ValveRconClient("203.0.113.10", 27015, "rcon-password");
 if (await rcon.ConnectAsync())
-{
-    var response = await rcon.SendCommandAsync("status");
-    Console.WriteLine(response);
-}
+    Console.WriteLine(await rcon.SendCommandAsync("status"));
+```
 
-// Minecraft -- UDP query
-var mcResponse = MinecraftQueryClient.QueryServer("192.168.1.20", 25565);
-var motd = MinecraftQueryClient.GetStatusValue(mcResponse, "hostname");
+To wire the library into CodeLogic's lifecycle (so it participates in health checks):
+
+```csharp
+using CL.GameNetQuery;
+
+await Libraries.LoadAsync<GameNetQueryLibrary>();   // register before ConfigureAsync()
+await CodeLogic.ConfigureAsync();
+await CodeLogic.StartAsync();
 ```
 
 ## Features
 
-- **Valve A2S_INFO** -- query Source Engine server name, map, player count, and metadata via UDP
-- **Valve A2S_PLAYER** -- retrieve the full player list with scores and play durations
-- **Valve RCON** -- authenticate and execute remote console commands over TCP
-- **Minecraft query** -- GameSpy4 UDP protocol for server status and player info
-- **Zero configuration** -- all query classes are static or standalone; no config file needed
+- **Valve A2S UDP query** — `ValveUdpQuery.GetServerInfoAsync` / `GetPlayerListAsync` return typed `ServerInfo?` and `List<PlayerInfo>`; failures return `null` / an empty list rather than throwing.
+- **Source RCON** — `ValveRconClient` connects over TCP and runs console commands, returning the raw server response string.
+- **Counter-Strike admin wrappers** — `CounterStrike2` and `CounterStrikeSource` expose named helpers (change map, kick/ban, say, cvars, restart…) over RCON; CS2 adds cheats, friendly-fire, team-balance, and slay.
+- **`status` parsers** — `ValveStatusParser` and `ValveStatusParserCS2` turn raw `status` output into `ServerInfo` / `PlayerInfo`.
+- **Minecraft** — `MinecraftQueryClient` (GameSpy4 UDP query with `GetStatusValue` field lookup) and `MinecraftRconClient` (RCON).
 
 ## Configuration
 
-CL.GameNetQuery does not require a configuration file. All query clients accept connection parameters directly.
+None. `CL.GameNetQuery` is a zero-config library — it writes no config file. Every connection parameter (IP, port, RCON password, timeout) is passed directly to the query clients at call time.
 
 ## Documentation
 
-Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Media2A/CodeLogic.Libs)
+Full guide: **[CL.GameNetQuery documentation](https://media2a.github.io/CodeLogic.Libs/libs/gamenetquery.html)**
 
 ## Requirements
 
-- .NET 10.0+
-- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
+- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- No external NuGet dependencies.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).

@@ -36,7 +36,23 @@ public sealed class GitRepository : IDisposable
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _resolvedPath = resolvedPath;
         _logger = logger;
+
+        // SSH transport is not available in the LibGit2Sharp 0.30 managed binary. Warn loudly
+        // rather than silently ignoring SSH config or failing with an opaque transport error later.
+        if (!string.IsNullOrWhiteSpace(_config.SshKeyPath))
+            _logger?.Warning(
+                $"[GitHelper] Repository '{_config.Id}' has an SSH key configured, but SSH is not " +
+                "supported (LibGit2Sharp 0.30 has no SSH transport). Use an HTTPS URL with a PAT instead.");
     }
+
+    /// <summary>
+    /// True when the URL uses the SSH transport (<c>git@host:org/repo</c> or <c>ssh://…</c>),
+    /// which this library cannot service. Used to fail fast with a clear message.
+    /// </summary>
+    private static bool IsSshUrl(string? url) =>
+        !string.IsNullOrWhiteSpace(url) &&
+        (url.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase) ||
+         url.StartsWith("git@", StringComparison.OrdinalIgnoreCase));
 
     // ── Clone ─────────────────────────────────────────────────────────────────
 
@@ -53,6 +69,11 @@ public sealed class GitRepository : IDisposable
 
         try
         {
+            if (IsSshUrl(_config.RepositoryUrl))
+                return GitResult<RepositoryInfo>.Fail(
+                    "SSH URLs are not supported — LibGit2Sharp 0.30 has no SSH transport. " +
+                    "Use an HTTPS URL with a personal access token.", null, diag);
+
             if (Directory.Exists(_resolvedPath))
             {
                 if (Directory.GetFileSystemEntries(_resolvedPath).Length > 0)
@@ -264,7 +285,7 @@ public sealed class GitRepository : IDisposable
         try
         {
             await EnsureOpenAsync();
-            await _lock.WaitAsync();
+            await _lock.WaitAsync(options.CancellationToken);
             try
             {
                 if (options.FilesToStage?.Count > 0)
@@ -279,7 +300,7 @@ public sealed class GitRepository : IDisposable
                 var sig = GetSignature(options.AuthorName, options.AuthorEmail);
 
                 var commit = await Task.Run(() =>
-                    _repo!.Commit(options.Message, sig, sig));
+                    _repo!.Commit(options.Message, sig, sig), options.CancellationToken);
 
                 var info = ConvertCommit(commit);
                 diag.CommitsProcessed = 1;
@@ -506,10 +527,16 @@ public sealed class GitRepository : IDisposable
     /// Branch to track. Null uses <see cref="RepositoryConfiguration.DefaultBranch"/>.
     /// </param>
     /// <param name="remoteName">Remote name. Defaults to "origin".</param>
+    /// <param name="discardLocalChanges">
+    /// When the working tree has uncommitted changes, this method hard-resets and would
+    /// DISCARD them. To prevent accidental data loss it refuses to do so unless this is
+    /// set to <c>true</c>. Defaults to <c>false</c> (fail instead of discarding).
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     public async Task<GitResult<RepositoryInfo>> EnsureUpToDateAsync(
         string? branchName = null,
         string remoteName = "origin",
+        bool discardLocalChanges = false,
         CancellationToken cancellationToken = default)
     {
         branchName ??= string.IsNullOrWhiteSpace(_config.DefaultBranch) ? "main" : _config.DefaultBranch;
@@ -537,6 +564,17 @@ public sealed class GitRepository : IDisposable
         });
         if (!fetch.IsSuccess)
             return GitResult<RepositoryInfo>.Fail(fetch.ErrorMessage!, fetch.Exception);
+
+        // Guard against silent data loss: the hard reset below discards uncommitted work.
+        if (!discardLocalChanges)
+        {
+            var status = await GetStatusAsync();
+            if (status.IsSuccess && status.Value!.IsDirty)
+                return GitResult<RepositoryInfo>.Fail(
+                    "Working tree has uncommitted changes; refusing to hard-reset and lose them. " +
+                    "Commit/stash first, or call EnsureUpToDateAsync with discardLocalChanges: true.",
+                    null);
+        }
 
         var reset = await ResetHardAsync(branchName, remoteName, cancellationToken);
         if (!reset.IsSuccess)

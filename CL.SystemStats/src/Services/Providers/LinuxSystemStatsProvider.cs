@@ -299,7 +299,10 @@ public sealed class LinuxSystemStatsProvider : ISystemStatsProvider
     {
         var result = await GetAllProcessesAsync();
         if (result.IsFailure) return result;
-        var top = result.Value!.OrderByDescending(p => p.CpuUsagePercent).Take(topCount).ToList();
+        // Per-process CPU% requires sampling processor time over an interval — a single
+        // snapshot can't measure it. Delegate to the shared sampler.
+        var top = await ProcessCpuSampler.TopByCpuAsync(
+            result.Value!, _config.CpuSamplingIntervalMs, topCount);
         return Result<IReadOnlyList<ProcessStats>>.Success(top);
     }
 

@@ -132,6 +132,63 @@ internal sealed class SchemaAnalyzer
         return sql.ToString();
     }
 
+    // ── Model CRC ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Computes a stable CRC32 (8-char lowercase hex) of the entity's desired schema,
+    /// derived from <see cref="GenerateCreateTable"/>. Used by the <c>__schema_state</c>
+    /// sentinel: when the stored CRC matches this value the table is skipped without any
+    /// <c>information_schema</c> diffing. The CRC is order-independent and ignores cosmetic
+    /// differences (the <c>IF NOT EXISTS</c> noise and whitespace).
+    /// </summary>
+    public string ComputeSchemaCrc(Type entityType) =>
+        ComputeCrc(NormalizeForCrc(GenerateCreateTable(entityType)));
+
+    /// <summary>Computes a CRC32 (8-char lowercase hex) of an arbitrary string.</summary>
+    public static string ComputeCrc(string text) =>
+        Crc32(Encoding.UTF8.GetBytes(text)).ToString("x8");
+
+    /// <summary>
+    /// Returns the canonical, normalized form of a CREATE TABLE statement used as CRC input:
+    /// strips <c>IF NOT EXISTS</c>, trims and drops blank lines, and sorts the remaining lines
+    /// so reflection ordering can never change the hash for an unchanged model.
+    /// </summary>
+    internal static string NormalizeForCrc(string createTableDdl)
+    {
+        var stripped = createTableDdl.Replace("IF NOT EXISTS ", "", StringComparison.Ordinal);
+        var lines = stripped
+            .Split('\n')
+            .Select(l => l.Trim().TrimEnd(','))
+            .Where(l => l.Length > 0)
+            .OrderBy(l => l, StringComparer.Ordinal);
+        return string.Join("\n", lines);
+    }
+
+    // Minimal, self-contained CRC32 (IEEE 802.3 polynomial 0xEDB88320). Avoids a NuGet
+    // dependency; the table is built once and cached.
+    private static readonly uint[] Crc32Table = BuildCrc32Table();
+
+    private static uint[] BuildCrc32Table()
+    {
+        var table = new uint[256];
+        for (uint i = 0; i < 256; i++)
+        {
+            var c = i;
+            for (var k = 0; k < 8; k++)
+                c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        return table;
+    }
+
+    private static uint Crc32(ReadOnlySpan<byte> data)
+    {
+        var crc = 0xFFFFFFFFu;
+        foreach (var b in data)
+            crc = Crc32Table[(crc ^ b) & 0xFF] ^ (crc >> 8);
+        return crc ^ 0xFFFFFFFFu;
+    }
+
     // ── Schema diff ────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -172,10 +229,26 @@ internal sealed class SchemaAnalyzer
 
             if (!existingColumns.ContainsKey(colName))
             {
-                // Column missing — ADD COLUMN
-                var colDef = BuildColumnDef(prop, colAttr, colName);
-                alterStatements.Add($"ALTER TABLE `{tableName}` ADD COLUMN {colDef};");
-                _logger?.Debug($"[MySQL2] Will add column `{tableName}`.`{colName}`");
+                var previous = colAttr?.PreviousName;
+                if (!string.IsNullOrEmpty(previous)
+                    && !string.Equals(previous, colName, StringComparison.OrdinalIgnoreCase)
+                    && existingColumns.ContainsKey(previous))
+                {
+                    // Renamed property — CHANGE COLUMN preserves the data instead of the
+                    // drop-old + add-new that would otherwise lose it. Works at Safe+.
+                    var colDef = BuildColumnDef(prop, colAttr, colName);
+                    alterStatements.Add($"ALTER TABLE `{tableName}` CHANGE COLUMN `{previous}` {colDef};");
+                    // The old name is consumed by the rename — keep it out of the Full drop set.
+                    modelColumnNames.Add(previous);
+                    _logger?.Info($"[MySQL2] Will rename column `{tableName}`.`{previous}` → `{colName}`");
+                }
+                else
+                {
+                    // Column missing — ADD COLUMN
+                    var colDef = BuildColumnDef(prop, colAttr, colName);
+                    alterStatements.Add($"ALTER TABLE `{tableName}` ADD COLUMN {colDef};");
+                    _logger?.Debug($"[MySQL2] Will add column `{tableName}`.`{colName}`");
+                }
             }
             else
             {

@@ -196,7 +196,7 @@ public sealed class GitManager : IDisposable
     {
         ArgumentNullException.ThrowIfNull(operation);
 
-        var concurrency = maxConcurrency > 0 ? maxConcurrency : _config.MaxConcurrentOperations;
+        var concurrency = Math.Max(1, maxConcurrency > 0 ? maxConcurrency : _config.MaxConcurrentOperations);
         var results = new ConcurrentDictionary<string, TResult>();
         using var sem = new SemaphoreSlim(concurrency, concurrency);
 
@@ -233,7 +233,7 @@ public sealed class GitManager : IDisposable
         FetchOptions? fetchOptions = null,
         int maxConcurrency = 0)
     {
-        var concurrency = maxConcurrency > 0 ? maxConcurrency : _config.MaxConcurrentOperations;
+        var concurrency = Math.Max(1, maxConcurrency > 0 ? maxConcurrency : _config.MaxConcurrentOperations);
         var results = new ConcurrentDictionary<string, GitResult<bool>>();
         using var sem = new SemaphoreSlim(concurrency, concurrency);
 
@@ -266,7 +266,7 @@ public sealed class GitManager : IDisposable
     public async Task<Dictionary<string, GitResult<RepositoryStatus>>> GetAllStatusAsync(
         int maxConcurrency = 0)
     {
-        var concurrency = maxConcurrency > 0 ? maxConcurrency : _config.MaxConcurrentOperations;
+        var concurrency = Math.Max(1, maxConcurrency > 0 ? maxConcurrency : _config.MaxConcurrentOperations);
         var results = new ConcurrentDictionary<string, GitResult<RepositoryStatus>>();
         using var sem = new SemaphoreSlim(concurrency, concurrency);
 
@@ -344,7 +344,10 @@ public sealed class GitManager : IDisposable
     private bool IsValid(CachedEntry entry)
     {
         if (_config.CacheTimeoutMinutes <= 0) return true;
-        return (DateTime.UtcNow - entry.CreatedAt).TotalMinutes < _config.CacheTimeoutMinutes;
+        // Evict on IDLE time, not absolute age: a recently-accessed entry is presumed
+        // in use, so the cleanup timer won't dispose a repository out from under an
+        // active caller. Only genuinely idle entries expire.
+        return (DateTime.UtcNow - entry.LastAccessed).TotalMinutes < _config.CacheTimeoutMinutes;
     }
 
     private void CleanupExpiredEntries()

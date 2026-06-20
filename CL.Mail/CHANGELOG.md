@@ -3,6 +3,39 @@
 All notable changes to **CodeLogic.Mail** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the multi-page docs set to the CodeLogic.Libs
+  house style. The README is now concise, Markdown-only, and NuGet-safe; the
+  guide is split into **Overview & Sending** (`docs/libs/mail/index.md`) and
+  **Receiving & Templates** (`docs/libs/mail/receiving-templates.md`), with the
+  old `docs/libs/mail.md` reduced to a redirect stub and the docs navigation
+  updated accordingly. No API changes.
+
+## [4.5.1] — 2026-06-20
+
+### Documentation
+
+- Rewrote the README and the Mail & Templates guide to match the current public
+  API. The previous docs described members that no longer exist (`EmailMessage`,
+  `EmailAttachment`, `ReplyTo`, `RenderTemplateAsync`, `ReadInboxAsync`,
+  `ImapFilter`, `MarkAsReadAsync`, the `SendAsync(from:, to:, …)` /
+  `SendTemplateAsync` overloads, and the `UseSsl` / `FromAddress` config keys).
+- Documented the real surface: the fluent `MailBuilder` (`CreateMessage()`),
+  `SmtpService.SendAsync(MailMessage)`, `MailLibrary.SendTemplatedAsync`, the
+  `MailResult` / `MailError` result model, and the JSON-backed template system
+  (`MailTemplate`, `IMailTemplateProvider`, `IMailTemplateEngine`).
+- Documented previously undocumented features: template conditionals
+  (`{{#if}}`/`{{#else}}`), loops (`{{#each}}`), sections and layouts; the
+  `${var}` / `{var}` placeholder syntaxes; the full IMAP API (fetch/page, fetch
+  by UID, search via `ImapSearchCriteria`, move/copy/delete, flag operations,
+  folder management); and RFC 2177 IMAP IDLE push (`StartIdleAsync` /
+  `NewMailReceived`) with its `EnableIdle` / `IdleRefreshMinutes` config keys.
+- Corrected the documented config schema and `SecurityMode` values
+  (`None` / `StartTls` / `SslTls`).
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

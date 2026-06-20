@@ -1,0 +1,56 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - prerelease
+    paths:
+      - 'CL.*/**'
+      - 'tests/**'
+      - 'Directory.Build.*'
+      - '.github/workflows/test.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The libraries reference CodeLogic from NuGet (CodeLogicFromNuGet=true), and the
+      # test projects reference the libraries by ProjectReference — so no sibling
+      # CodeLogic source clone is needed here.
+      #
+      # Live-service tests (SMTP, S3, Steam, Postgres, DNSBL/GeoIP, git remote, and the
+      # MySQL2 DB facts) self-skip when their connection/env vars are absent, so this job
+      # runs the full offline suite with no external infrastructure or secrets.
+      - name: Run tests
+        shell: bash
+        run: |
+          set -e
+          fail=0
+          for proj in tests/*/*.Tests.csproj; do
+            echo "::group::dotnet test $proj"
+            dotnet test "$proj" \
+              --configuration Release \
+              -p:CodeLogicFromNuGet=true \
+              --logger "console;verbosity=normal" \
+              || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail

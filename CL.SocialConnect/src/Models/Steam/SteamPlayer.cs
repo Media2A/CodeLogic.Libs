@@ -13,8 +13,10 @@ public class SteamPlayer
     public string SteamId { get; set; } = string.Empty;
 
     /// <summary>
-    /// Community visibility state:
-    /// 1 = Private, 2 = Friends only, 3 = Friends of friends, 4 = Users only, 5 = Public.
+    /// Community visibility state as returned by the Steam Web API. When queried with a
+    /// Web API key, this is effectively <c>1 = not visible to you</c> or <c>3 = public</c>
+    /// (the finer-grained 2/4/5 privacy levels are not exposed to third parties).
+    /// See <see cref="IsPublic"/>.
     /// </summary>
     [JsonPropertyName("communityvisibilitystate")]
     public int CommunityVisibilityState { get; set; }

@@ -1,8 +1,11 @@
 # CodeLogic.SocialConnect
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SocialConnect)](https://www.nuget.org/packages/CodeLogic.SocialConnect)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-Discord webhook and Steam Web API integration for [CodeLogic](https://github.com/Media2A/CodeLogic). Send Discord notifications and fetch Steam player profiles, bans, and game libraries.
+> Discord webhooks and Steam Web API integration for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — send rich Discord notifications and read Steam player profiles, bans, and game libraries.
+
+Three services behind one library: a **Discord webhook** sender (text, rich embeds, full payloads), a **Steam profile** reader (players, bans, owned games — cached), and **Steam authentication** for validating game-session tickets. No external NuGet dependencies — built on `System.Net.Http.Json`.
 
 ## Install
 
@@ -10,71 +13,94 @@ Discord webhook and Steam Web API integration for [CodeLogic](https://github.com
 dotnet add package CodeLogic.SocialConnect
 ```
 
-## Quick Start
+## Quick start
 
 ```csharp
+using CL.SocialConnect;
+
 await Libraries.LoadAsync<SocialConnectLibrary>();
+await CodeLogic.ConfigureAsync();
+await CodeLogic.StartAsync();
 
 var social = Libraries.Get<SocialConnectLibrary>();
 
-// Discord — send a webhook message
-await social.Discord.SendAsync("Server restarted", username: "Bot");
+// Discord — send a webhook text message (Result, no value)
+Result sent = await social.Discord.SendMessageAsync("Server restarted");
+if (sent.IsFailure)
+    Console.WriteLine(sent.Error?.Message);
 
-// Steam — fetch player profile
-var player = await social.Steam.GetPlayerAsync("76561198012345678");
-if (player.IsSuccess)
-    Console.WriteLine($"{player.Value.PersonaName} — {player.Value.ProfileUrl}");
-
-// Steam — check bans
-var bans = await social.Steam.GetPlayerBansAsync("76561198012345678");
+// Steam — fetch a player profile (Result<SteamPlayer>)
+if (social.HasSteam)
+{
+    Result<SteamPlayer> player = await social.Steam.GetPlayerAsync("76561198012345678");
+    if (player.IsSuccess)
+        Console.WriteLine($"{player.Value.PersonaName} — {player.Value.ProfileUrl}");
+}
 ```
+
+Accessing a disabled service throws `InvalidOperationException`. Guard with `HasDiscord` / `HasSteam` / `HasSteamAuth` when a service may be turned off — Steam is disabled by default.
 
 ## Features
 
-### Discord
-- **Webhook Messages** — send text, embeds, mentions, with configurable username and avatar
-- **Default Webhook URL** — set once in config, override per call
-- **Rate Limit Aware** — respects Discord rate limits
-
-### Steam
-- **Player Profiles** — persona name, avatar (3 sizes), profile URL, real name, country, online status
-- **Player Bans** — VAC bans, game bans, trade bans, community bans
-- **Game Library** — owned games with playtime and app info
-- **Built-in Cache** — configurable TTL (default 5 min) to reduce API calls
-- **Steam Authentication** — ticket-based auth for game server integration
+- **Discord webhooks** — `SendMessageAsync` (plain text, max 2000 chars), `SendEmbedAsync` (up to 10 rich embeds), and `SendAsync` (full `DiscordWebhookMessage`); all return `Result`.
+- **Rich embeds** — title, description, colour, fields, author, footer, image, thumbnail, and timestamp via `DiscordEmbed` / `DiscordEmbedField`.
+- **Mention control** — `DiscordAllowedMentions` (with `.None` / `.All`) whitelists which roles/users/`@everyone` may ping; opt-in TTS via `DiscordWebhookMessage.Tts`.
+- **Steam profiles** — `GetPlayerAsync`, `GetPlayerBansAsync`, `GetOwnedGamesAsync` return `Result<T>` with computed helpers (`IsPublic`, `IsInGame`, `HasAnyBan`, `TotalPlaytime`, `LastPlayed`).
+- **Built-in cache** — Steam reads are cached for `CacheTtlSeconds` (default 300); clear on demand with `Steam.ClearCache()`.
+- **Steam authentication** — `Auth.AuthenticateAsync` validates a session ticket, with a per-call `appId` override.
+- **Events** — `WebhookSentEvent`, `SteamProfileFetchedEvent`, and `SteamAuthenticatedEvent` on the CodeLogic event bus.
 
 ## Configuration
 
-Auto-generated at `data/codelogic/Libraries/CL.SocialConnect/config.socialconnect.json`:
+Auto-generated on first run as `config.socialconnect.json`:
 
 ```json
 {
-  "enabled": true,
-  "discord": {
-    "enabled": true,
-    "defaultWebhookUrl": "https://discord.com/api/webhooks/xxx/yyy",
-    "defaultUsername": "MyApp",
-    "timeoutSeconds": 10
+  "Enabled": true,
+  "Discord": {
+    "Enabled": true,
+    "DefaultWebhookUrl": "https://discord.com/api/webhooks/xxx/yyy",
+    "TimeoutSeconds": 10,
+    "DefaultUsername": "MyApp",
+    "DefaultAvatarUrl": "https://example.com/bot.png"
   },
-  "steam": {
-    "enabled": true,
-    "apiKey": "your-steam-web-api-key",
-    "cacheTtlSeconds": 300,
-    "timeoutSeconds": 15
+  "Steam": {
+    "Enabled": false,
+    "ApiKey": "your-steam-web-api-key",
+    "AuthEnabled": false,
+    "AppId": "",
+    "CacheTtlSeconds": 300,
+    "TimeoutSeconds": 15,
+    "ApiBaseUrl": "https://api.steampowered.com"
   }
 }
 ```
 
-Get your Steam Web API key at [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey).
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `Enabled` | `true` | Master switch for the whole library. |
+| `Discord.Enabled` | `true` | Enable the Discord webhook service. |
+| `Discord.DefaultWebhookUrl` | `""` | Webhook used when a call omits `webhookUrl` (secret). |
+| `Discord.TimeoutSeconds` | `10` | HTTP timeout for Discord calls (1–120). |
+| `Discord.DefaultUsername` | `""` | Default sender name applied to messages. |
+| `Discord.DefaultAvatarUrl` | `""` | Default sender avatar applied to messages. |
+| `Steam.Enabled` | `false` | Enable the Steam profile service; **requires `ApiKey`**. |
+| `Steam.ApiKey` | `""` | Steam Web API key (secret) — get one at [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey). |
+| `Steam.AuthEnabled` | `false` | Enable ticket authentication; **requires `AppId`**. |
+| `Steam.AppId` | `""` | Your game's Steam App ID (used by auth). |
+| `Steam.CacheTtlSeconds` | `300` | Profile cache lifetime in seconds (must be > 0). |
+| `Steam.TimeoutSeconds` | `15` | HTTP timeout for Steam calls (1–120). |
+| `Steam.ApiBaseUrl` | `https://api.steampowered.com` | Steam Web API base URL. |
 
 ## Documentation
 
-- [Social Integrations Guide](../docs/articles/social.md)
+Full guide: **[CL.SocialConnect documentation](https://media2a.github.io/CodeLogic.Libs/libs/socialconnect.html)**
 
 ## Requirements
 
-- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- No external NuGet dependencies
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).

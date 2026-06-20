@@ -1,10 +1,10 @@
 - name: Home
   href: index.md
 - name: Getting Started
-  href: articles/getting-started.md
-- name: Articles
-  href: articles/
-  homepage: articles/getting-started.md
+  href: getting-started.md
+- name: Libraries
+  href: libs/
+  homepage: libs/index.md
 - name: API Reference
   href: api/
   homepage: api/index.md

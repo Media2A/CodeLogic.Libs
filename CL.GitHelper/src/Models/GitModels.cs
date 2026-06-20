@@ -369,6 +369,9 @@ public sealed class CommitOptions
     /// Null commits whatever is already staged in the index.
     /// </summary>
     public List<string>? FilesToStage { get; set; }
+
+    /// <summary>Cancellation token for the commit operation.</summary>
+    public CancellationToken CancellationToken { get; set; }
 }
 
 /// <summary>

@@ -1,8 +1,11 @@
 # CodeLogic.Common
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Common)](https://www.nuget.org/packages/CodeLogic.Common)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-General-purpose utility toolkit for [CodeLogic](https://github.com/Media2A/CodeLogic) applications. Provides imaging (SkiaSharp), hashing, caching, file handling, compression, and networking utilities.
+> A broad, stateless utility toolkit for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — security, ID/password generation, JSON, compression, imaging, strings, time, web, networking, caching, file handling, and reflection.
+
+`CodeLogic.Common` is a grab-bag of small, dependency-light helpers used across CodeLogic applications. Almost everything is exposed as **static helper classes** grouped by namespace, so you call them directly — `Hashing.Sha256(...)`, `IdGenerator.NanoId()`, `JsonHelper.Serialize(...)` — with no library instance to wire up. Many fallible operations return a framework `Result` / `Result<T>` instead of throwing, while simple helpers return plain values (`string`, `bool`, `byte[]`). The package also ships a `CommonLibrary` (`ILibrary`) so it participates in the CodeLogic lifecycle and health system.
 
 ## Install
 
@@ -10,42 +13,66 @@ General-purpose utility toolkit for [CodeLogic](https://github.com/Media2A/CodeL
 dotnet add package CodeLogic.Common
 ```
 
-## Features
+## Quick start
 
-- **Imaging** — resize, crop, convert between JPEG/PNG/WebP (via SkiaSharp), thumbnail generation, dimension validation, Base64 encoding
-- **Hashing** — SHA256, MD5, HMAC helpers with string and stream inputs
-- **Caching** — in-memory cache with TTL expiry
-- **File Handling** — async read/write/copy/delete, directory management, path helpers
-- **Compression** — LZ4 stream compression/decompression
-- **Networking** — HTTP client helpers, download utilities
-
-## Quick Start
+The static helpers need no setup — import a namespace and call:
 
 ```csharp
-using CL.Common.Imaging;
-using CL.Common.Hashing;
+using CL.Common.Security;
+using CL.Common.Generators;
+using CL.Common.Data;
 
-// Convert any image to WebP
-using var input = File.OpenRead("photo.jpg");
-var result = CLU_Imaging.ConvertImage(input, ImageFormat.Webp);
-if (result.IsSuccess)
-    await File.WriteAllBytesAsync("photo.webp", result.Value.ToArray());
+// Hashing — plain string return (lowercase hex)
+string digest = Hashing.Sha256("my-secret-data");
 
-// Resize with crop
-var resized = CLU_Imaging.ResizeImage(input, 200, 200, allowCrop: true);
+// AES-256-GCM authenticated encryption — tampering is detected on decrypt
+string cipher = Encryption.EncryptAes("top secret", "passphrase");
+string plain  = Encryption.DecryptAes(cipher, "passphrase");
 
-// Hash a string
-var hash = CLU_Hashing.SHA256("my-secret-data");
+// A URL-safe, collision-resistant id — plain string return
+string id = IdGenerator.NanoId();   // e.g. "V1StGXR8_Z5jdHi6B-myT"
+
+// JSON — Result-based (never throws)
+Result<string> json = JsonHelper.Serialize(new { name = "Ada" });   // {"name":"Ada"}
 ```
+
+To participate in the CodeLogic lifecycle and health checks, load the library as usual — the static helpers remain available either way:
+
+```csharp
+using CL.Common;
+
+await Libraries.LoadAsync<CommonLibrary>();   // register before ConfigureAsync()
+await CodeLogic.ConfigureAsync();
+await CodeLogic.StartAsync();
+```
+
+## Features
+
+- **Security** — `Hashing` (SHA-256/512, PBKDF2 password hash/verify, HMAC) and `Encryption` (AES-256-GCM for strings and bytes, key generation).
+- **Generators** — `IdGenerator` (GUID, sequential, timestamp, NanoID, URL-safe, sortable) and `PasswordGenerator` (passwords, passphrases, PINs, strength estimation).
+- **Data & JSON** — `JsonHelper` serialize/deserialize, file I/O, validation, merge, property extraction.
+- **Conversion** — `TypeConverter` safe `Result`-based conversion to int/long/double/bool/decimal/DateTime/Guid/enum.
+- **Compression** — `CompressionHelper` GZip, Brotli, and LZ4 for bytes, plus GZip-to-Base64 string helpers.
+- **Strings** — `StringHelper` (truncate, slug, case conversion, HTML strip) and `StringValidator` (email/URL/phone/IP/GUID checks).
+- **Time** — `DateTimeHelper` Unix timestamps, ISO 8601, age, business days, boundaries, relative strings.
+- **Web** — `HtmlHelper`, `HttpClientHelper`, `HttpHeaderHelper`, `UrlHelper` for HTML sanitization, typed HTTP requests, header/IP/UA parsing, and URL building.
+- **Networking** — `NetworkPing`, `NetworkDns`, `SubnetCalculator`, `TraceRoute`.
+- **Parser / Cron** — `CronParser` parse/validate 5-field cron and compute the next UTC occurrence.
+- **Imaging** — `CLU_Imaging` resize, crop, format conversion (JPEG/PNG/WebP), thumbnails, dimensions, Base64 — via SkiaSharp.
+- **Caching** — `ICache` / `MemoryCache` async typed in-process cache with per-entry TTL.
+- **File handling** — `FileSystem` async read/write/copy/move/delete, directory create, listing, size, existence.
+- **Reflection** — `AssemblyHelper` and `ReflectionHelper` for assembly metadata, type discovery, embedded resources, and dynamic property/method access.
 
 ## Documentation
 
-- [API Reference](../docs-output/api/CL.Common.html)
+Full guide: **[CL.Common documentation](https://media2a.github.io/CodeLogic.Libs/libs/common/index.html)**
 
 ## Requirements
 
-- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- No configuration required — `CL.Common` is a stateless utility library and writes no config file.
+- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- SkiaSharp 3.x (imaging) · K4os.Compression.LZ4 1.x (LZ4) · Newtonsoft.Json 13.x
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).

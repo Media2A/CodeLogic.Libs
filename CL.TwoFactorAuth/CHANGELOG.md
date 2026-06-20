@@ -3,6 +3,40 @@
 All notable changes to **CodeLogic.TwoFactorAuth** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the `docs/libs/twofactorauth.md` guide to the
+  shared house style: a concise, NuGet-rendered README (badges, tagline, install,
+  quick start, features, configuration table + JSON, requirements) and a single
+  deep documentation page covering the enrolment flow, sign-in validation, the
+  `Authenticator` and `QrCode` services, the `TwoFactorKey` /
+  `TotpValidationResult` shapes, configuration, events, and the health check.
+  No API changes.
+
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Corrected the README and the security guide to match the shipping API. The
+  previous docs referenced members and config keys that do not exist
+  (`GenerateSecret`, `Validate(secret, token)`, `GetOtpAuthUri`, backup-code
+  helpers, and the `Issuer`/`SecretKeyLength`/`TokenValiditySeconds`/
+  `AllowedClockSkewSeconds`/`QrCodeSize` settings).
+- Documented the real configuration keys: `Enabled`, `TimeStepSeconds`,
+  `WindowSize`, `QrCodeModuleSize`, and `ErrorCorrectionLevel`
+  (`L`/`M`/`Q`/`H`).
+- Documented the `Authenticator` and `QrCode` services and their full surface:
+  `GenerateSecretKey`, `GenerateNewKey`, `GenerateTotpCode`, `ValidateTotp`
+  (incl. the optional `userId` argument and the `TotpValidationResult` shape),
+  `GetSecondsUntilExpiry`, `GetCurrentTimeWindow`, and the QR outputs
+  `GenerateQrCodePng` / `GenerateQrCodeBmp` / `GenerateQrCodeBase64` /
+  `GenerateQrCodeDataUri` / `SaveQrCodeToFile`.
+- Documented the `TwoFactorKey.ProvisioningUri` (`otpauth://`) property, the
+  `SecretKeyGeneratedEvent` / `TotpValidatedEvent` bus events, and the actual
+  health-check behavior (live TOTP key generation).
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

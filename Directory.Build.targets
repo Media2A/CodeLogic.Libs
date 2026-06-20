@@ -26,11 +26,13 @@
   </ItemGroup>
 
   <!--
-    Derive AssemblyVersion from the csproj <Version> — strip any prerelease
-    suffix and keep only Major.Minor.0.0 so every patch loads interchangeably.
+    Derive AssemblyVersion from $(Version) — strip any -prerelease suffix AND
+    any +build-metadata (e.g. 4.6.142-preview+a1b2c3d → 4.6.142) so the value
+    parses as a numeric System.Version, then keep only Major.Minor.0.0 so every
+    patch loads interchangeably.
   -->
   <PropertyGroup>
-    <_CleanVersion>$(Version.Split('-')[0])</_CleanVersion>
+    <_CleanVersion>$(Version.Split('-')[0].Split('+')[0])</_CleanVersion>
     <AssemblyVersion>$([System.Version]::Parse($(_CleanVersion)).Major).$([System.Version]::Parse($(_CleanVersion)).Minor).0.0</AssemblyVersion>
   </PropertyGroup>
 

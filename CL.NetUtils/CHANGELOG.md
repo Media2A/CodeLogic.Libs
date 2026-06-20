@@ -3,6 +3,41 @@
 All notable changes to **CodeLogic.NetUtils** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and the deep docs page to house style: NuGet + MIT
+  badges, blockquote tagline, concise quick-start, feature list, and a complete
+  configuration table covering every `Dnsbl.*` and `GeoIp.*` field.
+- Documented the correct load pattern (`Libraries.LoadAsync<NetUtilsLibrary>()`
+  → `ConfigureAsync` → `StartAsync` → `Libraries.Get`) and both `Dnsbl` /
+  `GeoIp` accessors, with the `HasGeoIp` guard for the optional GeoIP service.
+- Documented both `CheckIpAsync` overloads, the default IPv4/IPv6 blacklist
+  zones, and the per-call `DnsblCheckRequest` (per-call zone lists, timeout, and
+  async allowlist predicate).
+- Documented the `DnsblCheckResult` and `IpLocationResult` records field by
+  field, including `IpLocationResult.IsSuccessful`.
+- Documented GeoIP database resolution and auto-download: `DatabasePath` vs the
+  `{dataDir}/geoip/{DatabaseType}.mmdb` fallback, and `DownloadDatabaseAsync`
+  fetching/extracting the `.mmdb` via HTTP Basic Auth with `AccountId` +
+  `LicenseKey`.
+
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Corrected the README Quick Start to match the real API: `Dnsbl.CheckIpAsync`
+  (was `CheckAsync`) returning `DnsblCheckResult.IsBlacklisted` / `MatchedService`
+  (was `IsListed`), and the async `GeoIp.LookupIpAsync` returning
+  `IpLocationResult.CountryName` / `CityName` (was a synchronous `Lookup`).
+- Documented the `DnsblCheckRequest` overload of `CheckIpAsync` — per-call
+  service lists plus an optional async allowlist predicate (`IsAllowedAsync`).
+- Documented the `DnsblCheckResult` and `IpLocationResult` result records and
+  the `IpLocationResult.IsSuccessful` helper.
+- Documented that local/private addresses are short-circuited as not blacklisted.
+- Added the `GeoIp.DownloadUrl` field to the sample `config.netutils.json`.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

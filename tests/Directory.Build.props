@@ -1,0 +1,12 @@
+<Project>
+  <!--
+    Test projects deliberately do NOT inherit the repo-root Directory.Build.props/targets
+    (composed version, NuGet packaging metadata, CodeLogic PackageReference swap, the
+    InternalLibraryVersion.cs include). Stopping the import chain here keeps every test
+    project a plain, self-contained xUnit assembly that references the library under test
+    via a normal ProjectReference.
+  -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+</Project>

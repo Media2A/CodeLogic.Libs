@@ -131,3 +131,33 @@ public enum SchemaSyncLevel
     /// </summary>
     Full = 3
 }
+
+/// <summary>
+/// Operator-facing schema sync mode. This is the primary knob exposed in configuration;
+/// it maps onto an internal <see cref="SchemaSyncLevel"/> and governs how the CRC-gated
+/// <c>__schema_state</c> sentinel reconciles the database with the entity models.
+/// </summary>
+public enum SyncMode
+{
+    /// <summary>
+    /// Rolling-update development mode. Reconciles aggressively on every boot, dropping
+    /// removed columns/indexes/FKs without asking (maps to <see cref="SchemaSyncLevel.Full"/>).
+    /// Unchanged models are still skipped via their stored CRC.
+    /// </summary>
+    Developer = 0,
+
+    /// <summary>
+    /// Default. Safe/additive only — adds and modifies columns/indexes/FKs but never drops
+    /// (maps to <see cref="SchemaSyncLevel.Safe"/>). When a model change would require a drop,
+    /// the change is deferred and the table is flagged <c>DriftPending</c> for a later Migration pass.
+    /// </summary>
+    Production = 1,
+
+    /// <summary>
+    /// Deliberate one-shot destructive reconcile (maps to <see cref="SchemaSyncLevel.Full"/>,
+    /// with a schema backup taken first). Idempotent: once every model matches its stored CRC and
+    /// no drift is pending, the pass does nothing and logs a warning to switch back to
+    /// <see cref="Production"/>.
+    /// </summary>
+    Migration = 2
+}
