@@ -3,6 +3,22 @@
 All notable changes to **CodeLogic.GitHelper** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Documented the full `GitRepository` workflow in the README: `CloneAsync`,
+  `FetchAsync`, `PullAsync`, `PushAsync`, `ListBranchesAsync`, `CheckoutBranchAsync`,
+  `CommitAsync` (with `FilesToStage`), and `GetCommitLogAsync`.
+- Documented the `ResetHardAsync` and `EnsureUpToDateAsync` sync helpers with examples.
+- Documented the `GitResult<T>` return contract (`IsSuccess` / `Value` / `ErrorMessage`
+  / `Diagnostics`).
+- Documented `GitManager` access via `GetManager()`, including `ExecuteOnAllAsync`,
+  `HealthCheckAsync`, runtime `RegisterRepository` / `UnregisterRepositoryAsync`, and
+  cache control (`GetCacheStats`, `ClearCacheAsync`).
+- Clarified authentication: PAT-only auth sends `x-access-token`, and the SSH key
+  configuration fields are reserved but not currently wired (use HTTPS URLs).
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

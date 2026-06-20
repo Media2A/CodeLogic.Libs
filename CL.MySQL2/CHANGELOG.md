@@ -4,6 +4,81 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## [4.5.3] — 2026-06-20
+
+### Added
+
+- **Three schema sync modes — `SyncMode`.** A new operator-facing knob on each
+  database (`config.mysql.json`) replaces the lower-level `SchemaSyncLevel` /
+  `AllowDestructiveSync` flags (which still work for back-compat — `SyncMode` takes
+  precedence and maps onto them via `EffectiveSyncLevel`).
+
+  | Mode | Behaviour |
+  |---|---|
+  | `Developer` | Aggressive rolling updates — drops removed columns/indexes/FKs on every boot (maps to `Full`). |
+  | `Production` *(default)* | Additive only — adds/modifies, **never drops**. A change that needs a drop is deferred and the table is flagged `DriftPending`. |
+  | `Migration` | Deliberate one-shot destructive reconcile (takes a schema backup first). Idempotent — once every model matches and no drift is pending it does nothing and logs a warning to switch back to `Production`. |
+
+  ```json
+  { "Databases": { "Default": { "SyncMode": "Production" } } }
+  ```
+
+- **CRC sentinel — `__schema_state`.** Each model's desired schema is hashed
+  (CRC) into a per-table row. Sync skips a table **entirely** — no
+  `information_schema` diffing, no DDL — when the stored CRC matches the model
+  *and* the table still exists. New `SyncResult` fields: `Skipped`, `SchemaCrc`,
+  `DriftPending`; new `SchemaSyncStatus` enum (`Synced` / `DriftPending`).
+  Exposed via `mysql.SchemaState` (a `SchemaStateStore`).
+
+- **Cross-node schema-sync lock — `SchemaSyncLock`.** A schema/migration pass
+  serializes across application nodes with MySQL `GET_LOCK`. The winner runs the
+  DDL; peers wait, then find the schema already reconciled (matching CRCs) and do
+  nothing.
+
+- **Batch schema sync + runtime mode override.** `mysql.SyncSchemaAsync(params
+  Type[])` reconciles a whole set of entities as one pass under a single lock,
+  honouring the configured `SyncMode` and the CRC fast-path — the recommended
+  startup entry point. `mysql.SetSyncMode(mode, connectionId)` overrides the mode
+  at runtime (e.g. to flip `Migration` back to `Production` once a pass completes).
+
+- **Imperative migrations.** `IMigration` / `MigrationVersion` / the abstract
+  `Migration` base for data transforms, seeds, and semantic changes the
+  declarative sync can't express. `IMigrationContext` provides `ExecuteAsync`,
+  `QueryAsync<T>`, `ScalarAsync<T>`, and a `SyncTableAsync<T>()` bridge into
+  declarative sync. The `MigrationRunner` applies pending migrations in
+  `MigrationVersion` order over the `__migrations` table, each in its own
+  transaction, under the shared lock, gated by the app version
+  (`CodeLogicEnvironment.AppVersion`), and warns when an applied migration's
+  checksum has drifted. Library surface: `RegisterMigration`,
+  `RegisterMigrationsFrom(assembly)`, `MigrateAsync`, `GetPendingMigrationsAsync`.
+
+  ```csharp
+  public sealed class SeedRoles() : Migration("1.4.0", 1, "Seed default roles")
+  {
+      public override async Task UpAsync(IMigrationContext ctx, CancellationToken ct) =>
+          await ctx.ExecuteAsync("INSERT INTO roles (name) VALUES ('admin'), ('user')", ct: ct);
+  }
+  ```
+
+  > MySQL implicitly commits on DDL, so a migration that mixes `ALTER` with data
+  > changes is not atomic — keep `UpAsync` steps idempotent.
+
+- **Rollback.** `mysql.RollbackAsync(MigrationVersion target)` runs `DownAsync`
+  newest-first for every applied migration above `target`, each in its own
+  transaction. It pre-flights the range and aborts cleanly **before any change**
+  if a migration in range has no `DownAsync` override. Declaratively,
+  `mysql.RestoreSchemaAsync(tableName)` replays a `BackupManager` schema snapshot
+  (DDL only — rows are lost) and clears the table's `__schema_state` row so the
+  next sync reconciles from scratch.
+
+### Fixed
+
+- **Upsert now portable to MariaDB.** `UpsertAsync`, `UpsertManyAsync`, and
+  `UpsertWithIncrementsAsync` emit the portable `... ON DUPLICATE KEY UPDATE col =
+  VALUES(col)` form, which works on **both** MySQL and MariaDB, instead of the
+  MySQL-8.0.19+-only `INSERT ... AS new ... ON DUPLICATE KEY UPDATE` row-alias
+  syntax that MariaDB rejected.
+
 ## [4.5.2] — 2026-06-13
 
 ### Added

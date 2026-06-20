@@ -3,6 +3,24 @@
 All notable changes to **CodeLogic.SystemStats** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.1] — 2026-06-20
+
+### Documentation
+
+- Rewrote the system-monitoring guide and refreshed the README to match the
+  current API: `Result<T>`-returning methods, static info accessors
+  (`GetCpuInfoAsync` / `GetMemoryInfoAsync`), `GetSystemUptimeAsync`,
+  `GetAllProcessesAsync`, and the `CpuInfo` / `CpuStats` / `MemoryInfo` /
+  `MemoryStats` / `ProcessStats` / `SystemSnapshot` record shapes (including
+  MiB/GiB helper properties).
+- Documented the published events (`SystemSnapshotTakenEvent`,
+  `HighCpuUsageEvent`, `HighMemoryUsageEvent`) and which calls trigger threshold
+  checks.
+- Documented result caching behavior, the cached vs. uncached calls, and
+  `ClearCache()` via the `Stats` property.
+- Corrected the configuration reference to the real `config.systemstats.json`
+  fields and value ranges.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

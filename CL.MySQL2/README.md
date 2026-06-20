@@ -298,7 +298,87 @@ await mysql.Query<TicketRecord>()
 await mysql.Query<SnapshotRecord>()
     .Where(s => s.SnapshotUtc < cutoff)
     .DeleteAsync();
+
+// Upsert — INSERT ... ON DUPLICATE KEY UPDATE
+await repo.UpsertAsync(row);
+await repo.UpsertManyAsync(rows);
+await repo.UpsertWithIncrementsAsync(
+    seed,
+    incrementProperties: new[] { nameof(Counter.Hits) });  // col = col + new.col on conflict
 ```
+
+> **Portable upserts** _(fixed in 4.5.3)_ — the upsert methods emit the
+> `VALUES(col)` conflict form, which works on **both MySQL and MariaDB** (the older
+> `INSERT ... AS new` row-alias syntax was MySQL-8.0.19+ only and MariaDB rejected it).
+
+### Schema sync — three modes + CRC fast-path _(new in 4.5.3)_
+
+Record classes are the source of truth. `SyncTableAsync<T>()` creates / alters
+MySQL tables to match; `SyncSchemaAsync(params Type[])` reconciles a whole set in
+one pass under a single cross-node lock (the recommended startup entry point).
+
+```csharp
+await mysql.SyncSchemaAsync(typeof(UserRecord), typeof(OrderRecord), typeof(SnapshotRecord));
+```
+
+A new operator-facing **`SyncMode`** (per database) governs how aggressively sync
+reconciles:
+
+| Mode | Behaviour |
+|---|---|
+| `Developer` | Aggressive rolling updates — drops removed columns/indexes/FKs every boot. |
+| `Production` *(default)* | Additive only — adds/modifies, **never drops**. A change needing a drop is deferred and the table flagged `DriftPending`. |
+| `Migration` | One-shot destructive reconcile (backup first). Idempotent; once everything matches it logs a warning to switch back to `Production`. |
+
+`SyncMode` supersedes the legacy `SchemaSyncLevel` / `AllowDestructiveSync` knobs
+(still honoured for back-compat). Flip the mode at runtime with
+`mysql.SetSyncMode(SyncMode.Production)`.
+
+**CRC sentinel — `__schema_state`.** Each model's desired schema is hashed (CRC)
+into a per-table row. Sync **skips a table entirely** — no `information_schema`
+diffing, no DDL — when the stored CRC matches the model and the table still
+exists. `SyncResult` carries `Skipped`, `SchemaCrc`, and `DriftPending`; inspect
+state via `mysql.SchemaState`.
+
+**Cross-node lock.** Schema/migration passes serialize across nodes via MySQL
+`GET_LOCK` — booting a cluster, only one node runs the DDL while the rest wait and
+then no-op on matching CRCs.
+
+### Imperative migrations _(new in 4.5.3)_
+
+For data transforms, seeds, and semantic changes the declarative sync can't
+express, write an `IMigration` (or subclass the `Migration` base):
+
+```csharp
+public sealed class SeedRoles() : Migration("1.4.0", order: 1, "Seed default roles")
+{
+    public override async Task UpAsync(IMigrationContext ctx, CancellationToken ct) =>
+        await ctx.ExecuteAsync("INSERT INTO roles (name) VALUES ('admin'), ('user')", ct: ct);
+
+    // Override DownAsync to make the migration reversible (default throws).
+    public override async Task DownAsync(IMigrationContext ctx, CancellationToken ct) =>
+        await ctx.ExecuteAsync("DELETE FROM roles WHERE name IN ('admin','user')", ct: ct);
+}
+
+mysql.RegisterMigration(new SeedRoles());        // or RegisterMigrationsFrom(assembly)
+await mysql.MigrateAsync();                       // apply all pending, in order
+var pending = await mysql.GetPendingMigrationsAsync();
+await mysql.RollbackAsync(new MigrationVersion("1.3.0", 0));  // undo everything newer
+```
+
+- Migrations run in `MigrationVersion` (app-version, then order) sequence, each in
+  its own transaction, under the shared schema-sync lock, gated by the app version.
+- `IMigrationContext` exposes `ExecuteAsync`, `QueryAsync<T>`, `ScalarAsync<T>`,
+  plus `SyncTableAsync<T>()` to bring a table to its model shape inside the step.
+- Tracked in the `__migrations` table; an edited-after-apply body is detected by
+  checksum drift and warned about.
+- `RollbackAsync` runs `DownAsync` newest-first and aborts cleanly before any
+  change if a migration in range has no `DownAsync` override. To roll back a
+  declarative table instead, `mysql.RestoreSchemaAsync(tableName)` replays a schema
+  backup (DDL only) and clears its `__schema_state` row.
+
+> MySQL implicitly commits on DDL — a migration mixing `ALTER` with data changes
+> is not atomic, so keep `UpAsync` steps idempotent.
 
 ### Schema sync driven by attributes
 
@@ -339,10 +419,10 @@ Attributes supported:
 | `[RetainDays]` | **new** — background purge job for time-series tables |
 | `[Ignore]` | skip property for schema / read / write |
 
-**Sync levels** (`SchemaSyncLevel`, per database): `None` (off) · `Safe` (default —
-add columns/indexes/FKs, **modify** existing columns, **rename** via `PreviousName`;
-never drops) · `Additive` (Safe + drop indexes/FKs no longer in the model) · `Full`
-(Additive + drop removed columns; dev only).
+**Sync modes** (`SyncMode`, per database — see above): `Production` (default,
+additive) · `Developer` (drops freely) · `Migration` (one-shot destructive). These
+map onto the legacy lower-level `SchemaSyncLevel` (`None` · `Safe` · `Additive` ·
+`Full`), which is retained for back-compat — `SyncMode` takes precedence.
 
 **Renaming a column** _(new in 4.5.2)_ — set `PreviousName` so the rename preserves data:
 
@@ -382,7 +462,8 @@ Two config sections are auto-generated on first run under
 |---|---|---|
 | `Host`, `Port`, `Database`, `Username`, `Password` | — | connection |
 | `EnablePooling`, `MinPoolSize`, `MaxPoolSize`, `ConnectionLifetime` | true/1/100/300s | pool |
-| `SchemaSyncLevel` | `Safe` | None / Safe / Additive / Full |
+| `SyncMode` | `Production` | Developer / Production / Migration — primary schema-sync knob |
+| `SchemaSyncLevel` | `Safe` | Legacy. None / Safe / Additive / Full (superseded by `SyncMode`) |
 | `SlowQueryThresholdMs` | 1000 | slow query logging |
 | `QueryTimeoutMs` | 30000 | default per-query timeout |
 | `MaxBatchInsertSize` | 500 | `InsertManyAsync` chunk size |
@@ -413,6 +494,12 @@ var repo = mysql.GetRepository<AccountRecord>(tx);
 // ... work ...
 await tx.CommitAsync();  // auto-rolls back on dispose if not committed
 ```
+
+## Testing
+
+A console test runner lives at `CL.MySQL2/tests/CL.MySQL2.Tests`. It boots the
+library through the full CodeLogic lifecycle against a local MySQL/MariaDB and
+exercises queries, schema sync, the sync modes, migrations, and rollback.
 
 ## Requirements
 

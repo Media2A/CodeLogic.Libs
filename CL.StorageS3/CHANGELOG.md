@@ -3,6 +3,24 @@
 All notable changes to **CodeLogic.StorageS3** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Rewrote the storage guide and Quick Start to match the real `S3StorageService`
+  API: every operation returns `Result` / `Result<T>` (existence checks return
+  `bool`), uploads/downloads take `UploadOptions` / `DownloadOptions`, and the
+  config file is `config.storages3.json` with camelCase keys and a `connections`
+  array.
+- Documented previously undocumented surface: `GetService` / `DefaultService`
+  connection access, `CopyObjectAsync`, `GetObjectInfoAsync`,
+  `GetObjectStreamAsync`, byte-range and `VersionId` downloads, `UploadOptions`
+  fields (cache-control, content-disposition, storage class, public-read ACL,
+  metadata), paginated `ListObjectsResult`, the `ObjectUploadedEvent` /
+  `ObjectDeletedEvent` / `BucketCreatedEvent` events, low-level
+  `ConnectionManager.GetClient` access, and the per-connection health check
+  (Healthy / Degraded / Unhealthy).
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

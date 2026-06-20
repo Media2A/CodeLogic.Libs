@@ -4,7 +4,11 @@ CL.MySQL2 is a typed, attribute-driven data access library for MySQL, MariaDB,
 and Percona. It replaces hand-rolled SQL with strongly-typed LINQ-shape
 expressions, compiles fast row materializers so you don't pay reflection per
 row, and ships with a working result cache, SQL-side aggregation, and covering
-indexes declared right on your record classes.
+indexes declared right on your record classes. Schema reconciliation runs in one
+of three [sync modes](mysql2-schema.md#sync-modes--syncmode-new-in-453) — gated by
+a CRC sentinel so unchanged tables are skipped — alongside ordered
+[imperative migrations](mysql2-schema.md#imperative-migrations-new-in-453) with
+rollback, all serialized safely across cluster nodes.
 
 > **If you've used an ORM before, this will feel familiar. If you haven't —
 > the mental model is: *describe your tables with attributes on records, write
@@ -118,7 +122,8 @@ CodeLogic writes two config skeletons on first run under
       "MaxBatchInsertSize": 500,
       "MaxInClauseValues": 1000,
       "CaptureExplainOnSlowQuery": true,
-      "DefaultStringSize": 255
+      "DefaultStringSize": 255,
+      "SyncMode": "Production"
     },
     "reporting": {
       "Enabled": true,
@@ -141,7 +146,8 @@ is the *connection ID* you pass to `GetRepository<T>("reporting")` and
 
 | Field | Default | What it controls |
 |---|---|---|
-| `SchemaSyncLevel` | `Safe` | How aggressive `SyncTableAsync` is. See [Schema docs](mysql2-schema.md). |
+| `SyncMode` | `Production` | Primary schema-sync knob: `Developer` / `Production` / `Migration`. See [Schema docs](mysql2-schema.md#sync-modes--syncmode-new-in-453). |
+| `SchemaSyncLevel` | `Safe` | Legacy lower-level knob, superseded by `SyncMode`. See [Schema docs](mysql2-schema.md). |
 | `SlowQueryThresholdMs` | 1000 | Queries slower than this log a warning + fire `SlowQueryEvent`. |
 | `MaxBatchInsertSize` | 500 | Rows per batched `INSERT` in `InsertManyAsync`. |
 | `MaxInClauseValues` | 1000 | Safety cap on `IN (...)` parameter count. |
@@ -187,9 +193,24 @@ QueryBuilder<T>     query      = mysql.Query<T>();
 ConnectionManager   conn       = mysql.ConnectionManager;
 TableSyncService    sync       = mysql.TableSync;
 BackupManager       backups    = mysql.BackupManager;
-MigrationTracker    migrations = mysql.MigrationTracker;
+SchemaStateStore    state      = mysql.SchemaState;       // the __schema_state CRC sentinel
+MigrationRunner     migrations = mysql.Migrations;        // imperative IMigration runner
+MigrationTracker    tracker    = mysql.MigrationTracker;  // low-level __migrations history
 TransactionScope    tx         = await mysql.BeginTransactionAsync();
 ```
+
+Schema reconciliation and migration entry points hang off the same instance:
+
+```csharp
+await mysql.SyncSchemaAsync(typeof(UserRecord), typeof(OrderRecord));  // batch sync, one pass
+mysql.SetSyncMode(SyncMode.Production);                                // runtime mode override
+mysql.RegisterMigration(new SeedRoles());                             // register an IMigration
+await mysql.MigrateAsync();                                            // apply pending migrations
+await mysql.RollbackAsync(new MigrationVersion("1.3.0", 0));          // roll back newer migrations
+```
+
+See [Schema & Migrations](mysql2-schema.md) for the full story on sync modes, the
+CRC fast-path, and imperative migrations.
 
 ---
 

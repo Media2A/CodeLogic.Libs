@@ -71,8 +71,9 @@ var results = await sqlite.GetQueryBuilder<User>("Default")
 ## CL.MySQL2
 
 The most fully-featured of the three. Typed LINQ translated to SQL, compiled row
-materializers, SQL-side aggregation, working query cache, covering indexes, and
-attribute-driven retention.
+materializers, SQL-side aggregation, working query cache, covering indexes,
+attribute-driven retention, three-mode schema sync (with a CRC fast-path and
+cross-node locking), and ordered imperative migrations with rollback.
 
 ```csharp
 await Libraries.LoadAsync<CL.MySQL2.MySQL2Library>();
@@ -95,7 +96,7 @@ var cells = await mysql.Query<SnapshotRecord>()
 - [MySQL2 — Overview & Quick Start](mysql2.md) — setup, config, repository, transactions
 - [MySQL2 — Query Builder](mysql2-queries.md) — filtering, projection, aggregation, `SqlFn`, joins, bulk writes
 - [MySQL2 — Caching & Performance](mysql2-performance.md) — how the cache works, benchmark recipe, slow-query hunting, EXPLAIN
-- [MySQL2 — Schema & Migrations](mysql2-schema.md) — attributes, indexes, retention, sync levels, backups
+- [MySQL2 — Schema & Migrations](mysql2-schema.md) — attributes, indexes, retention, sync modes, CRC sentinel, imperative migrations, rollback, backups
 
 ---
 

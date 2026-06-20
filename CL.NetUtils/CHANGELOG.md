@@ -3,6 +3,21 @@
 All notable changes to **CodeLogic.NetUtils** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Corrected the README Quick Start to match the real API: `Dnsbl.CheckIpAsync`
+  (was `CheckAsync`) returning `DnsblCheckResult.IsBlacklisted` / `MatchedService`
+  (was `IsListed`), and the async `GeoIp.LookupIpAsync` returning
+  `IpLocationResult.CountryName` / `CityName` (was a synchronous `Lookup`).
+- Documented the `DnsblCheckRequest` overload of `CheckIpAsync` — per-call
+  service lists plus an optional async allowlist predicate (`IsAllowedAsync`).
+- Documented the `DnsblCheckResult` and `IpLocationResult` result records and
+  the `IpLocationResult.IsSuccessful` helper.
+- Documented that local/private addresses are short-circuited as not blacklisted.
+- Added the `GeoIp.DownloadUrl` field to the sample `config.netutils.json`.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

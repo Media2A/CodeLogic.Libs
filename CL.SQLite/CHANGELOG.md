@@ -3,6 +3,28 @@
 All notable changes to **CodeLogic.SQLite** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Corrected the README to match the shipping API: the query builder is obtained
+  via `GetQueryBuilder<T>()` (there is no `sqlite.Query<T>()`), all data
+  operations return `Result` / `Result<T>`, and entities require
+  `[SQLiteTable]` / `[SQLiteColumn]` annotations. The previous Quick Start no
+  longer compiled.
+- Documented the configuration as the real `databases` map (per-named-database
+  `databasePath`, `useWAL`, `cacheMode`, `maxPoolSize`, `slowQueryThresholdMs`,
+  timeouts, `skipTableSync`, `enableForeignKeys`), replacing the inaccurate
+  `connections` array with `journalMode`/`poolSize`.
+- Documented previously undocumented user-facing surface that already shipped:
+  the full query builder (`Select`, `GroupBy`, `Sum`/`Max`/`Min`, predicate
+  `DeleteAsync`/`UpdateAsync`, `ToPagedListAsync`), repository `UpsertAsync`,
+  composite-key (`GetByKeysAsync`/`DeleteByKeysAsync`), `GetPagedAsync`, raw SQL
+  (`RawQueryAsync`/`RawExecuteAsync`), attribute-driven schema sync
+  (`SyncTableAsync`/`SyncTablesAsync`/`SyncNamespaceAsync` with
+  `[SQLiteIndex]`/`[SQLiteForeignKey]`), and the `MigrationTracker`. No code
+  changes — documentation only.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed
