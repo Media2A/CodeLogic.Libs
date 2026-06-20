@@ -10,15 +10,11 @@
     <Company>Media2A</Company>
     <Product>CL.TwoFactorAuth</Product>
     <Description>TOTP 2FA with QR code generation for CodeLogic 4 applications</Description>
-<Version>4.5.0</Version>
+<Version>4.5.1</Version>
     <PackageId>CodeLogic.TwoFactorAuth</PackageId>
     <PackageTags>2fa;totp;qrcode;authentication</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
-  </ItemGroup>
-  <ItemGroup>
+  </PropertyGroup>  <ItemGroup>
     <PackageReference Include="Otp.NET" Version="1.*" />
     <PackageReference Include="QRCoder" Version="1.*" />
   </ItemGroup>

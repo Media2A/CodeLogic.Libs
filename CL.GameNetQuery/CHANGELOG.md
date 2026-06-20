@@ -3,6 +3,25 @@
 All notable changes to **CodeLogic.GameNetQuery** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Documented the `CounterStrike2` / `CounterStrikeSource` admin wrappers, including the
+  CS2-only helpers (`UnbanPlayerAsync`, `SetHostnameAsync`, `ExecConfigAsync`, `GetCvarAsync`,
+  `EnableCheatsAsync`/`DisableCheatsAsync`, `SetFriendlyFireAsync`, `SetTeamBalanceAsync`,
+  `SlayPlayerAsync`, `GetStatusRawAsync`) and the shared command subset.
+- Documented the `status` parsers — `ValveStatusParser` (`GetServerAddress`, `GetVersion`,
+  `GetTags`, `GetPlayerList`, `ParseStatus`/`ParseStatusWithPlayers`) and `ValveStatusParserCS2`
+  (`GetPlayerList`, `GetSpawngroups`).
+- Documented the `ValveRconClient(IPAddress, …)` overload, the `ushort` port and `timeoutMs`
+  parameters, and the no-throw failure contracts of the UDP/RCON clients.
+- Documented the full `ServerInfo`, `PlayerInfo`, and `QueryResult` shapes (with `Ok`/`Fail`).
+- Corrected the docs to match the API: `ServerInfo.Hostname` (not `Name`); `QueryResult.DurationMs`
+  (not `LatencyMs`) with non-null `Players`; and `MinecraftQueryClient.QueryServer` is synchronous
+  and returns key/value text read via `GetStatusValue` (not an awaited `QueryResult`).
+- No functional code changes.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

@@ -53,6 +53,107 @@ Full expression translation to SQL — no magic strings in consumer code.
 | IN | `list.Contains(x.Col)` → `x.Col IN (...)` |
 | Null | `x.Col == null` → `IS NULL`; `string.IsNullOrEmpty(x.Col)` too |
 | Nullable | `x.NullableCol.Value` passthrough |
+| Join | `.Join<TRight, TKey, TResult>(leftKey, rightKey, resultSelector)` → typed equi-join |
+| Subquery | `.WhereExists<TInner>((o, i) => …)`, `.WhereIn<TInner, TKey>(col, innerCol, filter?)` |
+
+### Typed JOINs _(new in 4.5.2)_
+
+`Join<TRight, TKey, TResult>` translates a strongly-typed equi-join to real SQL
+with table aliases and a compiled projection — only the columns the result
+selector references cross the wire.
+
+```csharp
+var views = await mysql.Query<Order>()
+    .Where(o => o.Total > 100)                  // carried over, re-qualified to the left table
+    .Join<Customer, long, OrderView>(
+        o => o.CustomerId,                       // left key
+        c => c.Id,                               // right key
+        (o, c) => new OrderView { OrderId = o.Id, Customer = c.Name })
+    .OrderByDescending((o, c) => o.Total)
+    .Take(20)
+    .ToListAsync();
+```
+
+- **Join types:** `Inner` (default), `Left`, `Right`.
+- **Composite keys:** `o => new { o.A, o.B }` matched positionally with `c => new { c.X, c.Y }`.
+- **Fluent surface on the join:** `.Where((l, r) => …)`, `.OrderBy` / `.OrderByDescending`,
+  `.Take` / `.Skip`, and `ToListAsync` / `FirstOrDefaultAsync` / `CountAsync`.
+- **`TRight` is explicit** (`Join<Customer, long, OrderView>`) — it can't be inferred
+  from a lambda parameter.
+- **Not cacheable yet** — the result cache versions entries by a single table, so a
+  join can't be safely invalidated when the *other* table mutates. `.WithCache` /
+  `.SmartCache` are intentionally absent on the join. Apply ordering/paging *after*
+  `.Join`. The raw-string `Join(table, condition, type)` overload is still available
+  for hand-written joins.
+
+### Subquery filters — EXISTS / IN _(new in 4.5.2)_
+
+Correlated and uncorrelated subqueries in the WHERE clause, without dropping to raw SQL:
+
+```csharp
+// Orders that have at least one sent shipment (correlated EXISTS)
+await mysql.Query<Order>()
+    .WhereExists<Shipment>((o, s) => s.OrderId == o.Id && s.Status == "sent")
+    .ToListAsync();
+
+// Orders whose customer is a VIP (IN over a filtered subquery)
+await mysql.Query<Order>()
+    .WhereIn<Customer, long>(o => o.CustomerId, c => c.Id, c => c.IsVip)
+    .ToListAsync();
+```
+
+| Method | SQL |
+|---|---|
+| `WhereExists<TInner>((o, i) => …)` | `EXISTS (SELECT 1 FROM inner WHERE …)` |
+| `WhereNotExists<TInner>(…)` | `NOT EXISTS (…)` |
+| `WhereIn<TInner, TKey>(col, innerCol, filter?)` | `col IN (SELECT innerCol FROM inner [WHERE …])` |
+| `WhereNotIn<TInner, TKey>(…)` | `col NOT IN (…)` |
+
+Subquery filters compose with ordinary `.Where(...)`. They are **not cacheable**
+(the cache can't track the inner table for invalidation) and can't be combined
+with a typed `.Join`. `WhereExists` against the outer query's own table is rejected.
+
+### Raw SQL escape hatch _(new in 4.5.2)_
+
+For the rare query the translator can't express, drop to SQL without losing the
+compiled materializer, observability, or the transient-retry policy:
+
+```csharp
+var rows = await mysql.SqlQueryAsync<UserRecord>(
+    "SELECT * FROM users WHERE country = @c", new() { ["@c"] = "DK" });   // materialized rows
+var n   = await mysql.SqlScalarAsync<long>("SELECT COUNT(*) FROM users"); // single value
+var hit = await mysql.ExecuteSqlAsync("UPDATE users SET active = 0 WHERE last_seen < @t",
+                                      new() { ["@t"] = cutoff });          // affected count
+```
+
+Always pass values via named parameters — never interpolate user input into the SQL.
+Raw queries are not cached.
+
+### Soft deletes _(new in 4.5.2)_
+
+Mark a nullable-`DateTime` column with `[SoftDelete]` and deletes become timestamp
+updates; reads hide the deleted rows automatically.
+
+```csharp
+[Table(Name = "accounts")]
+[SoftDelete(nameof(DeletedUtc))]
+public sealed class Account
+{
+    [Column(DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "deleted_utc", DataType = DataType.DateTime)] public DateTime? DeletedUtc { get; set; }
+}
+
+var repo = mysql.GetRepository<Account>();
+await repo.DeleteAsync(id);                 // soft: sets deleted_utc = UtcNow
+await mysql.Query<Account>().ToListAsync(); // excludes soft-deleted rows
+await mysql.Query<Account>().IncludeDeleted().ToListAsync();  // includes them
+await repo.HardDeleteAsync(id);             // physical DELETE
+```
+
+Auto-filtering covers single-table `mysql.Query<T>()` reads and the repository getters.
+It does **not** apply to joins, subqueries, or the query builder's bulk
+`UpdateAsync`/`DeleteAsync` — those stay raw so you can restore or hard-purge deleted
+rows. To restore: `Query<Account>().Where(a => a.Id == id).UpdateAsync(a => new Account { DeletedUtc = null })`.
 
 ### Projection pushdown
 
@@ -118,6 +219,9 @@ Two things that weren't right before and now are:
 Cache hits and misses publish `CacheHitEvent` / `CacheMissEvent` on the
 CodeLogic event bus.
 
+**Stampede protection** _(new in 4.5.2)_ — concurrent misses on the same cold key
+collapse to a single DB hit (single-flight); the rest await that one execution.
+
 ### Smart cache pools — kept warm in the background _(new in 4.2)_
 
 For pages where a small set of queries should stay hot regardless of read
@@ -172,9 +276,12 @@ How it behaves:
 - **Falls back gracefully** — an unknown pool name on `.SmartCache(name)`
   logs a warning and the query runs uncached. No exception.
 - **Skipped inside transactions** — same rule as `.WithCache`.
-- **Single-node only** — coordination across multiple app instances is on
-  the roadmap. With a Redis-backed `ICacheStore` today, every node will run
-  its own refresh timer; that's safe but wasteful at high node counts.
+- **Multi-node coordination** _(new in 4.5.2)_ — install an `ICacheCoordinator`
+  via `QueryCache.UseCoordinator(...)` so mutations fan out to peers and pool
+  refreshes run single-flight (only the lease-holding node hits the DB). Pair it
+  with a shared `ICacheStore` (Redis). Without a coordinator the default is
+  single-node — every node runs its own refresh timer, which is safe but
+  wasteful at high node counts.
 
 ### Bulk writes / predicate mutations
 
@@ -191,7 +298,87 @@ await mysql.Query<TicketRecord>()
 await mysql.Query<SnapshotRecord>()
     .Where(s => s.SnapshotUtc < cutoff)
     .DeleteAsync();
+
+// Upsert — INSERT ... ON DUPLICATE KEY UPDATE
+await repo.UpsertAsync(row);
+await repo.UpsertManyAsync(rows);
+await repo.UpsertWithIncrementsAsync(
+    seed,
+    incrementProperties: new[] { nameof(Counter.Hits) });  // col = col + new.col on conflict
 ```
+
+> **Portable upserts** _(fixed in 4.5.3)_ — the upsert methods emit the
+> `VALUES(col)` conflict form, which works on **both MySQL and MariaDB** (the older
+> `INSERT ... AS new` row-alias syntax was MySQL-8.0.19+ only and MariaDB rejected it).
+
+### Schema sync — three modes + CRC fast-path _(new in 4.5.3)_
+
+Record classes are the source of truth. `SyncTableAsync<T>()` creates / alters
+MySQL tables to match; `SyncSchemaAsync(params Type[])` reconciles a whole set in
+one pass under a single cross-node lock (the recommended startup entry point).
+
+```csharp
+await mysql.SyncSchemaAsync(typeof(UserRecord), typeof(OrderRecord), typeof(SnapshotRecord));
+```
+
+A new operator-facing **`SyncMode`** (per database) governs how aggressively sync
+reconciles:
+
+| Mode | Behaviour |
+|---|---|
+| `Developer` | Aggressive rolling updates — drops removed columns/indexes/FKs every boot. |
+| `Production` *(default)* | Additive only — adds/modifies, **never drops**. A change needing a drop is deferred and the table flagged `DriftPending`. |
+| `Migration` | One-shot destructive reconcile (backup first). Idempotent; once everything matches it logs a warning to switch back to `Production`. |
+
+`SyncMode` supersedes the legacy `SchemaSyncLevel` / `AllowDestructiveSync` knobs
+(still honoured for back-compat). Flip the mode at runtime with
+`mysql.SetSyncMode(SyncMode.Production)`.
+
+**CRC sentinel — `__schema_state`.** Each model's desired schema is hashed (CRC)
+into a per-table row. Sync **skips a table entirely** — no `information_schema`
+diffing, no DDL — when the stored CRC matches the model and the table still
+exists. `SyncResult` carries `Skipped`, `SchemaCrc`, and `DriftPending`; inspect
+state via `mysql.SchemaState`.
+
+**Cross-node lock.** Schema/migration passes serialize across nodes via MySQL
+`GET_LOCK` — booting a cluster, only one node runs the DDL while the rest wait and
+then no-op on matching CRCs.
+
+### Imperative migrations _(new in 4.5.3)_
+
+For data transforms, seeds, and semantic changes the declarative sync can't
+express, write an `IMigration` (or subclass the `Migration` base):
+
+```csharp
+public sealed class SeedRoles() : Migration("1.4.0", order: 1, "Seed default roles")
+{
+    public override async Task UpAsync(IMigrationContext ctx, CancellationToken ct) =>
+        await ctx.ExecuteAsync("INSERT INTO roles (name) VALUES ('admin'), ('user')", ct: ct);
+
+    // Override DownAsync to make the migration reversible (default throws).
+    public override async Task DownAsync(IMigrationContext ctx, CancellationToken ct) =>
+        await ctx.ExecuteAsync("DELETE FROM roles WHERE name IN ('admin','user')", ct: ct);
+}
+
+mysql.RegisterMigration(new SeedRoles());        // or RegisterMigrationsFrom(assembly)
+await mysql.MigrateAsync();                       // apply all pending, in order
+var pending = await mysql.GetPendingMigrationsAsync();
+await mysql.RollbackAsync(new MigrationVersion("1.3.0", 0));  // undo everything newer
+```
+
+- Migrations run in `MigrationVersion` (app-version, then order) sequence, each in
+  its own transaction, under the shared schema-sync lock, gated by the app version.
+- `IMigrationContext` exposes `ExecuteAsync`, `QueryAsync<T>`, `ScalarAsync<T>`,
+  plus `SyncTableAsync<T>()` to bring a table to its model shape inside the step.
+- Tracked in the `__migrations` table; an edited-after-apply body is detected by
+  checksum drift and warned about.
+- `RollbackAsync` runs `DownAsync` newest-first and aborts cleanly before any
+  change if a migration in range has no `DownAsync` override. To roll back a
+  declarative table instead, `mysql.RestoreSchemaAsync(tableName)` replays a schema
+  backup (DDL only) and clears its `__schema_state` row.
+
+> MySQL implicitly commits on DDL — a migration mixing `ALTER` with data changes
+> is not atomic, so keep `UpAsync` steps idempotent.
 
 ### Schema sync driven by attributes
 
@@ -225,12 +412,28 @@ Attributes supported:
 | Attribute | Purpose |
 |---|---|
 | `[Table]` | table name, engine, charset, collation, comment |
-| `[Column]` | type, size, nullability, default, PK/AI/Unique/Index |
+| `[Column]` | type, size, nullability, default, PK/AI/Unique/Index, `PreviousName` (rename) |
 | `[Index]` | **new** — named, unique, covering (`Include`) |
 | `[CompositeIndex]` | multi-column named index on the class |
 | `[ForeignKey]` | FK with ON DELETE/UPDATE actions |
 | `[RetainDays]` | **new** — background purge job for time-series tables |
 | `[Ignore]` | skip property for schema / read / write |
+
+**Sync modes** (`SyncMode`, per database — see above): `Production` (default,
+additive) · `Developer` (drops freely) · `Migration` (one-shot destructive). These
+map onto the legacy lower-level `SchemaSyncLevel` (`None` · `Safe` · `Additive` ·
+`Full`), which is retained for back-compat — `SyncMode` takes precedence.
+
+**Renaming a column** _(new in 4.5.2)_ — set `PreviousName` so the rename preserves data:
+
+```csharp
+[Column(Name = "email_address", PreviousName = "email")]   // → CHANGE COLUMN email email_address …
+public string EmailAddress { get; set; } = "";
+```
+
+Without `PreviousName`, a rename looks like a new column plus an orphaned old one
+(and a data-losing `DROP` at `Full`). Drop the `PreviousName` once every environment
+has synced.
 
 ### Observability
 
@@ -259,12 +462,15 @@ Two config sections are auto-generated on first run under
 |---|---|---|
 | `Host`, `Port`, `Database`, `Username`, `Password` | — | connection |
 | `EnablePooling`, `MinPoolSize`, `MaxPoolSize`, `ConnectionLifetime` | true/1/100/300s | pool |
-| `SchemaSyncLevel` | `Safe` | None / Safe / Additive / Full |
+| `SyncMode` | `Production` | Developer / Production / Migration — primary schema-sync knob |
+| `SchemaSyncLevel` | `Safe` | Legacy. None / Safe / Additive / Full (superseded by `SyncMode`) |
 | `SlowQueryThresholdMs` | 1000 | slow query logging |
 | `QueryTimeoutMs` | 30000 | default per-query timeout |
 | `MaxBatchInsertSize` | 500 | `InsertManyAsync` chunk size |
 | `MaxInClauseValues` | 1000 | IN-clause safety cap |
 | `PreparedStatementCacheSize` | 256 | per-connection |
+| `TransientRetryCount` | 3 | auto-retry deadlock/lock-wait on single statements (0 = off) |
+| `TransientRetryBaseDelayMs` | 50 | base backoff for transient retries (exponential + jitter) |
 | `N1DetectorThreshold` | 0 (off) | warn on repeated query in request scope |
 | `CaptureExplainOnSlowQuery` | true | attach EXPLAIN to `SlowQueryEvent` |
 | `DefaultStringSize` | 255 | VARCHAR size when no `[Column(Size)]` |
@@ -288,6 +494,12 @@ var repo = mysql.GetRepository<AccountRecord>(tx);
 // ... work ...
 await tx.CommitAsync();  // auto-rolls back on dispose if not committed
 ```
+
+## Testing
+
+A console test runner lives at `CL.MySQL2/tests/CL.MySQL2.Tests`. It boots the
+library through the full CodeLogic lifecycle against a local MySQL/MariaDB and
+exercises queries, schema sync, the sync modes, migrations, and rollback.
 
 ## Requirements
 

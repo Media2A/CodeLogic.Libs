@@ -40,12 +40,15 @@
   </ItemGroup>
 
   <!--
-    Floating dependency range for CodeLogic. Targets in Directory.Build.targets
-    use this property to override the auto-generated dependency in packed nuspec.
+    All CL.* libraries reference CodeLogic from the published NuGet package, never the
+    local sibling source tree — so the public repo is self-contained. Directory.Build.targets
+    injects a PackageReference (replacing the removed ProjectReference) from these values.
+    Override per build with -p:CodeLogicFromNuGet=false / -p:CodeLogicPackageVersion=... .
   -->
   <PropertyGroup>
-    <!-- Range syntax: "[3.2.0, 5.0.0)" means ">= 3.2.0, < 5.0.0" — lets libs work
-         with any 3.x or 4.x CodeLogic, so minor/major bumps don't force a lib re-release. -->
-    <CodeLogicPackageVersion Condition="'$(CodeLogicPackageVersion)' == ''">[3.2.0, 5.0.0)</CodeLogicPackageVersion>
+    <CodeLogicFromNuGet Condition="'$(CodeLogicFromNuGet)' == ''">true</CodeLogicFromNuGet>
+    <!-- Restore/build floor: 4.x carries the API surface these libs use. The release
+         pipeline rewrites each published nuspec's CodeLogic dependency to the supported range. -->
+    <CodeLogicPackageVersion Condition="'$(CodeLogicPackageVersion)' == ''">4.*</CodeLogicPackageVersion>
   </PropertyGroup>
 </Project>

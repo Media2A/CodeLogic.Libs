@@ -443,33 +443,106 @@ Use for computed values and in-memory scratch state.
 
 ---
 
-## Syncing — `SyncTableAsync<T>()`
+## Syncing — `SyncTableAsync<T>()` and `SyncSchemaAsync(...)`
 
 ```csharp
+// One table.
 await mysql.SyncTableAsync<UserRecord>();
+
+// A whole set as one pass under a single cross-node lock — the recommended
+// startup entry point.
+await mysql.SyncSchemaAsync(
+    typeof(UserRecord),
+    typeof(OrderRecord),
+    typeof(SnapshotRecord));
 ```
 
-What it does, depending on `SchemaSyncLevel`:
+`SyncSchemaAsync` returns `Result<Dictionary<string, SyncResult>>` keyed by table
+name; the single-table `SyncTableAsync<T>` returns `Result<SyncResult>`.
 
-| Level | Behavior |
+### Sync modes — `SyncMode` _(new in 4.5.3)_
+
+`SyncMode` is the primary, operator-facing knob (per database). It decides how
+aggressively sync reconciles the live schema with your models:
+
+| Mode | Behavior |
 |---|---|
-| `None` | No-op. Treats the DB as externally managed. |
-| `Safe` (default) | Creates the table if missing; adds missing columns/indexes/FKs; modifies columns to match the model (grow VARCHAR, change default, toggle NULL). **Never drops anything.** |
-| `Additive` | `Safe` + drops indexes and FKs no longer in the model. No column data lost. |
-| `Full` | `Additive` + drops columns no longer in the model. **Dev only.** |
+| `Developer` | Rolling-update dev mode. Reconciles aggressively on every boot — drops removed columns/indexes/FKs without asking. (Maps to `SchemaSyncLevel.Full`.) |
+| `Production` *(default)* | Additive only — adds/modifies columns, indexes and FKs but **never drops**. When a model change would require a drop, the change is deferred and the table is flagged `DriftPending` for a later `Migration` pass. (Maps to `SchemaSyncLevel.Safe`.) |
+| `Migration` | Deliberate one-shot destructive reconcile — takes a schema backup first, then applies the drops `Production` deferred. **Idempotent:** once every model matches its stored CRC and nothing is pending, the pass does nothing and logs a warning to switch back to `Production`. (Maps to `SchemaSyncLevel.Full`.) |
 
 Config per-DB in `config.mysql.json`:
 
 ```json
 {
-  "SchemaSyncLevel": "Safe"
+  "Databases": { "Default": { "SyncMode": "Production" } }
 }
 ```
 
-**Typical setup:**
-- Local dev: `Full` (let the library rebuild as you iterate)
-- Staging: `Additive`
-- Production: `Safe` (or `None` and run migrations yourself)
+**Typical lifecycle:**
+- Local dev: `Developer` — let the library rebuild as you iterate.
+- Production: `Production` — additive, never loses data.
+- When you ship a release that drops columns/indexes: switch one node to
+  `Migration` for a single boot to apply the deferred drops, then switch back to
+  `Production` (the library nags you to in the logs once the pass is clean).
+
+Flip the mode at runtime — no config edit or restart — with:
+
+```csharp
+mysql.SetSyncMode(SyncMode.Production);     // e.g. right after a Migration pass completes
+```
+
+#### Legacy: `SchemaSyncLevel` / `AllowDestructiveSync`
+
+`SyncMode` **supersedes** the older `SchemaSyncLevel` and `AllowDestructiveSync`
+flags, which are retained for back-compat. `SyncMode` takes precedence and maps
+onto an internal `SchemaSyncLevel` via `EffectiveSyncLevel`:
+
+| `SchemaSyncLevel` | Behavior |
+|---|---|
+| `None` | No-op. Treats the DB as externally managed. |
+| `Safe` | Add missing columns/indexes/FKs; modify columns to match the model (grow VARCHAR, change default, toggle NULL); rename via `PreviousName`. **Never drops.** |
+| `Additive` | `Safe` + drops indexes and FKs no longer in the model. No column data lost. |
+| `Full` | `Additive` + drops columns no longer in the model. |
+
+An explicit `SyncMode.Developer` or `SyncMode.Migration` always resolves to
+`Full`. A `Production` config honours the legacy `SchemaSyncLevel` /
+`AllowDestructiveSync` for back-compat — so an old config with
+`SchemaSyncLevel = Full` still behaves destructively, while a fresh `Production`
+default (`Safe`) never drops.
+
+### The CRC fast-path — `__schema_state` _(new in 4.5.3)_
+
+Sync keeps a sentinel table, `__schema_state`, with one row per model holding a
+CRC of that model's desired schema plus its reconciliation status. **Before any
+`information_schema` diffing**, sync hashes the current model and compares it to
+the stored CRC: if the CRC matches, the row is `Synced`, and the table really
+exists, the table is skipped entirely — no diffing, no DDL, no lock contention.
+
+`SyncResult` surfaces what happened:
+
+| Field | Meaning |
+|---|---|
+| `Skipped` | True when the CRC fast-path skipped the table (model unchanged). |
+| `SchemaCrc` | The model's computed schema CRC. |
+| `DriftPending` | True when an additive (`Production`) sync left a destructive change deferred — a later `Migration` pass will complete it. |
+
+The per-table status is one of `SchemaSyncStatus.Synced` / `DriftPending`.
+Inspect the sentinel directly through `mysql.SchemaState` (a `SchemaStateStore`):
+
+```csharp
+foreach (var row in await mysql.SchemaState.GetAllAsync())
+    Console.WriteLine($"{row.TableName,-30} {row.Status}  crc={row.SchemaCrc}");
+```
+
+### Cross-node lock _(new in 4.5.3)_
+
+A schema-sync (or migration) pass serializes across application nodes with MySQL's
+connection-scoped `GET_LOCK`. When a cluster boots, one node wins the lock and
+runs the DDL; the others wait, then find the schema already reconciled (matching
+CRCs) and do nothing. `SyncSchemaAsync` holds a single lock for the whole pass; a
+node that can't get the lock logs a warning and skips — unchanged tables are still
+served via the CRC fast-path.
 
 ### Backups before ALTER
 
@@ -485,47 +558,141 @@ await mysql.SyncTableAsync<UserRecord>(createBackup: false);
 
 ### Syncing many tables at once
 
+Prefer `mysql.SyncSchemaAsync(...)` — it brackets the whole pass in one cross-node
+lock and honours the configured `SyncMode`:
+
 ```csharp
-await mysql.TableSync.SyncTablesAsync(new[]
-{
+await mysql.SyncSchemaAsync(
     typeof(UserRecord),
     typeof(OrderRecord),
-    typeof(SnapshotRecord),
-});
+    typeof(SnapshotRecord));
 ```
 
-Uses a single non-generic core — no per-type reflection thrash.
+The lower-level `mysql.TableSync.SyncTablesAsync(types)` does the same and is what
+`SyncSchemaAsync` delegates to. Both use a single non-generic core — no per-type
+reflection thrash — and the CRC fast-path per table.
 
 ---
 
-## Migration tracking
+## Imperative migrations _(new in 4.5.3)_
 
-`MigrationTracker` records explicit migrations in a `__migrations` table so
-you know what's been applied:
+Declarative sync handles structural shape (columns, indexes, FKs). For everything
+it can't express — data transforms, seed data, semantic changes — write an
+**imperative migration**: an `IMigration` run in order over the `__migrations`
+history table.
+
+### Writing a migration
+
+Subclass the `Migration` base (it supplies `Version` and `Description` from the
+constructor and a `DownAsync` that throws until you override it):
 
 ```csharp
-var applied = await mysql.MigrationTracker.HasMigrationBeenAppliedAsync("2026-03-20-seed-roles");
+using CL.MySQL2.Models;
+using CL.MySQL2.Services;
 
-if (!applied)
+public sealed class SeedRoles() : Migration(appVersion: "1.4.0", order: 1, "Seed default roles")
 {
-    // run your migration SQL / code ...
-    await mysql.MigrationTracker.RecordMigrationAsync(
-        migrationId: "2026-03-20-seed-roles",
-        description: "Seed default role set",
-        checksum: ComputeChecksum(migrationScript));
+    public override async Task UpAsync(IMigrationContext ctx, CancellationToken ct)
+    {
+        await ctx.ExecuteAsync(
+            "INSERT INTO roles (name) VALUES ('admin'), ('user')", ct: ct);
+    }
+
+    // Override DownAsync to make the migration reversible. The default base
+    // implementation throws NotSupportedException.
+    public override async Task DownAsync(IMigrationContext ctx, CancellationToken ct)
+    {
+        await ctx.ExecuteAsync(
+            "DELETE FROM roles WHERE name IN ('admin','user')", ct: ct);
+    }
 }
 ```
 
-This is orthogonal to `SyncTableAsync` — use it for data migrations, seed
-data, or SQL that doesn't flow from your record classes.
+`MigrationVersion` is `(string AppVersion, int Order)`; migrations sort by semantic
+version, then order. A migration is only eligible to run once the application's
+version (`CodeLogicEnvironment.AppVersion`) is at or above its `AppVersion`.
 
-To inspect history:
+### The migration context
+
+`IMigrationContext` runs on the migration's own connection and transaction:
+
+| Member | Purpose |
+|---|---|
+| `ExecuteAsync(sql, parameters?, ct)` | Non-query (INSERT/UPDATE/DELETE/DDL); returns affected rows. |
+| `QueryAsync<T>(sql, parameters?, ct)` | Materializes rows into `T` via the compiled materializer. |
+| `ScalarAsync<T>(sql, parameters?, ct)` | Single value (first column of the first row). |
+| `SyncTableAsync<T>(ct)` | Bridge into declarative sync — brings `T`'s table to its current model shape (CREATE if missing, else additive ALTERs) so the migration can add only the data transform around it. |
+| `Connection` / `Transaction` | The raw `MySqlConnection` / `MySqlTransaction`. |
+
+> **DDL auto-commit caveat.** MySQL implicitly commits on DDL, so a migration that
+> mixes `ALTER` (or `SyncTableAsync`) with data changes is **not atomic**. Keep
+> `UpAsync` steps idempotent, and split heavy DDL and heavy backfill into separate
+> migrations.
+
+### Registering and running
 
 ```csharp
+mysql.RegisterMigration(new SeedRoles());
+// ...or scan an assembly for every concrete IMigration with a parameterless ctor:
+mysql.RegisterMigrationsFrom(typeof(SeedRoles).Assembly);
+
+// Inspect the plan without applying anything.
+foreach (var p in await mysql.GetPendingMigrationsAsync())
+    Console.WriteLine($"{p.Version}  {p.MigrationId}  {p.Description}");
+
+// Apply all pending migrations in order, each in its own transaction, under the
+// shared schema-sync lock. Caller-driven — not auto-run on start.
+var result = await mysql.MigrateAsync();
+if (result.IsSuccess)
+    Console.WriteLine($"Applied {result.Value!.Count} migration(s).");
+```
+
+Migrations are applied in `MigrationVersion` order, gated by the app version, and
+serialized across nodes by the same `GET_LOCK` lock declarative sync uses. If a
+previously-applied migration's body has been edited since it ran, the runner
+detects the checksum drift and logs a warning.
+
+### Rollback
+
+`RollbackAsync` reverts every applied migration whose version is **strictly
+greater** than the target, newest-first, each in its own transaction:
+
+```csharp
+await mysql.RollbackAsync(new MigrationVersion("1.3.0", 0));
+```
+
+It **pre-flights the range and aborts before making any change** if a migration in
+range does not override `DownAsync` — so a half-rolled-back state isn't possible
+because of a missing down step.
+
+### Declarative restore — `RestoreSchemaAsync`
+
+To roll back a *declaratively-synced* table instead of an imperative migration,
+replay a `BackupManager` schema snapshot:
+
+```csharp
+await mysql.RestoreSchemaAsync("orders");                 // latest backup
+await mysql.RestoreSchemaAsync("orders", backupFile);     // a specific snapshot
+```
+
+This drops and recreates the table from the captured DDL and clears its
+`__schema_state` row so the next sync reconciles it from scratch. It is operator-
+driven and **destructive — only DDL was backed up, so the table's rows are lost.**
+
+### Low-level migration tracking
+
+`MigrationTracker` is the `__migrations` history table the runner sits on. You can
+use it directly for ad-hoc bookkeeping:
+
+```csharp
+var applied = await mysql.MigrationTracker.HasMigrationBeenAppliedAsync("2026-03-20-seed-roles");
 var history = await mysql.MigrationTracker.GetAppliedMigrationsAsync();
 foreach (var m in history)
     Console.WriteLine($"{m.AppliedAt:u}  {m.MigrationId}  {m.Description}");
 ```
+
+Most code should prefer the `IMigration` / `MigrateAsync` flow above; the tracker
+is the plumbing underneath it.
 
 ---
 

@@ -3,6 +3,23 @@
 All notable changes to **CodeLogic.Common** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Documented the full public surface of the toolkit in the README. Previously only
+  imaging, hashing, caching, file handling, compression, and networking were listed;
+  the README now also covers **Security** (`Encryption` AES-256-GCM and the `Hashing`
+  PBKDF2/HMAC helpers), **Generators** (`IdGenerator`, `PasswordGenerator`),
+  **Data** (`JsonHelper`), **Conversion** (`TypeConverter`), **Parser** (`CronParser`),
+  **Time** (`DateTimeHelper`), **Strings** (`StringHelper`, `StringValidator`),
+  **Web** (`UrlHelper`, `HtmlHelper`, `HttpClientHelper`, `HttpHeaderHelper`),
+  the full **Networking** set (`NetworkPing`, `NetworkDns`, `SubnetCalculator`,
+  `TraceRoute`), and **Reflection** (`AssemblyHelper`, `ReflectionHelper`).
+- Corrected the Quick Start hashing example: the helper is `Hashing.Sha256(...)`
+  (no `CLU_Hashing.SHA256` type exists), and clarified that GZip, Brotli, and LZ4
+  are all available from `CompressionHelper`. No API changes.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

@@ -21,8 +21,7 @@ public sealed class SmartCachePool : IAsyncDisposable
     /// <summary>How often the pool re-runs every registered factory.</summary>
     public TimeSpan RefreshEvery { get; }
 
-    /// <summary>Deprecated — idle eviction removed. Entries stay warm forever once registered.</summary>
-    [Obsolete("Idle eviction removed. Entries stay warm forever once registered.")]
+    /// <summary>Drop an entry after this many consecutive refresh ticks with no read. Default 10.</summary>
     public int MaxIdleFires { get; }
 
     private readonly ConcurrentDictionary<string, PoolEntry> _entries = new(StringComparer.Ordinal);
@@ -102,6 +101,7 @@ public sealed class SmartCachePool : IAsyncDisposable
             RefreshFactory = refreshFactory,
         });
         Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
+        Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
     }
 
     /// <summary>
@@ -162,10 +162,27 @@ public sealed class SmartCachePool : IAsyncDisposable
         _lastTickUtc = DateTime.UtcNow;
         Interlocked.Increment(ref _ticksFired);
 
+        // Single-flight across nodes: only the lease holder hits the DB this tick. With a
+        // shared cache store (Redis) the others read the entry the leader writes. The
+        // single-node default coordinator always grants the lease, so behaviour is
+        // unchanged off-cluster. Idle accounting below still runs on every node so unread
+        // entries retire locally regardless of who refreshes.
+        var isLeader = await QueryCache.Coordinator
+            .TryAcquireRefreshLeaseAsync(Name, RefreshEvery, ct).ConfigureAwait(false);
+
         foreach (var kv in _entries)
         {
             if (ct.IsCancellationRequested) return;
             var entry = kv.Value;
+
+            var idle = Interlocked.Increment(ref entry.ConsecutiveIdleFires);
+            if (idle > MaxIdleFires)
+            {
+                _entries.TryRemove(kv);
+                continue;
+            }
+
+            if (!isLeader) continue; // a peer owns the refresh this tick
 
             try
             {
@@ -215,6 +232,7 @@ public sealed class SmartCachePool : IAsyncDisposable
         if (_entries.TryGetValue(entryId, out var entry))
         {
             Interlocked.Exchange(ref entry.LastReadUtcTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Exchange(ref entry.ConsecutiveIdleFires, 0);
         }
     }
 
@@ -251,6 +269,7 @@ public sealed class SmartCachePool : IAsyncDisposable
         public required Dictionary<string, object?> Parms { get; init; }
         public required Func<CancellationToken, Task<object?>> RefreshFactory { get; init; }
         public long LastReadUtcTicks;
+        public int ConsecutiveIdleFires;
 
         /// <summary>
         /// Most recent cache key written by this entry's refresh tick.

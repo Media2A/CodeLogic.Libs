@@ -31,7 +31,7 @@ public static class SmartCachePoolRegistry
     public static SmartCachePool Register(
         string name,
         TimeSpan refreshEvery,
-        int maxIdleFires = 3,
+        int maxIdleFires = 10,
         Func<Task>? warmUp = null)
     {
         if (string.IsNullOrWhiteSpace(name))

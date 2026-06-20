@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-<Version>4.5.0</Version>
+<Version>4.5.1</Version>
     <PackageId>CodeLogic.GitHelper</PackageId>
     <PackageTags>git;repository;libgit2</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -16,11 +16,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="LibGit2Sharp" Version="0.30.*" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
-  </ItemGroup>
-  <ItemGroup>
+  </ItemGroup>  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

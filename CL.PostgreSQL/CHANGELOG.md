@@ -3,6 +3,33 @@
 All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Documented the full **query builder** surface: `OrderByDescending`, `Limit`/`Offset`
+  (and `Take`/`Skip` aliases), `Join`, `Select`, `GroupBy`, `WithConnection`,
+  `ToPagedListAsync`, `FirstOrDefaultAsync`, the `CountAsync`/`MaxAsync`/`MinAsync`/
+  `SumAsync`/`AverageAsync` aggregates, and bulk `UpdateAsync`/`DeleteAsync`. Earlier
+  docs listed only `Where`/`OrderBy`/`ToListAsync`.
+- Documented raw SQL access via `QueryRaw()` (`QueryAsync`/`ExecuteAsync`).
+- Documented the **repository** beyond basic CRUD: `InsertManyAsync`, `GetByColumnAsync`,
+  `GetPagedAsync`, `FindAsync`, `IncrementAsync`/`DecrementAsync`, and
+  `RawQueryAsync`/`RawExecuteAsync`.
+- Documented the schema attributes `[Table]`, `[Column]`, `[ForeignKey]`,
+  `[CompositeIndex]`, and `[Ignore]`, plus the `DataType` enum.
+- Documented **table sync / migrations**: `SyncTablesAsync`, `SyncNamespaceAsync`,
+  `SyncResult`, the `BackupManager` (schema backups + cleanup), and the
+  `MigrationTracker` JSON history.
+- Documented **transactions** via `BeginTransactionAsync` (auto-rollback on dispose).
+- Documented previously-omitted configuration: `MaxIdleTime`, `AllowDestructiveSync`,
+  multi-database `connectionId` selection, and runtime `RegisterDatabase`.
+
+### Notes
+
+- The 4.0.0 "repository CRUD only" note is superseded — the query builder
+  (joins, aggregation, paging, bulk update/delete) is present and now documented.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

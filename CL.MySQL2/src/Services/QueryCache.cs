@@ -23,8 +23,13 @@ namespace CL.MySQL2.Services;
 public static class QueryCache
 {
     private static ICacheStore _store = new InProcessCacheStore();
+    private static ICacheCoordinator _coordinator = NullCacheCoordinator.Instance;
     private static readonly ConcurrentDictionary<string, long> _tableVersions =
         new(StringComparer.OrdinalIgnoreCase);
+    // Stampede protection: in-flight factory executions keyed by cache key, so concurrent
+    // misses on the same cold key collapse to a single DB hit instead of a thundering herd.
+    private static readonly ConcurrentDictionary<string, Lazy<Task<object?>>> _inflight =
+        new(StringComparer.Ordinal);
 
     /// <summary>How far from <c>UtcNow</c> a DateTime parameter must be to qualify for
     /// quantization. 30 days covers typical "last N days" windows without catching
@@ -40,6 +45,21 @@ public static class QueryCache
     /// <summary>Replace the underlying store (e.g. with a Redis adapter).</summary>
     public static void UseStore(ICacheStore store) =>
         _store = store ?? throw new ArgumentNullException(nameof(store));
+
+    /// <summary>
+    /// Installs a multi-node <see cref="ICacheCoordinator"/> (e.g. a Redis pub/sub adapter)
+    /// so mutations fan out to peers and smart-cache pools refresh single-flight. Wires the
+    /// coordinator's peer-invalidation callback to the local (non-broadcasting) invalidation
+    /// path. Pair with a shared <see cref="ICacheStore"/> via <see cref="UseStore"/>.
+    /// </summary>
+    public static void UseCoordinator(ICacheCoordinator coordinator)
+    {
+        _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
+        _coordinator.OnInvalidation(InvalidateFromPeer);
+    }
+
+    /// <summary>The active coordinator. Single-node no-op unless <see cref="UseCoordinator"/> ran.</summary>
+    internal static ICacheCoordinator Coordinator => _coordinator;
 
     /// <summary>Apply runtime configuration from <see cref="Configuration.CacheConfiguration"/>.</summary>
     public static void Configure(bool enabled, int maxEntries, int timeQuantizeSeconds)
@@ -84,6 +104,25 @@ public static class QueryCache
         if (connectionId is not null)
             QueryObservability.RecordCacheMiss(connectionId, tableName, cacheKey);
 
+        // Single-flight: the first caller to miss creates the in-flight task; concurrent
+        // callers await the same one rather than each hammering the DB. The factory still
+        // runs at most once per cold key. Failure Results are not written (RunFactory guards).
+        var lazy = _inflight.GetOrAdd(cacheKey, _ =>
+            new Lazy<Task<object?>>(() => RunFactoryAsync(cacheKey, tableName, factory, ttl)));
+        try
+        {
+            var produced = await lazy.Value.ConfigureAwait(false);
+            return (T)produced!;
+        }
+        finally
+        {
+            _inflight.TryRemove(cacheKey, out _);
+        }
+    }
+
+    private static async Task<object?> RunFactoryAsync<T>(
+        string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl)
+    {
         var result = await factory().ConfigureAwait(false);
         if (result is not null && !IsFailureResult(result))
             await _store.SetAsync(cacheKey, result, ttl, tableName).ConfigureAwait(false);
@@ -154,6 +193,27 @@ public static class QueryCache
         if (SmartCachePoolRegistry.HasEntriesForTable(tableName))
             return;
 
+        BumpAndEvict(tableName);
+
+        // Fan the mutation out to peer nodes so they invalidate too. No-op on
+        // the single-node default coordinator. Fire-and-forget — a transport
+        // hiccup must never fail the mutation that triggered it.
+        _ = _coordinator.PublishInvalidationAsync(tableName);
+    }
+
+    /// <summary>
+    /// Applies an invalidation broadcast by a peer node. Same effect as
+    /// <see cref="Invalidate(string)"/> but does NOT re-broadcast (that would loop).
+    /// </summary>
+    private static void InvalidateFromPeer(string tableName)
+    {
+        if (SmartCachePoolRegistry.HasEntriesForTable(tableName))
+            return;
+        BumpAndEvict(tableName);
+    }
+
+    private static void BumpAndEvict(string tableName)
+    {
         _tableVersions.AddOrUpdate(tableName, 1L, (_, v) => v + 1);
         _ = _store.EvictByTableAsync(tableName);
     }

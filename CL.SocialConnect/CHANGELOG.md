@@ -3,6 +3,28 @@
 All notable changes to **CodeLogic.SocialConnect** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] — 2026-06-20
+
+### Documentation
+
+- Corrected the README Quick Start: the text-message helper is
+  `Discord.SendMessageAsync(...)`, not `SendAsync(string, username:)`.
+- Fixed the README configuration example to use PascalCase JSON keys and added the
+  previously omitted `DefaultAvatarUrl`, `AuthEnabled`, `AppId`, and `ApiBaseUrl` fields.
+- Documented previously undocumented user-facing API surface:
+  - Discord `SendAsync(DiscordWebhookMessage)`, `DiscordAllowedMentions`
+    (`.None` / `.All`), and the `Tts` flag.
+  - Steam `SteamProfileService.ClearCache()` and the `GetOwnedGamesAsync`
+    `includeAppInfo` parameter.
+  - Per-call `appId` override on `Auth.AuthenticateAsync`.
+  - `SteamPlayer` (`IsPublic`, `IsInGame`, `AccountCreated`), `SteamPlayerBans`
+    (`HasAnyBan`), and `SteamGame` (`TotalPlaytime`, `RecentPlaytime`, `LastPlayed`,
+    `GetIconUrl`) computed helpers; the `DiscordUser` model.
+  - `HasDiscord` / `HasSteam` / `HasSteamAuth` availability properties and the
+    `InvalidOperationException` thrown when a disabled service is accessed.
+  - Event-bus events `WebhookSentEvent`, `SteamProfileFetchedEvent`, and
+    `SteamAuthenticatedEvent`, and the `SocialError` failure-code enum.
+
 ## [4.5.0] — 2026-05-24
 
 ### Changed

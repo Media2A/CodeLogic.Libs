@@ -122,37 +122,68 @@ public sealed class MySqlDatabaseConfig
     public string Collation { get; set; } = "utf8mb4_unicode_ci";
 
     /// <summary>
-    /// Controls how aggressively the table sync service reconciles the database
-    /// schema with entity definitions. See <see cref="Models.SchemaSyncLevel"/>.
-    /// Default: <see cref="Models.SchemaSyncLevel.Safe"/>.
+    /// Primary schema sync knob. See <see cref="Models.SyncMode"/>.
+    /// Default: <see cref="Models.SyncMode.Production"/> (safe/additive, never drops).
+    /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    ///   <item><b>Developer</b> — aggressive rolling updates; drops removed columns/indexes/FKs without asking (every boot).</item>
+    ///   <item><b>Production</b> — default. Additive only; never drops. A change needing a drop is deferred and flagged <c>DriftPending</c>.</item>
+    ///   <item><b>Migration</b> — deliberate one-shot destructive reconcile (with backup). Idempotent; warns to switch back to Production once done.</item>
+    /// </list>
+    /// In all modes, models whose stored CRC in <c>__schema_state</c> matches the current model are skipped entirely.
+    /// </remarks>
+    [ConfigField(Label = "Sync Mode",
+        Description = "How schema sync reconciles the DB with entity models. Production = additive only, never drops (default). Developer = drops removed columns/indexes without asking. Migration = one-shot destructive reconcile, then switch back to Production.",
+        Group = "Schema Sync", Order = 59)]
+    public SyncMode SyncMode { get; set; } = SyncMode.Production;
+
+    /// <summary>
+    /// Legacy. Lower-level sync aggressiveness. Retained for back-compat; <see cref="SyncMode"/>
+    /// takes precedence and maps onto this. See <see cref="Models.SchemaSyncLevel"/>.
     /// </summary>
     /// <remarks>
     /// <list type="bullet">
     ///   <item><b>None</b> — no sync at all.</item>
-    ///   <item><b>Safe</b> — add missing columns/indexes/FKs + modify existing columns (grow VARCHAR, change default, toggle NULL). Never drops.</item>
+    ///   <item><b>Safe</b> — add missing columns/indexes/FKs + modify existing columns. Never drops.</item>
     ///   <item><b>Additive</b> — Safe + drop indexes and foreign keys no longer in the model.</item>
-    ///   <item><b>Full</b> — Additive + drop columns no longer in the model, and allow DROP TABLE rebuild. Development only.</item>
+    ///   <item><b>Full</b> — Additive + drop columns no longer in the model. Development only.</item>
     /// </list>
     /// </remarks>
-    [ConfigField(Label = "Schema Sync Level",
-        Description = "How aggressively the table sync aligns DB schema with entity models. Safe = additive only (default). Additive = also drops removed indexes/FKs. Full = also drops removed columns (dev only).",
-        Group = "Schema Sync", Order = 60)]
+    [ConfigField(Label = "Schema Sync Level (legacy)",
+        Description = "Deprecated — use Sync Mode. Lower-level knob: Safe = additive only. Additive = also drops removed indexes/FKs. Full = also drops removed columns.",
+        Group = "Schema Sync", Order = 60, Collapsed = true)]
     public SchemaSyncLevel SchemaSyncLevel { get; set; } = SchemaSyncLevel.Safe;
 
     /// <summary>
     /// Legacy flag. When true, sync operates at <see cref="Models.SchemaSyncLevel.Full"/>
-    /// regardless of <see cref="SchemaSyncLevel"/>. Prefer setting SchemaSyncLevel directly.
+    /// regardless of <see cref="SchemaSyncLevel"/>. Prefer setting <see cref="SyncMode"/> directly.
     /// </summary>
     [ConfigField(Label = "Allow Destructive Sync (legacy)",
-        Description = "Deprecated — use Schema Sync Level = Full instead.",
+        Description = "Deprecated — use Sync Mode = Developer/Migration instead.",
         Group = "Schema Sync", Order = 61, Collapsed = true)]
     public bool AllowDestructiveSync { get; set; } = false;
 
     /// <summary>
-    /// Effective sync level, resolving the legacy <see cref="AllowDestructiveSync"/> flag.
+    /// True when this database is configured for the one-shot <see cref="Models.SyncMode.Migration"/> mode.
+    /// </summary>
+    public bool IsMigrationMode => SyncMode == SyncMode.Migration;
+
+    /// <summary>
+    /// Effective internal sync level. An explicitly chosen <see cref="SyncMode.Developer"/> or
+    /// <see cref="SyncMode.Migration"/> always maps to <see cref="SchemaSyncLevel.Full"/>. Otherwise
+    /// (<see cref="SyncMode.Production"/>, the default) the legacy <see cref="SchemaSyncLevel"/> /
+    /// <see cref="AllowDestructiveSync"/> knobs are honored for back-compat — so an old config with
+    /// <c>SchemaSyncLevel = Full</c> still behaves destructively, while a fresh Production config
+    /// (default <see cref="SchemaSyncLevel.Safe"/>) never drops.
     /// </summary>
     public SchemaSyncLevel EffectiveSyncLevel =>
-        AllowDestructiveSync ? SchemaSyncLevel.Full : SchemaSyncLevel;
+        SyncMode switch
+        {
+            SyncMode.Developer => SchemaSyncLevel.Full,
+            SyncMode.Migration => SchemaSyncLevel.Full,
+            _ => AllowDestructiveSync ? SchemaSyncLevel.Full : SchemaSyncLevel
+        };
 
     /// <summary>
     /// Directory for schema backup files.
@@ -203,6 +234,26 @@ public sealed class MySqlDatabaseConfig
         Description = "Number of prepared statements kept per connection.",
         Group = "Performance", Order = 82, Collapsed = true)]
     public int PreparedStatementCacheSize { get; set; } = 256;
+
+    /// <summary>
+    /// How many times to automatically retry a single non-transactional statement that
+    /// fails with a transient error (deadlock 1213, lock-wait timeout 1205). 0 disables.
+    /// Default: 3. Statements inside an explicit transaction scope are never auto-retried —
+    /// the whole transaction must be retried by the caller.
+    /// </summary>
+    [ConfigField(Label = "Transient Retry Count", Min = 0, Max = 10,
+        Description = "Auto-retry deadlock / lock-wait-timeout on single statements. 0 disables.",
+        Group = "Performance", Order = 83, Collapsed = true)]
+    public int TransientRetryCount { get; set; } = 3;
+
+    /// <summary>
+    /// Base backoff in milliseconds for transient retries; the delay grows exponentially
+    /// (base × 2^attempt) with a little random jitter. Default: 50.
+    /// </summary>
+    [ConfigField(Label = "Transient Retry Base Delay (ms)", Min = 0, Max = 10_000,
+        Description = "Base backoff for transient retries; grows exponentially with jitter.",
+        Group = "Performance", Order = 84, Collapsed = true)]
+    public int TransientRetryBaseDelayMs { get; set; } = 50;
 
     /// <summary>
     /// Warn when the same query template fires this many times inside a single request

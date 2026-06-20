@@ -27,6 +27,9 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     // Builder state
     private readonly List<(string Clause, Dictionary<string, object?> Params)> _wheres = [];
+    // Raw predicate expressions, retained so a later typed .Join can re-translate them
+    // with the left-table alias (the pre-translated SQL above is alias-less).
+    private readonly List<Expression<Func<T, bool>>> _wherePredicates = [];
     private readonly List<string> _orderBys = [];
     private readonly List<string> _joins = [];
     private readonly List<string> _groupBys = [];
@@ -35,6 +38,12 @@ public sealed class QueryBuilder<T> where T : class, new()
     private int _paramCounter;
     private TimeSpan? _cacheTtl;
     private string? _smartCachePool;
+    // Set when a subquery filter (EXISTS / IN) is present. Such filters reference a
+    // second table the result cache can't track for invalidation, and they can't be
+    // re-aliased into a typed .Join — both are gated on this flag.
+    private bool _hasSubqueryWhere;
+    // When false (default), reads on a [SoftDelete] entity append `<col> IS NULL`.
+    private bool _includeDeleted;
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
@@ -77,7 +86,122 @@ public sealed class QueryBuilder<T> where T : class, new()
             clause = clause.Replace(kv.Key, newKey);
         }
         _wheres.Add((clause, rekeyed));
+        _wherePredicates.Add(predicate);
         return this;
+    }
+
+    /// <summary>
+    /// Adds a correlated <c>EXISTS</c> filter. The predicate may reference both the outer
+    /// row and a row of <typeparamref name="TInner"/>; any non-correlated condition on the
+    /// inner side belongs in the same predicate. Translates to
+    /// <c>EXISTS (SELECT 1 FROM `inner` WHERE …)</c>.
+    /// <para>Example:
+    /// <code>
+    /// mysql.Query&lt;Order&gt;()
+    ///   .WhereExists&lt;Shipment&gt;((o, s) =&gt; s.OrderId == o.Id &amp;&amp; s.Status == "sent")
+    /// </code></para>
+    /// <para><b>Not supported:</b> EXISTS against the same table as the outer query
+    /// (unqualified inner columns would be ambiguous). A query carrying a subquery filter
+    /// is not cacheable and cannot be turned into a typed <c>.Join</c>.</para>
+    /// </summary>
+    public QueryBuilder<T> WhereExists<TInner>(Expression<Func<T, TInner, bool>> predicate)
+        where TInner : class, new()
+        => AddExists(predicate, negate: false);
+
+    /// <summary>Correlated <c>NOT EXISTS</c> filter. See <see cref="WhereExists{TInner}"/>.</summary>
+    public QueryBuilder<T> WhereNotExists<TInner>(Expression<Func<T, TInner, bool>> predicate)
+        where TInner : class, new()
+        => AddExists(predicate, negate: true);
+
+    private QueryBuilder<T> AddExists<TInner>(Expression<Func<T, TInner, bool>> predicate, bool negate)
+        where TInner : class, new()
+    {
+        var outerTable = GetTableName();
+        var innerTable = EntityMetadata<TInner>.TableName;
+        if (string.Equals(outerTable, innerTable, StringComparison.OrdinalIgnoreCase))
+            throw new NotSupportedException(
+                "WhereExists/WhereNotExists against the same table as the outer query is not " +
+                "supported — unqualified inner columns would be ambiguous.");
+
+        var map = new Dictionary<ParameterExpression, string>
+        {
+            [predicate.Parameters[0]] = outerTable,
+            [predicate.Parameters[1]] = innerTable,
+        };
+        var (cond, parms) = MySqlExpressionVisitor.TranslateMulti(predicate, map);
+        var keyword = negate ? "NOT EXISTS" : "EXISTS";
+        AppendSubqueryWhere($"{keyword} (SELECT 1 FROM `{innerTable}` WHERE {cond})", parms);
+        return this;
+    }
+
+    /// <summary>
+    /// Adds an <c>IN (subquery)</c> filter: <c>outerColumn IN (SELECT innerColumn FROM
+    /// `inner` [WHERE innerFilter])</c>. The inner filter is uncorrelated (it sees only
+    /// <typeparamref name="TInner"/>).
+    /// <para>Example:
+    /// <code>
+    /// mysql.Query&lt;Order&gt;()
+    ///   .WhereIn&lt;Customer, long&gt;(o =&gt; o.CustomerId, c =&gt; c.Id, c =&gt; c.IsVip)
+    /// </code></para>
+    /// <para>A query carrying a subquery filter is not cacheable and cannot be turned into
+    /// a typed <c>.Join</c>.</para>
+    /// </summary>
+    public QueryBuilder<T> WhereIn<TInner, TKey>(
+        Expression<Func<T, TKey>> outerColumn,
+        Expression<Func<TInner, TKey>> innerColumn,
+        Expression<Func<TInner, bool>>? innerFilter = null)
+        where TInner : class, new()
+        => AddIn(outerColumn, innerColumn, innerFilter, negate: false);
+
+    /// <summary>Adds a <c>NOT IN (subquery)</c> filter. See <see cref="WhereIn{TInner, TKey}"/>.</summary>
+    public QueryBuilder<T> WhereNotIn<TInner, TKey>(
+        Expression<Func<T, TKey>> outerColumn,
+        Expression<Func<TInner, TKey>> innerColumn,
+        Expression<Func<TInner, bool>>? innerFilter = null)
+        where TInner : class, new()
+        => AddIn(outerColumn, innerColumn, innerFilter, negate: true);
+
+    private QueryBuilder<T> AddIn<TInner, TKey>(
+        Expression<Func<T, TKey>> outerColumn,
+        Expression<Func<TInner, TKey>> innerColumn,
+        Expression<Func<TInner, bool>>? innerFilter,
+        bool negate) where TInner : class, new()
+    {
+        var outerCol = MySqlExpressionVisitor.TranslateSelector(outerColumn);
+        var innerCol = MySqlExpressionVisitor.TranslateSelector(innerColumn);
+        var innerTable = EntityMetadata<TInner>.TableName;
+
+        var parms = new Dictionary<string, object?>();
+        var whereSql = string.Empty;
+        if (innerFilter is not null)
+        {
+            var (cond, p) = MySqlExpressionVisitor.Translate(innerFilter);
+            whereSql = $" WHERE {cond}";
+            parms = p;
+        }
+
+        var keyword = negate ? "NOT IN" : "IN";
+        AppendSubqueryWhere(
+            $"`{outerCol}` {keyword} (SELECT `{innerCol}` FROM `{innerTable}`{whereSql})", parms);
+        return this;
+    }
+
+    /// <summary>
+    /// Re-keys a subquery fragment's parameters into the outer query's namespace
+    /// (<c>@sub_N</c>) and appends it as a WHERE term. Longer parameter names are replaced
+    /// first so <c>@p1</c> can't clobber a substring of <c>@p10</c>.
+    /// </summary>
+    private void AppendSubqueryWhere(string clause, Dictionary<string, object?> parms)
+    {
+        var rekeyed = new Dictionary<string, object?>();
+        foreach (var kv in parms.OrderByDescending(k => k.Key.Length))
+        {
+            var newKey = $"@sub_{_paramCounter++}";
+            rekeyed[newKey] = kv.Value;
+            clause = clause.Replace(kv.Key, newKey);
+        }
+        _wheres.Add((clause, rekeyed));
+        _hasSubqueryWhere = true;
     }
 
     public QueryBuilder<T> OrderBy<TKey>(Expression<Func<T, TKey>> keySelector)
@@ -110,6 +234,74 @@ public sealed class QueryBuilder<T> where T : class, new()
         };
         _joins.Add($"{keyword} `{table}` ON {condition}");
         return this;
+    }
+
+    /// <summary>
+    /// Strongly-typed equi-join to <typeparamref name="TRight"/>, translated to real SQL with
+    /// table aliases (left <c>t0</c>, right <c>t1</c>) and a compiled projection into
+    /// <typeparamref name="TResult"/> — only the referenced columns are transferred.
+    /// <para>
+    /// Example:
+    /// <code>
+    /// await mysql.Query&lt;Order&gt;()
+    ///     .Where(o =&gt; o.Total &gt; 100)
+    ///     .Join&lt;Customer, long, OrderView&gt;(
+    ///         o =&gt; o.CustomerId,             // left key
+    ///         c =&gt; c.Id,                     // right key
+    ///         (o, c) =&gt; new OrderView { OrderId = o.Id, Customer = c.Name })
+    ///     .OrderByDescending((o, c) =&gt; o.Total)
+    ///     .ToListAsync();
+    /// </code>
+    /// </para>
+    /// <para>
+    /// Keys may be single members or composite anonymous keys
+    /// (<c>o =&gt; new { o.A, o.B }</c> matched with <c>c =&gt; new { c.X, c.Y }</c>).
+    /// <c>.Where(...)</c> calls made before <c>.Join</c> are carried over and re-qualified
+    /// to the left table. Apply ordering and paging <i>after</i> the join via the returned
+    /// <see cref="JoinedQuery{TLeft, TRight, TResult}"/>.
+    /// </para>
+    /// </summary>
+    public JoinedQuery<T, TRight, TResult> Join<TRight, TKey, TResult>(
+        Expression<Func<T, TKey>> leftKey,
+        Expression<Func<TRight, TKey>> rightKey,
+        Expression<Func<T, TRight, TResult>> resultSelector,
+        JoinType type = JoinType.Inner)
+        where TRight : class, new()
+    {
+        if (_orderBys.Count > 0 || _limit.HasValue || _offset.HasValue)
+            throw new InvalidOperationException(
+                "Apply OrderBy / Take / Skip after .Join, on the returned JoinedQuery — " +
+                "ordering and paging set before the join would be silently dropped.");
+        if (_joins.Count > 0 || _groupBys.Count > 0)
+            throw new InvalidOperationException(
+                "Typed .Join cannot be combined with raw .Join(string,...) or .GroupBy on the same query.");
+        if (_hasSubqueryWhere)
+            throw new InvalidOperationException(
+                "Typed .Join cannot be combined with a subquery filter (WhereExists / WhereIn) — " +
+                "express the relationship through the join instead.");
+
+        const string leftAlias = "t0";
+        const string rightAlias = "t1";
+
+        var onClause = JoinTranslator.OnClause(leftKey, leftAlias, rightKey, rightAlias);
+
+        var aliasMap = new Dictionary<ParameterExpression, string>
+        {
+            [resultSelector.Parameters[0]] = leftAlias,
+            [resultSelector.Parameters[1]] = rightAlias,
+        };
+        var columns = JoinTranslator.ProjectionColumns(resultSelector.Body, aliasMap);
+        var projection = ProjectionCompiler.CompileFromColumns<T, TResult>(resultSelector.Body, columns);
+
+        var joined = new JoinedQuery<T, TRight, TResult>(
+            _connectionManager, _logger, _connectionId, _transactionScope, _slowQueryThresholdMs,
+            EntityMetadata<T>.TableName, EntityMetadata<TRight>.TableName, type, onClause, projection);
+
+        // Carry forward any left-side filters applied before the join.
+        foreach (var predicate in _wherePredicates)
+            joined.AddLeftPredicate(predicate);
+
+        return joined;
     }
 
     /// <summary>
@@ -159,6 +351,17 @@ public sealed class QueryBuilder<T> where T : class, new()
     }
 
     /// <summary>
+    /// Includes soft-deleted rows in the results. Only meaningful when the entity carries
+    /// <see cref="Models.SoftDeleteAttribute"/>; otherwise a no-op. Reads exclude soft-deleted
+    /// rows by default.
+    /// </summary>
+    public QueryBuilder<T> IncludeDeleted()
+    {
+        _includeDeleted = true;
+        return this;
+    }
+
+    /// <summary>
     /// Enable result caching for this query. Cached results are automatically invalidated
     /// when any mutation (INSERT/UPDATE/DELETE) occurs on the same table.
     /// Has no effect inside a transaction scope (reads in transactions see uncommitted writes).
@@ -187,8 +390,15 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
-    private bool ShouldCache => (_cacheTtl is not null || _smartCachePool is not null) && _transactionScope is null;
-    private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null;
+    // Plain cache-aside requires an explicit TTL. A query that asked for
+    // SmartCache against an UNREGISTERED pool must fall through to truly
+    // uncached execution (the logged fallback) — including _smartCachePool
+    // here used to send it into the TTL branch and dereference a null
+    // _cacheTtl ("Nullable object must have a value").
+    // Subquery-filtered queries are not cacheable: the cache stamps entries with a single
+    // table's version, so a mutation on the EXISTS/IN inner table couldn't invalidate them.
+    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null && !_hasSubqueryWhere;
+    private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null && !_hasSubqueryWhere;
 
     // ── Terminal methods ──────────────────────────────────────────────────────
 
@@ -236,8 +446,27 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.ToListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.ToListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<List<T>>.Failure(Error.FromException(ex, "mysql.query_failed"));
+        }
+    }
+
+
+    /// <summary>
+    /// Best-effort query description for error logs — the SELECT shape (table +
+    /// WHERE) pinpoints the failing call site even for update/delete variants.
+    /// Never throws.
+    /// </summary>
+    private string DescribeQueryForLog()
+    {
+        try
+        {
+            var (sql, _) = BuildSelectSql();
+            return sql;
+        }
+        catch
+        {
+            try { return $"<table {GetTableName()}>"; } catch { return "<unknown>"; }
         }
     }
 
@@ -306,7 +535,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.FirstOrDefaultAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.FirstOrDefaultAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<T?>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -356,7 +585,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.ToPagedListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.ToPagedListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<PagedResult<T>>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -441,7 +670,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.CountAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.CountAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<long>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -496,7 +725,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.AverageAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.AverageAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<double>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }
@@ -506,7 +735,8 @@ public sealed class QueryBuilder<T> where T : class, new()
         try
         {
             var tableName = GetTableName();
-            var (whereClause, parms) = BuildWhereSql();
+            // Hard delete — bypass the soft-delete read filter so it targets all matching rows.
+            var (whereClause, parms) = BuildWhereSql(applySoftDelete: false);
             var sql = $"DELETE FROM `{tableName}`{whereClause}";
 
             LogQuery(sql);
@@ -521,7 +751,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.DeleteAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.DeleteAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "mysql.delete_failed"));
         }
     }
@@ -554,7 +784,8 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             var rowParam = setExpression.Parameters[0];
             var tableName = GetTableName();
-            var (whereClause, whereParms) = BuildWhereSql();
+            // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
+            var (whereClause, whereParms) = BuildWhereSql(applySoftDelete: false);
             var allParms = new Dictionary<string, object?>(whereParms);
 
             var sets = new List<string>();
@@ -602,7 +833,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync (typed) failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync (typed) failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "mysql.update_failed"));
         }
     }
@@ -633,7 +864,8 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             foreach (var key in updates.Keys) EnsureValidColumn(key);
             var tableName = GetTableName();
-            var (whereClause, whereParms) = BuildWhereSql();
+            // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
+            var (whereClause, whereParms) = BuildWhereSql(applySoftDelete: false);
             var setClauses = string.Join(", ", updates.Keys.Select(k => $"`{k}` = @upd_{k}"));
             var sql = $"UPDATE `{tableName}` SET {setClauses}{whereClause}";
 
@@ -656,7 +888,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder.UpdateAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "mysql.update_failed"));
         }
     }
@@ -684,10 +916,8 @@ public sealed class QueryBuilder<T> where T : class, new()
         return (sql, parms);
     }
 
-    private (string Clause, Dictionary<string, object?> Params) BuildWhereSql()
+    private (string Clause, Dictionary<string, object?> Params) BuildWhereSql(bool applySoftDelete = true)
     {
-        if (_wheres.Count == 0) return (string.Empty, new());
-
         var allParms = new Dictionary<string, object?>();
         var clauses = new List<string>();
 
@@ -698,6 +928,13 @@ public sealed class QueryBuilder<T> where T : class, new()
                 allParms[kv.Key] = kv.Value;
         }
 
+        // Reads on a [SoftDelete] entity hide deleted rows unless .IncludeDeleted() was called.
+        // Writers (UpdateAsync/DeleteAsync) pass applySoftDelete:false so they can still target
+        // or restore soft-deleted rows.
+        if (applySoftDelete && !_includeDeleted && EntityMetadata<T>.SoftDeleteColumn is { } sd)
+            clauses.Add($"`{sd.ColumnName}` IS NULL");
+
+        if (clauses.Count == 0) return (string.Empty, allParms);
         return ($" WHERE {string.Join(" AND ", clauses)}", allParms);
     }
 
@@ -744,7 +981,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] QueryBuilder aggregate failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] QueryBuilder aggregate failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<TResult>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }

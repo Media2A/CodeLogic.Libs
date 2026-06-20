@@ -72,7 +72,12 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         _smartCachePool = smartCachePool;
     }
 
-    private bool ShouldCache => (_cacheTtl is not null || _smartCachePool is not null) && _transactionScope is null;
+    // Plain cache-aside requires an explicit TTL. A query that asked for
+    // SmartCache against an UNREGISTERED pool must fall through to truly
+    // uncached execution (the logged fallback) — including _smartCachePool
+    // here used to send it into the TTL branch and dereference a null
+    // _cacheTtl ("Nullable object must have a value").
+    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null;
     private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null;
 
     public async Task<Result<List<TResult>>> ToListAsync(CancellationToken ct = default)
@@ -116,7 +121,7 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[MySQL2] ProjectedQuery.ToListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[MySQL2] ProjectedQuery.ToListAsync failed: {ex.Message} — query: {_sql}", ex);
             return Result<List<TResult>>.Failure(Error.FromException(ex, "mysql.query_failed"));
         }
     }

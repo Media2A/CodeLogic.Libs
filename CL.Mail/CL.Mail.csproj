@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>13</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-<Version>4.5.0</Version>
+<Version>4.5.1</Version>
     <PackageId>CodeLogic.Mail</PackageId>
     <PackageTags>smtp;imap;email;template</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -17,11 +17,7 @@
   <ItemGroup>
     <PackageReference Include="MailKit" Version="4.*" />
     <PackageReference Include="MimeKit" Version="4.*" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
-  </ItemGroup>
-  <ItemGroup>
+  </ItemGroup>  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

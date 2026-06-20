@@ -16,11 +16,18 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     private readonly Dictionary<string, object?> _parameters = new();
     private int _paramCounter;
     private readonly string _tableAlias;
+    private readonly IReadOnlyDictionary<ParameterExpression, string>? _aliasMap;
     private StorageType _currentComparisonStorageType = StorageType.Default;
 
     public MySqlExpressionVisitor(string tableAlias = "")
     {
         _tableAlias = tableAlias;
+    }
+
+    private MySqlExpressionVisitor(IReadOnlyDictionary<ParameterExpression, string> aliasMap)
+    {
+        _tableAlias = string.Empty;
+        _aliasMap = aliasMap;
     }
 
     /// <summary>
@@ -35,6 +42,22 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
         string tableAlias = "")
     {
         var visitor = new MySqlExpressionVisitor(tableAlias);
+        visitor.Visit(predicate.Body);
+        return (visitor._sql.ToString(), visitor._parameters);
+    }
+
+    /// <summary>
+    /// Translates a multi-source predicate (e.g. a join predicate
+    /// <c>(l, r) =&gt; l.X == r.Y &amp;&amp; l.Active</c>) into a SQL fragment whose column
+    /// references are qualified by the alias mapped to each lambda parameter.
+    /// </summary>
+    /// <param name="predicate">The predicate lambda body to translate.</param>
+    /// <param name="aliasMap">Maps each lambda parameter to its table alias (e.g. l→t0, r→t1).</param>
+    public static (string Sql, Dictionary<string, object?> Parameters) TranslateMulti(
+        LambdaExpression predicate,
+        IReadOnlyDictionary<ParameterExpression, string> aliasMap)
+    {
+        var visitor = new MySqlExpressionVisitor(aliasMap);
         visitor.Visit(predicate.Body);
         return (visitor._sql.ToString(), visitor._parameters);
     }
@@ -127,11 +150,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
         if (node.Expression is ParameterExpression)
         {
             // It's a property/field access on the entity parameter
-            var colName = GetColumnName(node.Member);
-            if (!string.IsNullOrEmpty(_tableAlias))
-                _sql.Append($"`{_tableAlias}`.`{colName}`");
-            else
-                _sql.Append($"`{colName}`");
+            _sql.Append(QualifyColumn(node.Member, node.Expression));
         }
         else
         {
@@ -173,8 +192,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
             && node.Arguments[0] is MemberExpression m
             && m.Expression is ParameterExpression)
         {
-            var col = GetColumnName(m.Member);
-            var colRef = !string.IsNullOrEmpty(_tableAlias) ? $"`{_tableAlias}`.`{col}`" : $"`{col}`";
+            var colRef = QualifyColumn(m.Member, m.Expression);
             _sql.Append($"({colRef} IS NULL OR {colRef} = '')");
             return node;
         }
@@ -184,12 +202,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
             case "Contains" when node.Object is MemberExpression containsMember
                                   && node.Arguments.Count == 1:
             {
-                var col = GetColumnName(containsMember.Member);
-                if (!string.IsNullOrEmpty(_tableAlias))
-                    _sql.Append($"`{_tableAlias}`.`{col}`");
-                else
-                    _sql.Append($"`{col}`");
-
+                _sql.Append(QualifyColumn(containsMember.Member, containsMember.Expression));
                 _sql.Append(" LIKE ");
                 var val = EscapeLikeValue(GetValue(node.Arguments[0]));
                 AddParameter($"%{val}%");
@@ -198,12 +211,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
             case "StartsWith" when node.Object is MemberExpression startMember
                                     && node.Arguments.Count == 1:
             {
-                var col = GetColumnName(startMember.Member);
-                if (!string.IsNullOrEmpty(_tableAlias))
-                    _sql.Append($"`{_tableAlias}`.`{col}`");
-                else
-                    _sql.Append($"`{col}`");
-
+                _sql.Append(QualifyColumn(startMember.Member, startMember.Expression));
                 _sql.Append(" LIKE ");
                 var val = EscapeLikeValue(GetValue(node.Arguments[0]));
                 AddParameter($"{val}%");
@@ -212,12 +220,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
             case "EndsWith" when node.Object is MemberExpression endMember
                                   && node.Arguments.Count == 1:
             {
-                var col = GetColumnName(endMember.Member);
-                if (!string.IsNullOrEmpty(_tableAlias))
-                    _sql.Append($"`{_tableAlias}`.`{col}`");
-                else
-                    _sql.Append($"`{col}`");
-
+                _sql.Append(QualifyColumn(endMember.Member, endMember.Expression));
                 _sql.Append(" LIKE ");
                 var val = EscapeLikeValue(GetValue(node.Arguments[0]));
                 AddParameter($"%{val}");
@@ -281,6 +284,27 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     {
         var attr = member.GetCustomAttribute<ColumnAttribute>();
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : member.Name;
+    }
+
+    /// <summary>
+    /// Builds a backtick-quoted column reference, qualified by the alias mapped to
+    /// <paramref name="owner"/> when a multi-source alias map is in play, or by the single
+    /// <c>_tableAlias</c> otherwise. With no alias the column is left unqualified — exactly
+    /// the single-table behaviour that predates joins.
+    /// </summary>
+    private string QualifyColumn(MemberInfo member, Expression? owner)
+    {
+        var col = GetColumnName(member);
+        var alias = ResolveAlias(owner);
+        return string.IsNullOrEmpty(alias) ? $"`{col}`" : $"`{alias}`.`{col}`";
+    }
+
+    private string ResolveAlias(Expression? owner)
+    {
+        if (_aliasMap is not null && owner is ParameterExpression pe
+            && _aliasMap.TryGetValue(pe, out var alias))
+            return alias;
+        return _tableAlias;
     }
 
     private static MemberExpression? GetEntityMember(Expression expr)

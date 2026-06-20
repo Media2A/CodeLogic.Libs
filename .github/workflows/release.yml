@@ -54,8 +54,9 @@ jobs:
 
           $buildAll = '${{ github.event.inputs.build_all }}' -eq 'true'
 
-          # Find the last release tag to diff against
-          $lastTag = git describe --tags --abbrev=0 2>$null
+          # Find the last release tag to diff against (match tag pattern to branch)
+          $tagPattern = if ('${{ github.ref_name }}' -eq 'prerelease') { 'libs-preview-v*' } else { 'libs-v*' }
+          $lastTag = git describe --tags --abbrev=0 --match $tagPattern 2>$null
 
           if ($buildAll -or -not $lastTag) {
             Write-Host "Building all libraries (build_all=$buildAll, lastTag=$lastTag)"

@@ -13,15 +13,11 @@
     <Company>Media2A</Company>
     <Product>CL.SystemStats</Product>
     <Description>Cross-platform system statistics (CPU, memory, processes, uptime) for CodeLogic 4 — Windows and Linux via /proc</Description>
-<Version>4.5.0</Version>
+<Version>4.5.1</Version>
     <PackageId>CodeLogic.SystemStats</PackageId>
     <PackageTags>cpu;memory;process;monitoring;cross-platform</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
-  </ItemGroup>
-  <!-- Always restore these so the project compiles on all platforms.
+  </PropertyGroup>  <!-- Always restore these so the project compiles on all platforms.
        The Windows provider uses them at runtime; the Linux provider doesn't. -->
   <ItemGroup>
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.*" />
