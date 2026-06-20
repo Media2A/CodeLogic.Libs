@@ -17,11 +17,7 @@
   <ItemGroup>
     <PackageReference Include="MailKit" Version="4.*" />
     <PackageReference Include="MimeKit" Version="4.*" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
-  </ItemGroup>
-  <ItemGroup>
+  </ItemGroup>  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

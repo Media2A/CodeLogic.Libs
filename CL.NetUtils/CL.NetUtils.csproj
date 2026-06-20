@@ -18,11 +18,7 @@
   <ItemGroup>
     <PackageReference Include="MaxMind.GeoIP2" Version="5.*" />
     <PackageReference Include="SharpCompress" Version="0.*" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
-  </ItemGroup>
-  <ItemGroup>
+  </ItemGroup>  <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

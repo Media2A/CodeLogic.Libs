@@ -175,11 +175,11 @@ public sealed class Repository<T> where T : class, new()
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
             var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
             var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
-            // LHS is qualified with the table name to avoid the
-            // "Column 'X' in field list is ambiguous" error MySQL throws when
-            // both the base table and the `AS new` alias have the same column.
-            var updateList = string.Join(", ", insertCols.Select(c => $"`{table}`.`{c.ColumnName}` = new.`{c.ColumnName}`"));
-            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) AS new ON DUPLICATE KEY UPDATE {updateList}; SELECT LAST_INSERT_ID();";
+            // Use the VALUES(col) function for the conflict update — portable across MySQL
+            // (all versions) and MariaDB. The newer `... AS new` row-alias form is MySQL
+            // 8.0.19+ only and is rejected by MariaDB.
+            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = VALUES(`{c.ColumnName}`)"));
+            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) ON DUPLICATE KEY UPDATE {updateList}; SELECT LAST_INSERT_ID();";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -221,7 +221,7 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Bulk-upserts a collection of entities using batched
-    /// <c>INSERT ... AS new ON DUPLICATE KEY UPDATE</c> statements (set semantics).
+    /// <c>INSERT ... ON DUPLICATE KEY UPDATE</c> statements (set semantics).
     /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
     /// Returns the total rows-affected count (MySQL counts 1 for each insert and 2 for each
     /// update, so this is not equal to <c>entities.Count</c>).
@@ -236,8 +236,8 @@ public sealed class Repository<T> where T : class, new()
             var table = EntityMetadata<T>.TableName;
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
             var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
-            // LHS table-qualified to disambiguate from the `AS new` row alias.
-            var updateList = string.Join(", ", insertCols.Select(c => $"`{table}`.`{c.ColumnName}` = new.`{c.ColumnName}`"));
+            // VALUES(col) conflict update — portable across MySQL and MariaDB (see UpsertAsync).
+            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = VALUES(`{c.ColumnName}`)"));
 
             var affected = 0;
             var sw = Stopwatch.StartNew();
@@ -266,7 +266,7 @@ public sealed class Repository<T> where T : class, new()
                         valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
                     }
 
-                    cmd.CommandText = $"INSERT INTO `{table}` ({columnList}) VALUES {string.Join(", ", valueTuples)} AS new ON DUPLICATE KEY UPDATE {updateList};";
+                    cmd.CommandText = $"INSERT INTO `{table}` ({columnList}) VALUES {string.Join(", ", valueTuples)} ON DUPLICATE KEY UPDATE {updateList};";
                     LogQuery(cmd.CommandText);
                     affected += await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
@@ -346,15 +346,13 @@ public sealed class Repository<T> where T : class, new()
             var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
             var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
 
-            // Qualify unaliased column references with the table name. With the
-            // `AS new` row alias, an unqualified `col` in the SET clause is
-            // ambiguous (MySQL: "Column 'X' in field list is ambiguous") because
-            // it could refer to either the existing row or the new row. Prefixing
-            // with the table name pins it to the existing row.
+            // VALUES(col) refers to the would-be-inserted value; a bare `col` on the LHS/RHS is
+            // the existing row. Portable across MySQL and MariaDB (the `AS new` row-alias form is
+            // MySQL 8.0.19+ only). No ambiguity without the alias, so no table qualification needed.
             var updateClauses = incrementCols
-                .Select(c => $"`{table}`.`{c.ColumnName}` = `{table}`.`{c.ColumnName}` + new.`{c.ColumnName}`")
-                .Concat(setCols.Select(c => $"`{table}`.`{c.ColumnName}` = new.`{c.ColumnName}`"));
-            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) AS new ON DUPLICATE KEY UPDATE {string.Join(", ", updateClauses)};";
+                .Select(c => $"`{c.ColumnName}` = `{c.ColumnName}` + VALUES(`{c.ColumnName}`)")
+                .Concat(setCols.Select(c => $"`{c.ColumnName}` = VALUES(`{c.ColumnName}`)"));
+            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) ON DUPLICATE KEY UPDATE {string.Join(", ", updateClauses)};";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();

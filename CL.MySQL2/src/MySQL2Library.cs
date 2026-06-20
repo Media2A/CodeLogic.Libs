@@ -39,8 +39,10 @@ public sealed class MySQL2Library : ILibrary
     };
 
     private LibraryContext? _context;
+    private DatabaseConfiguration? _config;
     private ConnectionManager? _connectionManager;
     private TableSyncService? _tableSyncService;
+    private MigrationRunner? _migrationRunner;
     private MySQL2Strings? _strings;
     private bool _isEnabled;
     private RetentionWorker? _retentionWorker;
@@ -70,6 +72,7 @@ public sealed class MySQL2Library : ILibrary
         context.Logger.Info($"Initializing {Manifest.Name}");
 
         var config = context.Configuration.Get<DatabaseConfiguration>();
+        _config = config;
         _strings = context.Localization.Get<MySQL2Strings>();
 
         var enabledDbs = config.Databases
@@ -126,6 +129,19 @@ public sealed class MySQL2Library : ILibrary
                     _strings?.ConnectionTestFailed ?? "Connection '{0}' test failed",
                     kvp.Key));
             }
+        }
+
+        _migrationRunner = new MigrationRunner(
+            _connectionManager, _tableSyncService.GetMigrationTracker(), context.Logger);
+
+        // Ensure the schema-state sentinel + migration history tables exist on each enabled DB.
+        var stateStore = _tableSyncService.GetSchemaStateStore();
+        var migrationTracker = _tableSyncService.GetMigrationTracker();
+        foreach (var kvp in enabledDbs)
+        {
+            context.Logger.Info($"[MySQL2] [{kvp.Key}] Sync mode: {kvp.Value.SyncMode}");
+            await stateStore.EnsureStateTableAsync(kvp.Key, default).ConfigureAwait(false);
+            await migrationTracker.EnsureMigrationsTableAsync(kvp.Key, default).ConfigureAwait(false);
         }
 
         // Apply cache configuration so queries see the right knobs from the first call.
@@ -196,8 +212,10 @@ public sealed class MySQL2Library : ILibrary
         // Stop every smart-cache pool's background timer.
         await SmartCachePoolRegistry.DisposeAllAsync().ConfigureAwait(false);
 
+        _migrationRunner = null;
         _tableSyncService = null;
         _connectionManager = null;
+        _config = null;
 
         _context?.Logger.Info(_strings?.LibraryStopped ?? "MySQL2 library stopped");
     }
@@ -305,6 +323,16 @@ public sealed class MySQL2Library : ILibrary
     /// <summary>Returns the <see cref="BackupManager"/>.</summary>
     public BackupManager BackupManager =>
         _tableSyncService?.GetBackupManager() ?? throw new InvalidOperationException(
+            $"{Manifest.Name} has not been initialized or is disabled.");
+
+    /// <summary>Returns the <see cref="SchemaStateStore"/> (the <c>__schema_state</c> sentinel).</summary>
+    public SchemaStateStore SchemaState =>
+        _tableSyncService?.GetSchemaStateStore() ?? throw new InvalidOperationException(
+            $"{Manifest.Name} has not been initialized or is disabled.");
+
+    /// <summary>Returns the <see cref="MigrationRunner"/> for explicit/imperative migrations.</summary>
+    public MigrationRunner Migrations =>
+        _migrationRunner ?? throw new InvalidOperationException(
             $"{Manifest.Name} has not been initialized or is disabled.");
 
     /// <summary>
@@ -453,6 +481,105 @@ public sealed class MySQL2Library : ILibrary
     {
         _registeredEntities.Add(typeof(T));
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
+    }
+
+    /// <summary>
+    /// Syncs an entire set of entity types as one pass under a single cross-node lock, honoring
+    /// the configured <see cref="SyncMode"/>. This is the recommended entry point for application
+    /// startup: it applies the CRC fast-path per table and, in <see cref="SyncMode.Migration"/>,
+    /// logs the "already current — switch back to Production" warning once nothing is left to do.
+    /// </summary>
+    /// <param name="entities">The entity types whose tables to reconcile.</param>
+    public Task<Result<Dictionary<string, SyncResult>>> SyncSchemaAsync(params Type[] entities)
+        => SyncSchemaAsync(entities, createBackup: true, connectionId: "Default");
+
+    /// <summary>
+    /// Syncs a set of entity types as one pass. See <see cref="SyncSchemaAsync(Type[])"/>.
+    /// </summary>
+    /// <param name="entities">The entity types whose tables to reconcile.</param>
+    /// <param name="createBackup">Whether to back up schemas before altering existing tables.</param>
+    /// <param name="connectionId">The connection ID to use.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public Task<Result<Dictionary<string, SyncResult>>> SyncSchemaAsync(
+        IEnumerable<Type> entities,
+        bool createBackup = true,
+        string connectionId = "Default",
+        CancellationToken ct = default)
+    {
+        var types = entities as IReadOnlyList<Type> ?? entities.ToList();
+        foreach (var t in types)
+            _registeredEntities.Add(t);
+        return TableSync.SyncTablesAsync(types, createBackup, connectionId, ct);
+    }
+
+    /// <summary>
+    /// Overrides the configured <see cref="SyncMode"/> for a connection at runtime, without editing
+    /// the config file or restarting. Useful to flip <see cref="SyncMode.Migration"/> back to
+    /// <see cref="SyncMode.Production"/> once a one-shot migration pass has completed.
+    /// </summary>
+    public void SetSyncMode(SyncMode mode, string connectionId = "Default")
+    {
+        if (_config?.Databases.TryGetValue(connectionId, out var cfg) == true)
+        {
+            cfg.SyncMode = mode;
+            _context?.Logger.Info($"[MySQL2] [{connectionId}] Sync mode set to {mode} at runtime.");
+        }
+    }
+
+    // ── Imperative migrations ────────────────────────────────────────────────
+
+    /// <summary>Registers a single <see cref="IMigration"/> with the runner.</summary>
+    public MySQL2Library RegisterMigration(IMigration migration)
+    {
+        Migrations.Register(migration);
+        return this;
+    }
+
+    /// <summary>Registers every concrete <see cref="IMigration"/> in the given assembly.</summary>
+    public MySQL2Library RegisterMigrationsFrom(System.Reflection.Assembly assembly)
+    {
+        Migrations.RegisterFrom(assembly);
+        return this;
+    }
+
+    /// <summary>
+    /// Applies all pending imperative migrations (caller-driven; not auto-run on start). See
+    /// <see cref="MigrationRunner.MigrateAsync"/>.
+    /// </summary>
+    public Task<Result<MigrationRunResult>> MigrateAsync(
+        string connectionId = "Default", CancellationToken ct = default)
+        => Migrations.MigrateAsync(connectionId, ct);
+
+    /// <summary>Returns the pending migration plan without applying anything.</summary>
+    public Task<IReadOnlyList<MigrationPlanItem>> GetPendingMigrationsAsync(
+        string connectionId = "Default", CancellationToken ct = default)
+        => Migrations.GetPendingAsync(connectionId, ct);
+
+    /// <summary>
+    /// Rolls back applied migrations newer than <paramref name="target"/>, newest-first. See
+    /// <see cref="MigrationRunner.RollbackAsync"/>.
+    /// </summary>
+    public Task<Result<MigrationRunResult>> RollbackAsync(
+        MigrationVersion target, string connectionId = "Default", CancellationToken ct = default)
+        => Migrations.RollbackAsync(target, connectionId, ct);
+
+    /// <summary>
+    /// Restores a table's schema from a <see cref="BackupManager"/> snapshot (drops and recreates
+    /// the table from captured DDL) and clears its <c>__schema_state</c> row so the next sync pass
+    /// reconciles it from scratch. Operator-driven and destructive — only DDL was backed up, so the
+    /// table's rows are lost. When <paramref name="backupFile"/> is null the latest backup is used.
+    /// </summary>
+    public async Task<Result<bool>> RestoreSchemaAsync(
+        string tableName,
+        string? backupFile = null,
+        string connectionId = "Default",
+        CancellationToken ct = default)
+    {
+        var result = await BackupManager.RestoreTableSchemaAsync(tableName, backupFile, connectionId, ct)
+            .ConfigureAwait(false);
+        if (result.IsSuccess)
+            await SchemaState.RemoveStateAsync(tableName, connectionId, ct).ConfigureAwait(false);
+        return result;
     }
 
     // ── Smart cache pools ────────────────────────────────────────────────────

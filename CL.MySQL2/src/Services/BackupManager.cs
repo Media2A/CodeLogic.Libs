@@ -146,6 +146,76 @@ public sealed class BackupManager
         }
     }
 
+    /// <summary>
+    /// Returns the most recent schema backup file for a table, or null if none exists. Backups are
+    /// named <c>{table}_{yyyyMMdd_HHmmss}.sql</c> in the backup directory.
+    /// </summary>
+    public string? GetLatestBackupFile(string tableName)
+    {
+        var backupDir = GetBackupDirectory();
+        if (!Directory.Exists(backupDir)) return null;
+        return Directory.GetFiles(backupDir, $"{tableName}_*.sql")
+            .OrderByDescending(f => new FileInfo(f).LastWriteTimeUtc)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Restores a table's schema by replaying a backup .sql file: drops the table, then re-runs the
+    /// captured CREATE TABLE. Destructive and operator-driven — the table's data is lost (only the
+    /// DDL was ever backed up). When <paramref name="backupFile"/> is null the latest backup is used.
+    /// </summary>
+    /// <param name="tableName">The table to restore.</param>
+    /// <param name="backupFile">Path to the backup file, or null to use the latest.</param>
+    /// <param name="connectionId">The connection ID to use.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public async Task<Result<bool>> RestoreTableSchemaAsync(
+        string tableName,
+        string? backupFile = null,
+        string connectionId = "Default",
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var file = backupFile ?? GetLatestBackupFile(tableName);
+            if (file is null || !File.Exists(file))
+                return Result<bool>.Failure(Error.Internal(
+                    "mysql.restore_not_found", $"No schema backup found for `{tableName}`."));
+
+            var content = await File.ReadAllTextAsync(file, ct).ConfigureAwait(false);
+            // Keep only the CREATE TABLE statement (strip leading comment lines and trailing ';').
+            var createIdx = content.IndexOf("CREATE TABLE", StringComparison.OrdinalIgnoreCase);
+            if (createIdx < 0)
+                return Result<bool>.Failure(Error.Internal(
+                    "mysql.restore_invalid", $"Backup file for `{tableName}` has no CREATE TABLE statement."));
+            var createSql = content[createIdx..].TrimEnd().TrimEnd(';');
+
+            _logger?.Warning($"[MySQL2] Restoring schema for `{tableName}` from {file} (table will be dropped and recreated).");
+
+            await _connectionManager.ExecuteWithConnectionAsync(async conn =>
+            {
+                await using (var drop = conn.CreateCommand())
+                {
+                    drop.CommandText = $"DROP TABLE IF EXISTS `{tableName}`";
+                    await drop.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                await using (var create = conn.CreateCommand())
+                {
+                    create.CommandText = createSql;
+                    await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                return true;
+            }, connectionId, ct).ConfigureAwait(false);
+
+            _logger?.Info($"[MySQL2] Schema restored for `{tableName}`.");
+            return Result<bool>.Success(true);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[MySQL2] RestoreTableSchemaAsync failed for `{tableName}`: {ex.Message}", ex);
+            return Result<bool>.Failure(Error.FromException(ex, "mysql.restore_failed"));
+        }
+    }
+
     // ── Private helpers ────────────────────────────────────────────────────────
 
     private string GetBackupDirectory() =>

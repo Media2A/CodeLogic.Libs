@@ -11,7 +11,16 @@ using MySqlConnector;
 // and the multi-node cache coordinator. Console runner: prints PASS/FAIL, exits non-zero
 // on any failure.
 
-const string Fw = @"C:\Users\claus.HLAB-DC\AppData\Local\clmaria\clogic";
+// Environment-driven so there are no machine-specific paths. Defaults target a local
+// MySQL/MariaDB on 127.0.0.1:3310 (override via CL_MYSQL2_TEST_* env vars).
+static string Env(string key, string fallback) =>
+    Environment.GetEnvironmentVariable(key) is { Length: > 0 } v ? v : fallback;
+var Fw     = Env("CL_MYSQL2_TEST_ROOT", Path.Combine(Path.GetTempPath(), "cl_mysql2_tests"));
+var dbHost = Env("CL_MYSQL2_TEST_HOST", "127.0.0.1");
+var dbPort = Env("CL_MYSQL2_TEST_PORT", "3310");
+var dbName = Env("CL_MYSQL2_TEST_DB",   "cl_test");
+var dbUser = Env("CL_MYSQL2_TEST_USER", "root");
+var dbPass = Env("CL_MYSQL2_TEST_PASS", "");
 
 int total = 0, fails = 0;
 void Check(string name, bool ok, string? detail = null)
@@ -31,17 +40,17 @@ if (!init.Success) { Console.Error.WriteLine($"init failed: {init.Message}"); re
 
 var cfgDir = Path.Combine(Fw, "Libraries", "CL.MySQL2");
 Directory.CreateDirectory(cfgDir);
-File.WriteAllText(Path.Combine(cfgDir, "config.mysql.json"), """
+File.WriteAllText(Path.Combine(cfgDir, "config.mysql.json"), $$"""
 {
   "databases": {
     "Default": {
       "enabled": true,
-      "host": "127.0.0.1",
-      "port": 3310,
-      "database": "cl_test",
-      "username": "root",
-      "password": "",
-      "schemaSyncLevel": "full",
+      "host": "{{dbHost}}",
+      "port": {{dbPort}},
+      "database": "{{dbName}}",
+      "username": "{{dbUser}}",
+      "password": "{{dbPass}}",
+      "syncMode": "developer",
       "characterSet": "utf8mb4"
     }
   }
@@ -209,6 +218,105 @@ try
     var after = mysql.GetCacheStats().TableVersions.TryGetValue("it_customer", out var av) ? av : 0;
     Check("peer broadcast bumps local version", after == before + 1, $"{before}→{after}");
     Check("peer broadcast does not re-publish", !fake.Published.Contains("it_customer"));
+
+    // ── 10. Sync modes + CRC sentinel ─────────────────────────────────────────
+    Console.WriteLine("\nSync modes + CRC sentinel:");
+    await Exec(mysql, "DROP TABLE IF EXISTS it_modes");
+    await mysql.SchemaState.RemoveStateAsync("it_modes");
+    mysql.SetSyncMode(SyncMode.Production);
+
+    // 10a CRC fast-path: first sync creates, second sync skips via matching CRC.
+    var m1 = (await mysql.SyncTableAsync<ModesV1>(createBackup: false)).Value!;
+    Check("modes v1 created (not skipped)", m1.Success && !m1.Skipped && m1.Operations.Count > 0,
+        $"skipped={m1.Skipped} ops={m1.Operations.Count}");
+    var crc1 = m1.SchemaCrc;
+    var m1b = (await mysql.SyncTableAsync<ModesV1>(createBackup: false)).Value!;
+    Check("modes v1 re-sync skipped via CRC", m1b.Skipped && m1b.SchemaCrc == crc1, $"skipped={m1b.Skipped}");
+    Check("__schema_state row is Synced",
+        (await mysql.SchemaState.GetStateAsync("it_modes"))?.Status == SchemaSyncStatus.Synced);
+
+    // 10b Production never drops + flags DriftPending (model drops 'temp', DB keeps it).
+    await Exec(mysql, "INSERT INTO it_modes (name, temp) VALUES ('x', 'y')");
+    var prod = (await mysql.SyncTableAsync<ModesV2>(createBackup: false)).Value!;
+    var colsModes = await ColumnNames(mysql, "it_modes");
+    Check("Production keeps removed column 'temp'", colsModes.Contains("temp"));
+    Check("Production reports DriftPending", prod.DriftPending);
+    Check("state row is DriftPending",
+        (await mysql.SchemaState.GetStateAsync("it_modes"))?.Status == SchemaSyncStatus.DriftPending);
+
+    // 10c Migration drops the column and self-disables on a second pass.
+    mysql.SetSyncMode(SyncMode.Migration);
+    var mig = (await mysql.SyncSchemaAsync(typeof(ModesV2))).Value!["it_modes"];
+    var colsAfter = await ColumnNames(mysql, "it_modes");
+    Check("Migration drops removed column 'temp'", !colsAfter.Contains("temp"),
+        $"cols=[{string.Join(",", colsAfter)}]");
+    Check("state row back to Synced",
+        (await mysql.SchemaState.GetStateAsync("it_modes"))?.Status == SchemaSyncStatus.Synced);
+    var mig2 = (await mysql.SyncSchemaAsync(typeof(ModesV2))).Value!["it_modes"];
+    Check("Migration re-run is a no-op (skipped)", mig2.Skipped);
+
+    // 10d Developer drops a removed column immediately on a model change.
+    await Exec(mysql, "DROP TABLE IF EXISTS it_dev");
+    await mysql.SchemaState.RemoveStateAsync("it_dev");
+    mysql.SetSyncMode(SyncMode.Developer);
+    await mysql.SyncTableAsync<DevV1>(createBackup: false);
+    var devSync = (await mysql.SyncTableAsync<DevV2>(createBackup: false)).Value!;
+    var devCols = await ColumnNames(mysql, "it_dev");
+    Check("Developer drops removed column immediately",
+        !devCols.Contains("extra") && devSync.Operations.Any(o => o.Contains("DROP COLUMN", StringComparison.OrdinalIgnoreCase)),
+        $"cols=[{string.Join(",", devCols)}] ops=[{string.Join(" | ", devSync.Operations)}]");
+
+    // ── 11. Concurrent schema sync (cross-node lock) ──────────────────────────
+    Console.WriteLine("\nConcurrent schema sync (lock):");
+    await Exec(mysql, "DROP TABLE IF EXISTS it_lock");
+    await mysql.SchemaState.RemoveStateAsync("it_lock");
+    mysql.SetSyncMode(SyncMode.Developer);
+    var t1 = mysql.SyncSchemaAsync(typeof(LockEntity));
+    var t2 = mysql.SyncSchemaAsync(typeof(LockEntity));
+    var rr = await Task.WhenAll(t1, t2);
+    Check("concurrent sync both succeed", rr.All(r => r.IsSuccess));
+    var lockExists = (await mysql.SqlScalarAsync<long>(
+        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='it_lock'")).Value;
+    Check("it_lock created exactly once", lockExists == 1, $"got {lockExists}");
+
+    // ── 12. Imperative migrations ─────────────────────────────────────────────
+    Console.WriteLine("\nMigrations:");
+    await Exec(mysql, "DROP TABLE IF EXISTS it_mig");
+    await Exec(mysql, "DELETE FROM __migrations WHERE MigrationId LIKE '1.0.0/%'");
+    mysql.RegisterMigration(new CreateMigTable());
+    mysql.RegisterMigration(new SeedMig());
+
+    var pending = await mysql.GetPendingMigrationsAsync();
+    Check("2 migrations pending", pending.Count == 2, $"got {pending.Count}");
+    Check("pending ordered by version", pending.Count == 2 && pending[0].Version.Order == 1 && pending[1].Version.Order == 2);
+
+    var run = (await mysql.MigrateAsync()).Value!;
+    Check("both migrations applied", run.Count == 2, $"got {run.Count}");
+    var migCount = (await mysql.SqlScalarAsync<long>("SELECT COUNT(*) FROM it_mig")).Value;
+    Check("migration applied schema + data (2 rows)", migCount == 2, $"got {migCount}");
+    var run2 = (await mysql.MigrateAsync()).Value!;
+    Check("re-run migrations is a no-op", run2.Count == 0, $"got {run2.Count}");
+    Check("no pending after apply", (await mysql.GetPendingMigrationsAsync()).Count == 0);
+
+    // ── 13. Rollback ──────────────────────────────────────────────────────────
+    Console.WriteLine("\nRollback:");
+    var rb = await mysql.RollbackAsync(new MigrationVersion("1.0.0", 0));
+    Check("rollback succeeds", rb.IsSuccess, rb.Error?.Message);
+    Check("rolled back 2 (newest-first)", rb.Value!.Count == 2);
+    var migDropped = (await mysql.SqlScalarAsync<long>(
+        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='it_mig'")).Value;
+    Check("it_mig dropped by rollback", migDropped == 0, $"got {migDropped}");
+    Check("both pending again after rollback", (await mysql.GetPendingMigrationsAsync()).Count == 2);
+
+    // 13b A migration without DownAsync aborts the rollback cleanly (no partial changes).
+    await mysql.MigrateAsync();                       // re-apply the two reversible ones
+    mysql.RegisterMigration(new NoDownMig());         // 1.0.0/003 — no DownAsync override
+    await mysql.MigrateAsync();                        // apply the no-down migration
+    var rb2 = await mysql.RollbackAsync(new MigrationVersion("1.0.0", 0));
+    Check("rollback aborts when a migration has no DownAsync", rb2.IsFailure, "expected failure");
+    var migStillThere = (await mysql.SqlScalarAsync<long>(
+        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='it_mig'")).Value;
+    Check("no partial rollback — it_mig still present", migStillThere == 1, $"got {migStillThere}");
 }
 finally
 {
@@ -295,6 +403,81 @@ public class RenameV2
 {
     [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
     [Column(Name = "email_address", DataType = DataType.VarChar, Size = 200, PreviousName = "email", NotNull = true)] public string EmailAddress { get; set; } = "";
+}
+
+// ── entities for sync-mode / CRC tests ─────────────────────────────────────────
+[Table(Name = "it_modes")]
+public class ModesV1
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "name", DataType = DataType.VarChar, Size = 50, NotNull = true)] public string Name { get; set; } = "";
+    [Column(Name = "temp", DataType = DataType.VarChar, Size = 50)] public string? Temp { get; set; }
+}
+
+[Table(Name = "it_modes")]
+public class ModesV2
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "name", DataType = DataType.VarChar, Size = 50, NotNull = true)] public string Name { get; set; } = "";
+}
+
+[Table(Name = "it_dev")]
+public class DevV1
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "name", DataType = DataType.VarChar, Size = 50, NotNull = true)] public string Name { get; set; } = "";
+    [Column(Name = "extra", DataType = DataType.VarChar, Size = 50)] public string? Extra { get; set; }
+}
+
+[Table(Name = "it_dev")]
+public class DevV2
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "name", DataType = DataType.VarChar, Size = 50, NotNull = true)] public string Name { get; set; } = "";
+}
+
+[Table(Name = "it_lock")]
+public class LockEntity
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "val", DataType = DataType.VarChar, Size = 50)] public string? Val { get; set; }
+}
+
+[Table(Name = "it_mig")]
+public class MigEntity
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "label", DataType = DataType.VarChar, Size = 50, NotNull = true)] public string Label { get; set; } = "";
+}
+
+// ── migrations for the imperative-runner tests ─────────────────────────────────
+public sealed class CreateMigTable : Migration
+{
+    public CreateMigTable() : base("1.0.0", 1, "create it_mig and seed one row") { }
+    public override async Task UpAsync(IMigrationContext ctx, CancellationToken ct)
+    {
+        await ctx.SyncTableAsync<MigEntity>(ct);
+        await ctx.ExecuteAsync("INSERT INTO it_mig (label) VALUES ('from-up')", ct: ct);
+    }
+    public override Task DownAsync(IMigrationContext ctx, CancellationToken ct) =>
+        ctx.ExecuteAsync("DROP TABLE IF EXISTS it_mig", ct: ct);
+}
+
+public sealed class SeedMig : Migration
+{
+    public SeedMig() : base("1.0.0", 2, "seed an extra row") { }
+    public override Task UpAsync(IMigrationContext ctx, CancellationToken ct) =>
+        ctx.ExecuteAsync("INSERT INTO it_mig (label) VALUES ('seed')", ct: ct);
+    public override Task DownAsync(IMigrationContext ctx, CancellationToken ct) =>
+        ctx.ExecuteAsync("DELETE FROM it_mig WHERE label = 'seed'", ct: ct);
+}
+
+public sealed class NoDownMig : Migration
+{
+    public NoDownMig() : base("1.0.0", 3, "irreversible insert") { }
+    public override Task UpAsync(IMigrationContext ctx, CancellationToken ct) =>
+        ctx.ExecuteAsync("INSERT INTO it_mig (label) VALUES ('nodown')", ct: ct);
+    // No DownAsync override → rollback unsupported.
 }
 
 // ── fake coordinator for the multi-node test ───────────────────────────────────

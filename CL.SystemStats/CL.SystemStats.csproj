@@ -17,11 +17,7 @@
     <PackageId>CodeLogic.SystemStats</PackageId>
     <PackageTags>cpu;memory;process;monitoring;cross-platform</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="../../CodeLogic/src/CodeLogic.csproj" />
-  </ItemGroup>
-  <!-- Always restore these so the project compiles on all platforms.
+  </PropertyGroup>  <!-- Always restore these so the project compiles on all platforms.
        The Windows provider uses them at runtime; the Linux provider doesn't. -->
   <ItemGroup>
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.*" />

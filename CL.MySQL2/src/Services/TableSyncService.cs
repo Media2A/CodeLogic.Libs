@@ -3,6 +3,7 @@ using CL.MySQL2.Configuration;
 using CL.MySQL2.Core;
 using CL.MySQL2.Events;
 using CL.MySQL2.Models;
+using CodeLogic;
 using CodeLogic.Core.Events;
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
@@ -23,7 +24,9 @@ public sealed class TableSyncService
     private readonly SchemaAnalyzer _analyzer;
     private readonly MigrationTracker _migrationTracker;
     private readonly BackupManager _backupManager;
+    private readonly SchemaStateStore _stateStore;
     private readonly Func<string, MySqlDatabaseConfig?>? _configLookup;
+    private readonly string _appVersion;
 
     /// <param name="connectionManager">The connection manager to use for database access.</param>
     /// <param name="dataDirectory">Base data directory (for backup and migration storage).</param>
@@ -48,11 +51,18 @@ public sealed class TableSyncService
         _analyzer = new SchemaAnalyzer(logger);
         _migrationTracker = new MigrationTracker(connectionManager, logger);
         _backupManager = new BackupManager(connectionManager, dataDirectory, logger);
+        _stateStore = new SchemaStateStore(connectionManager, logger);
         _configLookup = configLookup;
+        _appVersion = CodeLogicEnvironment.AppVersion;
     }
 
     private SchemaSyncLevel ResolveLevel(string connectionId) =>
         _configLookup?.Invoke(connectionId)?.EffectiveSyncLevel ?? SchemaSyncLevel.Safe;
+
+    private static bool IsDestructive(string stmt) =>
+        stmt.Contains("DROP COLUMN", StringComparison.OrdinalIgnoreCase)
+        || stmt.Contains("DROP INDEX", StringComparison.OrdinalIgnoreCase)
+        || stmt.Contains("DROP FOREIGN KEY", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Synchronizes the table schema for entity type <typeparamref name="T"/>.
@@ -76,15 +86,27 @@ public sealed class TableSyncService
         Type entityType,
         bool createBackup = true,
         string connectionId = "Default",
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool lockHeld = false)
     {
         var tableName = SchemaAnalyzer.GetTableName(entityType);
         var sw = Stopwatch.StartNew();
         var operations = new List<string>();
         var errors = new List<string>();
-        var level = ResolveLevel(connectionId);
+        var cfg = _configLookup?.Invoke(connectionId);
+        var level = cfg?.EffectiveSyncLevel ?? SchemaSyncLevel.Safe;
+        var mode = cfg?.SyncMode ?? SyncMode.Production;
 
-        _logger?.Info($"[MySQL2] Syncing table `{tableName}` (level: {level})");
+        SyncResult SkipResult(string? crc) => new()
+        {
+            Success = true,
+            TableName = tableName,
+            Operations = operations,
+            Errors = errors,
+            Duration = sw.Elapsed,
+            Skipped = true,
+            SchemaCrc = crc
+        };
 
         try
         {
@@ -92,75 +114,145 @@ public sealed class TableSyncService
             {
                 operations.Add($"-- sync skipped (SchemaSyncLevel.None) for `{tableName}`");
                 sw.Stop();
-                return Result<SyncResult>.Success(new SyncResult
+                return Result<SyncResult>.Success(SkipResult(null));
+            }
+
+            // ── CRC fast-path ── consult the sentinel before any information_schema diffing.
+            var modelCrc = _analyzer.ComputeSchemaCrc(entityType);
+            var state = await _stateStore.GetStateAsync(tableName, connectionId, ct).ConfigureAwait(false);
+
+            // Skip only when the CRC matches, the row is Synced, AND the table really exists — a
+            // single cheap existence check guards against the table being dropped out-of-band.
+            async Task<bool> CanSkipAsync() =>
+                state is not null
+                && state.SchemaCrc == modelCrc
+                && state.Status == SchemaSyncStatus.Synced
+                && await TableExistsAsync(tableName, connectionId, ct).ConfigureAwait(false);
+
+            if (await CanSkipAsync().ConfigureAwait(false))
+            {
+                sw.Stop();
+                _logger?.Debug($"[MySQL2] Table `{tableName}` unchanged (crc {modelCrc}) — skipped");
+                return Result<SyncResult>.Success(SkipResult(modelCrc));
+            }
+
+            _logger?.Info($"[MySQL2] Syncing table `{tableName}` (mode: {mode}, level: {level}, crc {modelCrc})");
+
+            // Work is needed — serialize across nodes unless the caller already holds the lock.
+            SchemaSyncLock? ownLock = null;
+            if (!lockHeld)
+            {
+                ownLock = await SchemaSyncLock.AcquireAsync(_connectionManager, connectionId, logger: _logger, ct: ct)
+                    .ConfigureAwait(false);
+                if (!ownLock.Acquired)
+                {
+                    await ownLock.DisposeAsync().ConfigureAwait(false);
+                    sw.Stop();
+                    _logger?.Warning($"[MySQL2] Skipped sync of `{tableName}` — another node holds the schema-sync lock.");
+                    return Result<SyncResult>.Success(SkipResult(modelCrc));
+                }
+                // Re-read under the lock — a peer may have just reconciled this table.
+                state = await _stateStore.GetStateAsync(tableName, connectionId, ct).ConfigureAwait(false);
+                if (await CanSkipAsync().ConfigureAwait(false))
+                {
+                    await ownLock.DisposeAsync().ConfigureAwait(false);
+                    sw.Stop();
+                    return Result<SyncResult>.Success(SkipResult(modelCrc));
+                }
+            }
+
+            try
+            {
+                var tableExists = await TableExistsAsync(tableName, connectionId, ct).ConfigureAwait(false);
+                var status = SchemaSyncStatus.Synced;
+                var driftPending = false;
+
+                if (!tableExists)
+                {
+                    // CREATE TABLE
+                    var createSql = _analyzer.GenerateCreateTable(entityType);
+                    await ExecuteSqlAsync(createSql, connectionId, ct).ConfigureAwait(false);
+                    operations.Add($"CREATE TABLE `{tableName}`");
+                    _logger?.Info($"[MySQL2] Created table `{tableName}`");
+                }
+                else
+                {
+                    // Backup before altering — always in the deliberate Migration mode; otherwise
+                    // only when the caller asked. Developer's rolling drops skip the backup noise.
+                    if (createBackup || mode == SyncMode.Migration)
+                    {
+                        var backupResult = await _backupManager.BackupTableSchemaAsync(tableName, connectionId, ct)
+                            .ConfigureAwait(false);
+                        if (backupResult.IsFailure)
+                            _logger?.Warning($"[MySQL2] Schema backup failed for `{tableName}`: {backupResult.Error?.Message}");
+                    }
+
+                    // ALTER TABLE as needed at the mode's level.
+                    var alterStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
+                        await _analyzer.GenerateAlterStatementsAsync(entityType, conn, level, ct).ConfigureAwait(false),
+                        connectionId, ct).ConfigureAwait(false);
+
+                    foreach (var stmt in alterStatements)
+                    {
+                        await ExecuteSqlAsync(stmt, connectionId, ct).ConfigureAwait(false);
+                        operations.Add(stmt);
+                        _logger?.Debug($"[MySQL2] Applied: {stmt}");
+                    }
+
+                    // Production (Safe) never drops — detect whether a destructive change is still
+                    // owed so a later Migration pass knows to act even though the CRC now matches.
+                    if (level < SchemaSyncLevel.Full)
+                    {
+                        var fullStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
+                            await _analyzer.GenerateAlterStatementsAsync(entityType, conn, SchemaSyncLevel.Full, ct).ConfigureAwait(false),
+                            connectionId, ct).ConfigureAwait(false);
+                        if (fullStatements.Any(IsDestructive))
+                        {
+                            driftPending = true;
+                            status = SchemaSyncStatus.DriftPending;
+                            _logger?.Warning(
+                                $"[MySQL2] Table `{tableName}`: destructive change(s) deferred under {mode} mode — run Migration mode to complete.");
+                        }
+                    }
+
+                    if (operations.Count > 0)
+                        _logger?.Info($"[MySQL2] Updated table `{tableName}` ({operations.Count} changes)");
+                    else
+                        _logger?.Debug($"[MySQL2] Table `{tableName}` is up to date");
+                }
+
+                // Record the new CRC + status — only after DDL succeeded. MySQL auto-commits DDL,
+                // so a half-applied table is intentionally left without an updated CRC and retried.
+                await _stateStore.UpsertStateAsync(
+                    tableName, modelCrc, status, mode.ToString(), _appVersion,
+                    _analyzer.GenerateCreateTable(entityType), connectionId, ct).ConfigureAwait(false);
+
+                sw.Stop();
+                var syncResult = new SyncResult
                 {
                     Success = true,
                     TableName = tableName,
                     Operations = operations,
                     Errors = errors,
-                    Duration = sw.Elapsed
-                });
-            }
+                    Duration = sw.Elapsed,
+                    SchemaCrc = modelCrc,
+                    DriftPending = driftPending
+                };
 
-            var tableExists = await TableExistsAsync(tableName, connectionId, ct).ConfigureAwait(false);
-
-            if (!tableExists)
-            {
-                // CREATE TABLE
-                var createSql = _analyzer.GenerateCreateTable(entityType);
-                await ExecuteSqlAsync(createSql, connectionId, ct).ConfigureAwait(false);
-                operations.Add($"CREATE TABLE `{tableName}`");
-                _logger?.Info($"[MySQL2] Created table `{tableName}`");
-            }
-            else
-            {
-                // Backup before altering
-                if (createBackup)
+                if (_events is not null)
                 {
-                    var backupResult = await _backupManager.BackupTableSchemaAsync(tableName, connectionId, ct)
+                    await _events.PublishAsync(new TableSyncedEvent(
+                        connectionId, tableName, !tableExists, operations, sw.Elapsed))
                         .ConfigureAwait(false);
-                    if (backupResult.IsFailure)
-                        _logger?.Warning($"[MySQL2] Schema backup failed for `{tableName}`: {backupResult.Error?.Message}");
                 }
 
-                // ALTER TABLE as needed
-                var alterStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
-                {
-                    return await _analyzer.GenerateAlterStatementsAsync(entityType, conn, level, ct)
-                        .ConfigureAwait(false);
-                }, connectionId, ct).ConfigureAwait(false);
-
-                foreach (var stmt in alterStatements)
-                {
-                    await ExecuteSqlAsync(stmt, connectionId, ct).ConfigureAwait(false);
-                    operations.Add(stmt);
-                    _logger?.Debug($"[MySQL2] Applied: {stmt}");
-                }
-
-                if (operations.Count > 0)
-                    _logger?.Info($"[MySQL2] Updated table `{tableName}` ({operations.Count} changes)");
-                else
-                    _logger?.Debug($"[MySQL2] Table `{tableName}` is up to date");
+                return Result<SyncResult>.Success(syncResult);
             }
-
-            sw.Stop();
-            var syncResult = new SyncResult
+            finally
             {
-                Success = true,
-                TableName = tableName,
-                Operations = operations,
-                Errors = errors,
-                Duration = sw.Elapsed
-            };
-
-            if (_events is not null)
-            {
-                await _events.PublishAsync(new TableSyncedEvent(
-                    connectionId, tableName, !tableExists, operations, sw.Elapsed))
-                    .ConfigureAwait(false);
+                if (ownLock is not null)
+                    await ownLock.DisposeAsync().ConfigureAwait(false);
             }
-
-            return Result<SyncResult>.Success(syncResult);
         }
         catch (Exception ex)
         {
@@ -174,7 +266,10 @@ public sealed class TableSyncService
     }
 
     /// <summary>
-    /// Synchronizes multiple entity types and returns a dictionary of results.
+    /// Synchronizes multiple entity types as one pass. Brackets the whole pass in a single
+    /// cross-node <see cref="SchemaSyncLock"/>, applies the CRC fast-path per table, and — in
+    /// <see cref="SyncMode.Migration"/> — emits the "already current, switch back to Production"
+    /// warning when nothing needed doing.
     /// </summary>
     /// <param name="entityTypes">Entity types to sync.</param>
     /// <param name="createBackup">Whether to back up schemas before altering.</param>
@@ -187,42 +282,81 @@ public sealed class TableSyncService
         CancellationToken ct = default)
     {
         var results = new Dictionary<string, SyncResult>(StringComparer.OrdinalIgnoreCase);
+        var types = entityTypes as IReadOnlyList<Type> ?? entityTypes.ToList();
+        var cfg = _configLookup?.Invoke(connectionId);
+        var mode = cfg?.SyncMode ?? SyncMode.Production;
+        var level = cfg?.EffectiveSyncLevel ?? SchemaSyncLevel.Safe;
 
-        foreach (var entityType in entityTypes)
+        // Hold one lock for the whole pass (DDL serialized across nodes). Skip locking entirely
+        // when sync is fully disabled — each table just returns a no-op skip.
+        SchemaSyncLock? passLock = null;
+        var lockHeld = false;
+        if (level != SchemaSyncLevel.None)
         {
-            var tableName = SchemaAnalyzer.GetTableName(entityType);
-            try
-            {
-                // Non-generic core — no MakeGenericMethod/Invoke per type.
-                var result = await SyncTableCoreAsync(entityType, createBackup, connectionId, ct)
-                    .ConfigureAwait(false);
+            passLock = await SchemaSyncLock.AcquireAsync(_connectionManager, connectionId, logger: _logger, ct: ct)
+                .ConfigureAwait(false);
+            lockHeld = passLock.Acquired;
+            if (!lockHeld)
+                _logger?.Warning("[MySQL2] Schema-sync pass could not obtain the lock — another node is syncing; unchanged tables will be skipped.");
+        }
 
-                results[tableName] = result.IsSuccess
-                    ? result.Value!
-                    : new SyncResult
+        try
+        {
+            var anyWork = false;
+            foreach (var entityType in types)
+            {
+                var tableName = SchemaAnalyzer.GetTableName(entityType);
+                try
+                {
+                    var result = await SyncTableCoreAsync(entityType, createBackup, connectionId, ct, lockHeld: lockHeld)
+                        .ConfigureAwait(false);
+
+                    var sr = result.IsSuccess
+                        ? result.Value!
+                        : new SyncResult
+                        {
+                            Success = false,
+                            TableName = tableName,
+                            Errors = [result.Error?.Message ?? "Unknown error"]
+                        };
+                    results[tableName] = sr;
+
+                    if (sr.Success && (sr.Operations.Count > 0 || sr.DriftPending))
+                        anyWork = true;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Error($"[MySQL2] Failed to sync `{tableName}`: {ex.Message}", ex);
+                    results[tableName] = new SyncResult
                     {
                         Success = false,
                         TableName = tableName,
-                        Errors = [result.Error?.Message ?? "Unknown error"]
+                        Errors = [ex.Message]
                     };
+                }
             }
-            catch (Exception ex)
-            {
-                _logger?.Error($"[MySQL2] Failed to sync `{tableName}`: {ex.Message}", ex);
-                results[tableName] = new SyncResult
-                {
-                    Success = false,
-                    TableName = tableName,
-                    Errors = [ex.Message]
-                };
-            }
-        }
 
-        return Result<Dictionary<string, SyncResult>>.Success(results);
+            // Migration mode self-disables: once everything matches, nag the operator to revert.
+            if (mode == SyncMode.Migration && lockHeld && !anyWork)
+            {
+                _logger?.Warning(
+                    "[MySQL2] Migration mode: schema already current — set SyncMode back to Production.");
+            }
+
+            return Result<Dictionary<string, SyncResult>>.Success(results);
+        }
+        finally
+        {
+            if (passLock is not null)
+                await passLock.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>Returns the <see cref="MigrationTracker"/> used by this service.</summary>
     public MigrationTracker GetMigrationTracker() => _migrationTracker;
+
+    /// <summary>Returns the <see cref="SchemaStateStore"/> (the <c>__schema_state</c> sentinel).</summary>
+    public SchemaStateStore GetSchemaStateStore() => _stateStore;
 
     /// <summary>Returns the <see cref="BackupManager"/> used by this service.</summary>
     public BackupManager GetBackupManager() => _backupManager;

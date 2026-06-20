@@ -56,4 +56,19 @@ public sealed class SyncResult
 
     /// <summary>How long the sync took.</summary>
     public TimeSpan Duration { get; init; }
+
+    /// <summary>
+    /// True when the table was skipped via the <c>__schema_state</c> CRC fast-path
+    /// (the model is unchanged), so no <c>information_schema</c> diffing or DDL ran.
+    /// </summary>
+    public bool Skipped { get; init; }
+
+    /// <summary>The model's computed schema CRC, when available.</summary>
+    public string? SchemaCrc { get; init; }
+
+    /// <summary>
+    /// True when an additive (Production) sync left a destructive change deferred
+    /// (the table was flagged <c>DriftPending</c> for a later Migration pass).
+    /// </summary>
+    public bool DriftPending { get; init; }
 }
