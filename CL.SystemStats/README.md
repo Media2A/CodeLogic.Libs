@@ -1,53 +1,55 @@
 # CodeLogic.SystemStats
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SystemStats)](https://www.nuget.org/packages/CodeLogic.SystemStats)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-Cross-platform system statistics (CPU, memory, processes) for [CodeLogic](https://github.com/Media2A/CodeLogic) applications on Windows and Linux.
+> Cross-platform CPU, memory, uptime, and process statistics for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — one API over Windows performance counters and Linux `/proc`.
+
+Samples live system metrics through platform-specific providers: Windows reads CPU info from the registry, CPU usage from `PerformanceCounter`, and total/available RAM via the `GlobalMemoryStatusEx` P/Invoke; Linux reads `/proc/cpuinfo`, `/proc/stat`, `/proc/meminfo`, and `/proc/uptime`. Every data method returns a `Result<T>`, results are cached for a short window, and breaching CPU/memory thresholds publishes events on the CodeLogic event bus.
 
 ## Install
 
-```
+```bash
 dotnet add package CodeLogic.SystemStats
 ```
 
-## Quick Start
-
-All data-returning methods return a `Result<T>`: check `IsSuccess`, then read
-`Value` (or `Error` on failure).
+## Quick start
 
 ```csharp
-var statsLib = new SystemStatsLibrary();
-// After library initialization via CodeLogic framework:
+using CL.SystemStats;
 
-var cpu = await statsLib.GetCpuStatsAsync();
+await Libraries.LoadAsync<SystemStatsLibrary>();   // register before ConfigureAsync()
+await CodeLogic.ConfigureAsync();
+await CodeLogic.StartAsync();
+
+var sys = Libraries.Get<SystemStatsLibrary>();
+
+// Every data method returns Result<T>: check IsSuccess, then read Value.
+Result<CpuStats> cpu = await sys.GetCpuStatsAsync();
 if (cpu.IsSuccess)
     Console.WriteLine($"CPU: {cpu.Value!.OverallUsagePercent:F1}%");
 
-var cpuInfo  = await statsLib.GetCpuInfoAsync();        // static: model, cores, vendor
-var memInfo  = await statsLib.GetMemoryInfoAsync();     // static: total RAM
-var memory   = await statsLib.GetMemoryStatsAsync();    // live usage
-var uptime   = await statsLib.GetSystemUptimeAsync();
-var snapshot = await statsLib.GetSystemSnapshotAsync(); // combined + fires event
-var all      = await statsLib.GetAllProcessesAsync();
-var topCpu   = await statsLib.GetTopProcessesByCpuAsync(5);
-var topMem   = await statsLib.GetTopProcessesByMemoryAsync(5);
-var one      = await statsLib.GetProcessStatsAsync(processId: 1234);
+Result<MemoryStats> mem = await sys.GetMemoryStatsAsync();
+if (mem.IsSuccess)
+    Console.WriteLine($"RAM: {mem.Value!.UsagePercent:F1}% ({mem.Value.UsedMiB} MiB used)");
+
+// One combined reading: CPU + memory + uptime + top processes.
+Result<SystemSnapshot> snap = await sys.GetSystemSnapshotAsync();
 ```
 
 ## Features
 
-- **CPU monitoring** — static `CpuInfo` (model, cores, vendor, architecture) and live `CpuStats` (overall + per-core) with configurable sampling
-- **Memory stats** — static `MemoryInfo` and live `MemoryStats` (total/used/available/cached/buffers), with MiB/GiB helper properties
-- **Uptime** — system uptime since last boot
-- **Process monitoring** — enumerate all processes, query by PID, or rank by CPU/memory usage
-- **System snapshots** — combined CPU + memory + uptime + top processes in a single call
-- **Threshold events** — publishes `HighCpuUsageEvent` / `HighMemoryUsageEvent` when thresholds are exceeded, and `SystemSnapshotTakenEvent` after each snapshot
-- **Result caching** — cached reads (configurable duration); clear via `statsLib.Stats.ClearCache()`
-- **Cross-platform providers** — Windows (PerformanceCounters + P/Invoke `GlobalMemoryStatusEx`) and Linux (`/proc`)
+- **CPU** — static `CpuInfo` (model, cores, vendor, max speed, architecture) via `GetCpuInfoAsync()`, and live `CpuStats` (overall + per-core usage) via `GetCpuStatsAsync()` with configurable sampling.
+- **Memory** — static `MemoryInfo` (total RAM) and live `MemoryStats` (used / available / cached / buffers / percent), each with MiB/GiB helper properties.
+- **Uptime** — system uptime since last boot via `GetSystemUptimeAsync()`.
+- **Processes** — enumerate all (`GetAllProcessesAsync`), query by PID (`GetProcessStatsAsync`), or rank by CPU / memory (`GetTopProcessesByCpuAsync` / `GetTopProcessesByMemoryAsync`).
+- **Snapshots** — `GetSystemSnapshotAsync()` rolls CPU, memory, uptime, and top processes into one `SystemSnapshot`.
+- **Threshold events** — publishes `HighCpuUsageEvent` / `HighMemoryUsageEvent` when usage crosses the configured limits, and `SystemSnapshotTakenEvent` after each snapshot.
+- **Result caching** — short-lived caching of common reads; clear it with `sys.Stats.ClearCache()`.
 
 ## Configuration
 
-Config file: `config.systemstats.json`
+Auto-generated on first run as `config.systemstats.json` (section `systemstats`):
 
 ```json
 {
@@ -63,28 +65,28 @@ Config file: `config.systemstats.json`
 }
 ```
 
-## Events
-
-Published on the CodeLogic event bus (when one is available):
-
-- `SystemSnapshotTakenEvent` — after each successful `GetSystemSnapshotAsync()`.
-- `HighCpuUsageEvent` — when overall CPU usage ≥ `HighCpuThresholdPercent`.
-- `HighMemoryUsageEvent` — when memory usage ≥ `HighMemoryThresholdPercent`.
-
-Threshold checks run on `GetCpuStatsAsync`, `GetMemoryStatsAsync`, and
-`GetSystemSnapshotAsync`.
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `EnableCaching` | `true` | Cache common reads for `CacheDurationSeconds`. |
+| `CacheDurationSeconds` | `5` | Cache lifetime in seconds (1–600). |
+| `CpuSamplingIntervalMs` | `100` | Delay between CPU samples in ms (1–10000). |
+| `CpuSamplesForAverage` | `3` | Number of CPU samples averaged per reading (1–20). |
+| `EnableTemperatureMonitoring` | `true` | Reserved for temperature sampling support. |
+| `EnableProcessMonitoring` | `true` | Enable process enumeration / ranking. |
+| `MaxTopProcesses` | `10` | Default count for top-process queries (1–200). |
+| `HighCpuThresholdPercent` | `90.0` | CPU usage that triggers `HighCpuUsageEvent` (1–100). |
+| `HighMemoryThresholdPercent` | `90.0` | Memory usage that triggers `HighMemoryUsageEvent` (1–100). |
 
 ## Documentation
 
-Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Media2A/CodeLogic.Libs)
+Full guide: **[CL.SystemStats documentation](https://media2a.github.io/CodeLogic.Libs/libs/systemstats.html)**
 
 ## Requirements
 
-- .NET 10.0+
-- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
-- Windows: `System.Diagnostics.PerformanceCounter`, `System.Management`
-- Linux: `/proc` filesystem access
+- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- Windows: `System.Diagnostics.PerformanceCounter` 9.x · `System.Management` 9.x
+- Linux: read access to the `/proc` filesystem
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).

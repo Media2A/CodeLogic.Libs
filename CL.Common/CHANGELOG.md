@@ -3,6 +3,23 @@
 All notable changes to **CodeLogic.Common** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-06-20
+
+### Documentation
+
+- Full rewrite of the README and docs to house style. The README is now concise
+  Markdown-only (renders on both GitHub and NuGet): install, quick start showing the
+  static helpers and the optional `CommonLibrary` load, a grouped feature list, and a
+  link to the docs site. Notes that `CL.Common` is stateless and needs no configuration.
+- Expanded the documentation site into a three-page set under `docs/libs/common/`:
+  an **Overview** (toolkit map, how static helpers are organized by namespace, the full
+  catalog table, health check), **Security & Data** (`Encryption`, `Hashing`,
+  `IdGenerator`, `PasswordGenerator`/`PasswordStrength`, `JsonHelper`, `TypeConverter`,
+  `CompressionHelper`), and **Utilities** (`StringHelper`/`StringValidator`,
+  `DateTimeHelper`, the web helpers, the networking set, `CronParser`, `CLU_Imaging`,
+  `ICache`/`MemoryCache`, `FileSystem`, and the reflection helpers). Each page documents
+  per-member return types accurately — plain values vs. `Result`/`Result<T>`. No API changes.
+
 ## [4.5.2] — 2026-06-20
 
 ### Documentation

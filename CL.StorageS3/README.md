@@ -1,8 +1,11 @@
 # CodeLogic.StorageS3
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.StorageS3)](https://www.nuget.org/packages/CodeLogic.StorageS3)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-S3-compatible object storage library for [CodeLogic](https://github.com/Media2A/CodeLogic). Works with Amazon S3, Cloudflare R2, MinIO, and any S3-compatible provider. Built on [AWSSDK.S3](https://aws.amazon.com/sdk-for-net/).
+> S3-compatible object storage for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — one API across Amazon S3, MinIO, and Cloudflare R2.
+
+Built on [AWSSDK.S3](https://www.nuget.org/packages/AWSSDK.S3). Configure one or more named connections, then upload, download, list, copy, and presign objects through a single `S3StorageService`. Every operation returns the framework `Result<T>` (existence checks return a plain `bool`), so failures surface as `Error` values instead of exceptions.
 
 ## Install
 
@@ -10,58 +13,57 @@ S3-compatible object storage library for [CodeLogic](https://github.com/Media2A/
 dotnet add package CodeLogic.StorageS3
 ```
 
-## Quick Start
+## Quick start
 
 ```csharp
 await Libraries.LoadAsync<StorageS3Library>();
+await CodeLogic.ConfigureAsync();
+await CodeLogic.StartAsync();
 
-var s3 = Libraries.Get<StorageS3Library>();
-var service = s3.DefaultService;            // S3StorageService for the "Default" connection
+var storage = Libraries.Get<StorageS3Library>();
+var s3 = storage.DefaultService;            // S3StorageService for the "Default" connection
 
-// Upload (every method returns a Result / Result<T>)
-using var stream = File.OpenRead("photo.webp");
-var put = await service.PutObjectAsync(
-    "my-bucket", "uploads/photo.webp", stream,
+// Upload (byte array or stream)
+using var file = File.OpenRead("photo.webp");
+Result<S3ObjectInfo> put = await s3.PutObjectAsync(
+    "my-bucket", "uploads/photo.webp", file,
     new UploadOptions { ContentType = "image/webp" });
 
 if (put.IsSuccess)
     Console.WriteLine(put.Value!.PublicUrl);   // populated when PublicUrl is configured
 
 // Download
-var data = await service.GetObjectAsync("my-bucket", "uploads/photo.webp");
+Result<byte[]> data = await s3.GetObjectAsync("my-bucket", "uploads/photo.webp");
 if (data.IsSuccess)
     File.WriteAllBytes("photo.webp", data.Value!);
 
-// Delete
-await service.DeleteObjectAsync("my-bucket", "uploads/photo.webp");
-
-// List objects
-var list = await service.ListObjectsAsync("my-bucket", prefix: "uploads/");
+// List with a prefix
+Result<ListObjectsResult> list = await s3.ListObjectsAsync("my-bucket", prefix: "uploads/");
 foreach (var obj in list.Value!.Objects)
     Console.WriteLine($"{obj.Key} ({obj.Size} bytes)");
+
+// Delete
+await s3.DeleteObjectAsync("my-bucket", "uploads/photo.webp");
 ```
 
-All `S3StorageService` operations return `Result` / `Result<T>` — exceptions are caught
-and wrapped, so check `IsSuccess` / `IsFailure` and read `Error` instead of using
-try/catch. (`BucketExistsAsync` and `ObjectExistsAsync` return a plain `bool`.)
+Existence checks (`BucketExistsAsync`, `ObjectExistsAsync`) return a plain `Task<bool>` — no `Result` wrapper.
 
 ## Features
 
-- **Objects** — upload (byte array or stream), download (byte array or stream), delete, copy, exists, metadata-only lookup
-- **Range / version downloads** — `DownloadOptions` for byte-range reads and `VersionId` retrieval
-- **Upload options** — `UploadOptions` for content type, cache-control, content-disposition, storage class, public-read ACL, and custom metadata
-- **Buckets** — create, delete, list, exists
-- **Listing** — prefix filter, paging via continuation tokens, common-prefix (folder) detection
-- **Multiple Connections** — named connection IDs for multi-bucket or multi-provider setups; access any via `s3.GetService("id")`
-- **Public URLs** — configurable public URL prefix; auto-populated on returned `S3ObjectInfo.PublicUrl`
-- **Presigned URLs** — generate temporary GET access URLs
-- **Events** — publishes `ObjectUploadedEvent`, `ObjectDeletedEvent`, and `BucketCreatedEvent` to the CodeLogic event bus
-- **Cloudflare R2** — first-class support with `forcePathStyle` and `disablePayloadSigning`
-- **Health Checks** — tests every configured connection (`Healthy` / `Degraded` / `Unhealthy`)
+- **Objects** — upload and download by byte array or stream, copy, delete, metadata-only lookup, and existence checks.
+- **Range & version downloads** — `DownloadOptions` for byte-range reads and `VersionId` retrieval.
+- **Upload options** — `UploadOptions` for content type, cache-control, content-disposition, storage class, public-read ACL, and custom metadata.
+- **Buckets** — create, delete, list, and exists.
+- **Listing** — prefix filtering, pagination via continuation tokens, and common-prefix (virtual folder) detection.
+- **Multiple connections** — named connection IDs for multi-bucket or multi-provider setups; reach any via `storage.GetService("id")`.
+- **Presigned URLs** — temporary GET access links with a configurable expiry.
+- **Public URLs** — optional public base URL auto-populated on `S3ObjectInfo.PublicUrl`.
+- **Events** — `ObjectUploadedEvent`, `ObjectDeletedEvent`, and `BucketCreatedEvent` on the CodeLogic event bus.
+- **Health check** — tests every configured connection (`Healthy` / `Degraded` / `Unhealthy`).
 
 ## Configuration
 
-Auto-generated at `data/codelogic/Libraries/CL.StorageS3/config.storages3.json`:
+Auto-generated on first run as `config.storages3.json` (section `storages3`):
 
 ```json
 {
@@ -71,26 +73,48 @@ Auto-generated at `data/codelogic/Libraries/CL.StorageS3/config.storages3.json`:
       "connectionId": "Default",
       "accessKey": "your-access-key",
       "secretKey": "your-secret-key",
-      "serviceUrl": "https://xxx.r2.cloudflarestorage.com",
+      "serviceUrl": "https://s3.amazonaws.com",
       "publicUrl": "https://cdn.example.com",
-      "region": "auto",
+      "region": "us-east-1",
       "defaultBucket": "my-bucket",
       "forcePathStyle": true,
       "useHttps": true,
-      "disablePayloadSigning": true
+      "timeoutSeconds": 30,
+      "maxRetries": 3,
+      "disablePayloadSigning": false
     }
   ]
 }
 ```
 
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Master switch; when `false` no connections are registered and health reports *disabled*. |
+| `connections` | `[]` | One or more connection blocks. At least one is required when enabled; each `connectionId` must be unique. |
+| `connectionId` | `"Default"` | Identifier used to look up the connection via `GetService`. |
+| `accessKey` | `""` | Access key ID (secret). |
+| `secretKey` | `""` | Secret access key (secret). |
+| `serviceUrl` | `""` | Endpoint URL. AWS `https://s3.amazonaws.com`; MinIO `http://localhost:9000`; R2 `https://<account>.r2.cloudflarestorage.com`. |
+| `publicUrl` | `""` | Optional public base URL for object links; leave blank for private buckets. |
+| `region` | `"us-east-1"` | AWS region; ignored when `serviceUrl` is set. |
+| `defaultBucket` | `""` | Bucket used when code doesn't specify one. |
+| `forcePathStyle` | `true` | Path-style addressing; required for MinIO and most non-AWS services. |
+| `useHttps` | `true` | Use HTTPS for the connection. |
+| `timeoutSeconds` | `30` | HTTP request timeout (1–600). |
+| `maxRetries` | `3` | Retry attempts on transient failures (0–20). |
+| `disablePayloadSigning` | `false` | Disables streaming payload signing; set `true` for Cloudflare R2. |
+
+Provider tips: **AWS** → `forcePathStyle: false`, `disablePayloadSigning: false`. **MinIO** → `forcePathStyle: true`, `useHttps: false`. **R2** → `disablePayloadSigning: true`, `forcePathStyle: false`.
+
 ## Documentation
 
-- [Storage Guide](../docs/articles/storage.md)
+Full guide: **[CL.StorageS3 documentation](https://media2a.github.io/CodeLogic.Libs/libs/storages3.html)**
 
 ## Requirements
 
-- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic) | .NET 10
+- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- AWSSDK.S3 4.x
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).

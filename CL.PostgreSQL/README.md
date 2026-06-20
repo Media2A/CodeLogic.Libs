@@ -1,205 +1,67 @@
 # CodeLogic.PostgreSQL
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.PostgreSQL)](https://www.nuget.org/packages/CodeLogic.PostgreSQL)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-PostgreSQL database access for [CodeLogic](https://github.com/Media2A/CodeLogic) applications with multi-database support, a fluent LINQ query builder, an attribute-driven repository, transactions, and automatic table sync / schema migrations with backups.
+> A typed PostgreSQL data-access layer for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — multi-database connections, an attribute-driven repository, a fluent LINQ query builder, transactions, and declarative schema sync with backups and migration tracking.
+
+Map a plain class with attributes and the library reconciles the live table to match, then exposes a typed `Repository<T>` and a chainable `QueryBuilder<T>` over it. It builds on [Npgsql](https://www.nuget.org/packages/Npgsql) and connects to one or many PostgreSQL instances from a single config. Every fallible operation returns a framework `Result<T>` — no exceptions on the expected failure paths.
 
 ## Install
 
-```
+```bash
 dotnet add package CodeLogic.PostgreSQL
 ```
 
-## Quick Start
+## Quick start
 
 ```csharp
-var pgLib = new PostgreSQLLibrary();
-// After library initialization via the CodeLogic framework:
+using CL.PostgreSQL;
+using CL.PostgreSQL.Models;
+
+await Libraries.LoadAsync<PostgreSQLLibrary>();   // register before ConfigureAsync()
+await CodeLogic.ConfigureAsync();
+await CodeLogic.StartAsync();
+
+var pg = Libraries.Get<PostgreSQLLibrary>();
 
 // Define an entity
 [Table(Name = "users", Schema = "public")]
 public class User
 {
-    [Column(Primary = true, AutoIncrement = true)]
-    public int Id { get; set; }
-
-    [Column(NotNull = true)]
-    public string Name { get; set; } = "";
-
-    public bool IsActive { get; set; }
+    [Column(Primary = true, AutoIncrement = true)] public int Id { get; set; }
+    [Column(NotNull = true)]                        public string Name { get; set; } = "";
+    [Column] public bool IsActive { get; set; }
 }
 
-// Sync the table schema (creates or alters to match the entity)
-await pgLib.SyncTableAsync<User>();
+// 1. Reconcile the table to match the entity (creates it, or adds missing columns/indexes)
+Result<SyncResult> sync = await pg.SyncTableAsync<User>();
 
-// Typed repository (CRUD)
-var repo = pgLib.GetRepository<User>();
-var created = await repo.InsertAsync(new User { Name = "Ada", IsActive = true });
+// 2. Typed repository CRUD
+var repo = pg.GetRepository<User>();
+Result<User> created = await repo.InsertAsync(new User { Name = "Ada", IsActive = true });
 
-// Fluent query builder
-var users = await pgLib.Query<User>()
+// 3. Fluent query builder
+Result<List<User>> users = await pg.Query<User>()
     .Where(u => u.IsActive)
     .OrderBy(u => u.Name)
     .Limit(50)
     .ToListAsync();
-
-// Transactions (auto-rollback on dispose if not committed)
-await using var tx = await pgLib.BeginTransactionAsync();
-// ... do work ...
-await tx.CommitAsync();
 ```
-
-All async operations return `Result<T>` / `Result<...>` — check `IsSuccess` / `IsFailure` and read `.Value` or `.Error`.
 
 ## Features
 
-- **Multi-database support** -- manage connections to multiple PostgreSQL instances from one config; pick the connection per call with `connectionId`.
-- **Fluent query builder** -- `Query<T>()` with `Where`, `OrderBy`/`OrderByDescending`, `Limit`/`Offset` (`Take`/`Skip`), `Join`, `Select`, `GroupBy`, aggregates, paging, and bulk update/delete.
-- **Repository pattern** -- `GetRepository<T>()` for full CRUD plus bulk insert, paging, find, and atomic increment/decrement.
-- **Attribute-driven schema** -- `[Table]`, `[Column]`, `[ForeignKey]`, `[CompositeIndex]`, `[Ignore]`.
-- **Table sync and migrations** -- create or alter tables to match entities, with timestamped schema backups and JSON migration history.
-- **Transactions** -- `BeginTransactionAsync()` returns an `await using` scope that auto-rolls-back if not committed.
-- **Connection pooling** -- configurable pool sizes, idle timeout, command/connect timeouts, SSL mode, and slow-query logging.
-- **Health checks and events** -- `HealthCheckAsync()` plus published events (table synced, slow query, connect/disconnect, health changed).
-
-## Entities and Attributes
-
-```csharp
-[Table(Name = "orders", Schema = "public", Comment = "Customer orders")]
-[CompositeIndex("ix_orders_customer_status", "CustomerId", "Status", Unique = false)]
-public class Order
-{
-    [Column(Primary = true, AutoIncrement = true)]
-    public int Id { get; set; }
-
-    [Column(NotNull = true, Index = true)]
-    public int CustomerId { get; set; }
-
-    [Column(DataType = DataType.Numeric, Precision = 12, Scale = 2)]
-    public decimal Total { get; set; }
-
-    [Column(Name = "status", Size = 32, DefaultValue = "'pending'")]
-    public string Status { get; set; } = "pending";
-
-    [ForeignKey("customers", "Id", OnDelete = ForeignKeyAction.Cascade)]
-    public int FkCustomer { get; set; }
-
-    [Ignore]
-    public string? TransientNote { get; set; }
-}
-```
-
-- `[Table]` — `Name` (defaults to class name), `Schema` (defaults to `public`), `Comment`.
-- `[Column]` — `Name`, `DataType`, `Size`, `Precision`/`Scale`, `Primary`, `AutoIncrement` (GENERATED ALWAYS AS IDENTITY), `NotNull`, `Unique`, `Index`, `DefaultValue`, `Comment`, `OnUpdateCurrentTimestamp`.
-- `[ForeignKey(referenceTable, referenceColumn)]` — `OnDelete` / `OnUpdate` (`ForeignKeyAction`: `Restrict`, `Cascade`, `SetNull`, `NoAction`, `SetDefault`), `ConstraintName`.
-- `[CompositeIndex(indexName, columnNames...)]` — multi-column index; `Unique` optional; repeatable.
-- `[Ignore]` — excludes a property from reads, writes, and schema sync.
-
-`DataType` values include `SmallInt`, `Int`, `BigInt`, `Real`, `DoublePrecision`, `Numeric`, `Timestamp`/`TimestampTz`, `Date`, `Time`/`TimeTz`, `Char`, `VarChar`, `Text`, `Json`, `Jsonb`, `Uuid`, `Bool`, `Bytea`, and array types (`IntArray`, `BigIntArray`, `TextArray`, `NumericArray`).
-
-## Repository
-
-```csharp
-var repo = pgLib.GetRepository<User>();           // optional connectionId argument
-
-await repo.InsertAsync(user);                       // INSERT ... RETURNING *
-await repo.InsertManyAsync(users);
-await repo.GetByIdAsync(1);
-await repo.GetByColumnAsync("Name", "Ada");
-await repo.GetAllAsync();
-await repo.GetPagedAsync(page: 1, pageSize: 25, orderByColumn: "Name", descending: false);
-await repo.CountAsync();
-await repo.UpdateAsync(user);                        // by primary key, RETURNING *
-await repo.DeleteAsync(1);
-await repo.FindAsync(u => u.IsActive);
-await repo.IncrementAsync(1, u => u.LoginCount, 1);
-await repo.DecrementAsync(1, u => u.Credits, 5);
-await repo.RawQueryAsync("SELECT * FROM \"users\" WHERE \"Name\" = @n",
-    new() { ["@n"] = "Ada" });
-await repo.RawExecuteAsync("UPDATE \"users\" SET \"IsActive\" = false");
-```
-
-A primary key (`[Column(Primary = true)]`) is required for `GetByIdAsync`, `UpdateAsync`, `DeleteAsync`, and increment/decrement.
-
-## Query Builder
-
-```csharp
-var page = await pgLib.Query<User>()
-    .Where(u => u.IsActive)
-    .OrderByDescending(u => u.Name)
-    .ToPagedListAsync(page: 1, pageSize: 20);
-
-var first = await pgLib.Query<User>()
-    .Where(u => u.Id == 1)
-    .FirstOrDefaultAsync();
-
-var total   = await pgLib.Query<User>().Where(u => u.IsActive).CountAsync();
-var maxId   = await pgLib.Query<User>().MaxAsync(u => u.Id);
-var sum     = await pgLib.Query<User>().SumAsync(u => u.Credits);
-var average = await pgLib.Query<User>().AverageAsync(u => u.Credits);
-
-// Bulk update / delete
-await pgLib.Query<User>()
-    .Where(u => !u.IsActive)
-    .UpdateAsync(new() { ["Status"] = "archived" });
-
-await pgLib.Query<User>().Where(u => !u.IsActive).DeleteAsync();
-```
-
-Chain methods: `Where`, `OrderBy`/`OrderByDescending`, `Limit`/`Offset` (aliases `Take`/`Skip`), `Join(table, condition, JoinType)`, `Select(...)`, `GroupBy(...)`, `WithConnection(id)`. Terminal methods: `ToListAsync`, `FirstOrDefaultAsync`, `ToPagedListAsync`, `CountAsync`, `MaxAsync`/`MinAsync`/`SumAsync`/`AverageAsync`, `UpdateAsync`, `DeleteAsync`.
-
-### Raw SQL
-
-```csharp
-var raw = pgLib.QueryRaw();
-var rows = await raw.QueryAsync(
-    "SELECT \"Name\" FROM \"users\" WHERE \"Id\" = @id",
-    new() { ["@id"] = 1 });           // Result<List<Dictionary<string, object?>>>
-
-await raw.ExecuteAsync("TRUNCATE \"users\"");   // Result<int>
-```
-
-## Transactions
-
-```csharp
-await using var tx = await pgLib.BeginTransactionAsync();   // optional connectionId
-try
-{
-    // ... work on the same connection/transaction ...
-    await tx.CommitAsync();
-}
-catch
-{
-    await tx.RollbackAsync();
-}
-// If neither Commit nor Rollback is called, dispose auto-rolls back.
-```
-
-## Table Sync and Migrations
-
-```csharp
-// Single entity (creates table if missing, otherwise adds missing columns/indexes)
-Result<SyncResult> result = await pgLib.SyncTableAsync<User>();      // createBackup: true by default
-
-// Lower-level service for batch operations
-await pgLib.TableSync.SyncTablesAsync(new[] { typeof(User), typeof(Order) });
-await pgLib.TableSync.SyncNamespaceAsync("MyApp.Entities", includeDerivedNamespaces: true);
-```
-
-`SyncResult` reports `Success`, `SchemaName`/`TableName`, the list of `Operations` applied, any `Errors`, and `Duration`.
-
-Before altering an existing table, a timestamped schema backup is written under the library's data directory (`backups/`). Manage backups via `pgLib.BackupManager`:
-
-```csharp
-await pgLib.BackupManager.BackupTableSchemaAsync("public", "users");
-await pgLib.BackupManager.CleanupOldBackupsAsync(keepCount: 10);
-```
-
-Applied migrations are tracked in `migrations/migration_history.json` via `pgLib.MigrationTracker` (`RecordMigrationAsync`, `HasMigrationBeenAppliedAsync`, `GetAppliedMigrationsAsync`, `RemoveMigrationRecordAsync`).
+- **Multi-database** — manage connections to several PostgreSQL instances from one config; pick the target per call with a `connectionId` (default `"Default"`), or `RegisterDatabase` one at runtime.
+- **Repository pattern** — `GetRepository<T>()` for full CRUD plus bulk insert, paging, find, raw SQL, and atomic increment/decrement.
+- **Fluent query builder** — `Query<T>()` with `Where`, `OrderBy`/`OrderByDescending`, `Limit`/`Offset` (aliases `Take`/`Skip`), `Join`, `Select`, `GroupBy`, aggregates, paging, and bulk update/delete.
+- **Attribute-driven schema** — `[Table]`, `[Column]`, `[ForeignKey]`, `[CompositeIndex]`, `[Ignore]` map a plain class to a real table.
+- **Schema sync & migrations** — create or alter tables to match entities (single, set, or whole namespace), with timestamped schema backups and a JSON migration history.
+- **Transactions** — `BeginTransactionAsync()` returns an `await using` scope that auto-rolls-back if it is never committed.
+- **Health checks & events** — `HealthCheckAsync()` plus events for connect/disconnect, table sync, slow query, and health changes.
 
 ## Configuration
 
-Config file: `config.postgresql.json`
+Auto-generated on first run as `config.postgresql.json` (section `postgresql`). `Databases` is a named map keyed by connection id; `Default` is created automatically.
 
 ```json
 {
@@ -224,32 +86,32 @@ Config file: `config.postgresql.json`
 }
 ```
 
-- **`Databases`** — a named map; add more keys (e.g. `"Reporting"`) and pass that key as `connectionId`. Disabled databases (`"Enabled": false`) are skipped at startup.
-- **`SslMode`** — `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, or `VerifyFull`.
-- **`MaxIdleTime`** — seconds an idle pooled connection is kept before being closed.
-- **`AllowDestructiveSync`** — dev-only; allows DROP operations during schema sync.
-- **`SlowQueryThresholdMs`** — queries at or above this duration are logged as warnings.
-
-You can also register a database at runtime:
-
-```csharp
-pgLib.RegisterDatabase("Reporting", new DatabaseConfig
-{
-    Host = "reports.internal", Database = "analytics",
-    Username = "reader", Password = "***"
-});
-```
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `Enabled` | `true` | Per-database switch; disabled databases are skipped at startup. |
+| `Host` / `Port` | `localhost` / `5432` | Server endpoint. |
+| `Database` / `Username` / `Password` | `""` | Connection credentials. |
+| `ConnectionTimeout` | `30` | Seconds to wait when opening a connection. |
+| `CommandTimeout` | `30` | Seconds before a command times out. |
+| `MinPoolSize` / `MaxPoolSize` | `5` / `100` | Connection-pool bounds. |
+| `MaxIdleTime` | `60` | Seconds an idle pooled connection is kept before being closed. |
+| `SslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, or `VerifyFull`. |
+| `AllowDestructiveSync` | `false` | Dev-only; allows DROP operations during schema sync. |
+| `SlowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
 
 ## Documentation
 
-Full API docs: [https://github.com/Media2A/CodeLogic.Libs](https://github.com/Media2A/CodeLogic.Libs)
+Full guide: **[CL.PostgreSQL documentation](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/index.html)**
+
+- [Overview](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/index.html) — load, multi-database, repository CRUD, config, health, events.
+- [Query Builder](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/queries.html) — fluent methods, terminals, aggregates, bulk writes, raw SQL, transactions.
+- [Schema & Sync](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/schema.html) — entity attributes, table & namespace sync, backups, migration tracker.
 
 ## Requirements
 
-- .NET 10.0+
-- [CodeLogic 3.x or 4.x](https://github.com/Media2A/CodeLogic)
-- Npgsql 9.x
+- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- Npgsql 9.x · PostgreSQL 12+
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
