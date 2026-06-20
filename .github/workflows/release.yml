@@ -42,7 +42,7 @@ jobs:
           git clone --depth 1 "https://github.com/${{ github.repository_owner }}/CodeLogic.git" "$TARGET"
           echo "Cloned CodeLogic to $TARGET"
 
-      - name: Detect changes and bump versions
+      - name: Detect changes and compute version
         id: changes
         shell: pwsh
         run: |
@@ -65,26 +65,23 @@ jobs:
             $changedFiles = git diff --name-only "$lastTag..HEAD" 2>$null
             if (-not $changedFiles) { $changedFiles = @() }
 
-            # If version.txt changed, rebuild all — the version line moved.
+            # If version.txt changed, rebuild all — the major.minor line moved.
             $versionFileChanged = $changedFiles | Where-Object { $_ -eq 'version.txt' }
             if ($versionFileChanged) {
               Write-Host "version.txt changed — rebuilding all libraries"
               $changedProjects = $allProjects
             } else {
-              # Exclude csproj files from the change detection — they're bumped by this
-              # same workflow on every release, which would otherwise cascade forever.
-              # A lib only counts as "changed" if its SOURCE files (src/, README, etc.)
-              # were touched since the last tag.
+              # A lib counts as "changed" if any file under its folder changed since
+              # the last tag. csproj is no longer auto-bumped/committed, so there is
+              # no self-cascade to exclude.
               $changedProjects = @()
               foreach ($project in $allProjects) {
-                $hasRealChange = $changedFiles | Where-Object {
-                  $_ -like "$project/*" -and $_ -notlike "*.csproj"
-                }
+                $hasRealChange = $changedFiles | Where-Object { $_ -like "$project/*" }
                 if ($hasRealChange) { $changedProjects += $project }
               }
 
               if ($changedProjects.Count -eq 0) {
-                Write-Host "No library source changes since $lastTag — nothing to release"
+                Write-Host "No library changes since $lastTag — nothing to release"
                 "has_changes=False" >> $env:GITHUB_OUTPUT
                 "projects=" >> $env:GITHUB_OUTPUT
                 exit 0
@@ -94,85 +91,38 @@ jobs:
 
           Write-Host "Changed projects: $($changedProjects -join ', ')"
 
-          # ── Unified versioning from version.txt ──────────────────────────
-          # Major.Minor is controlled manually via version.txt in the repo root.
-          # CI only ever bumps the patch number. All libraries share the same version.
-          $versionLine = (Get-Content 'version.txt' -TotalCount 1).Trim()
-          $vParts = $versionLine.Split('.')
-          $major = [int]$vParts[0]
-          $minor = [int]$vParts[1]
-
-          # Find the highest current patch across ALL projects to keep them aligned
-          $maxPatch = 0
-          foreach ($project in $allProjects) {
-            $csproj = Join-Path $project "$project.csproj"
-            [xml]$proj = Get-Content $csproj
-            $vNode = $proj.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
-            $cur = ($vNode.Version -split '-')[0]  # strip any prerelease suffix
-            $curParts = $cur.Split('.')
-            if ([int]$curParts[0] -eq $major -and [int]$curParts[1] -eq $minor) {
-              $maxPatch = [Math]::Max($maxPatch, [int]$curParts[2])
-            }
-          }
-
-          # Bump patch by 1 from the highest current
-          $newPatch = $maxPatch + 1
-          $newVersion = "$major.$minor.$newPatch"
+          # ── Composed version: {major.minor from version.txt}.{run_number}[+sha] ──
+          # Major.Minor is hand-controlled in version.txt. The GitHub run number is the
+          # monotonic, NuGet-orderable patch (always higher each run). The short SHA is
+          # SemVer build-metadata: nuget.org strips it from the package version, so it is
+          # provenance only — it survives in the assembly InformationalVersion. Nothing is
+          # written back to the repo; the version is composed at pack time via -p:Version.
+          $rootVer = (Get-Content 'version.txt' -TotalCount 1).Trim()   # e.g. "4.6"
+          $sha     = '${{ github.sha }}'.Substring(0, 7)
           if ('${{ github.ref_name }}' -eq 'prerelease') {
-            $newVersion = "$newVersion-preview.${{ github.run_number }}"
+            $version = "$rootVer.${{ github.run_number }}-preview+$sha"
+          } else {
+            $version = "$rootVer.${{ github.run_number }}+$sha"
           }
 
-          Write-Host "version.txt = $versionLine → all changed libs get $newVersion"
-
-          # Apply the unified version to all changed projects
-          $versionMap = @{}
-          foreach ($project in $changedProjects) {
-            $csproj = Join-Path $project "$project.csproj"
-            [xml]$proj = Get-Content $csproj
-            $versionNode = $proj.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1
-            $currentVersion = $versionNode.Version
-            $versionNode.Version = $newVersion
-            $proj.Save((Resolve-Path $csproj).Path)
-
-            $versionMap[$project] = $newVersion
-            Write-Host "$project : $currentVersion -> $newVersion"
-          }
+          Write-Host "Composed version for this run: $version (all packed libs share it)"
 
           $projectList = $changedProjects -join ','
           "projects=$projectList" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
           "has_changes=$($changedProjects.Count -gt 0)" >> $env:GITHUB_OUTPUT
-
-          $versionLines = $versionMap.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }
-          $versionLines | Set-Content 'version-map.txt'
-
-      - name: Commit version bumps
-        if: steps.changes.outputs.has_changes == 'True'
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "CL.*/CL.*.csproj"
-          if git diff --cached --quiet; then
-            echo "No version changes to commit"
-          else
-            git commit -m "chore: release — auto-bump versions [skip ci]
-
-          $(cat version-map.txt)"
-            git push origin ${{ github.ref_name }}
-          fi
 
       - name: Restore and pack changed libraries
         if: steps.changes.outputs.has_changes == 'True'
         shell: pwsh
         run: |
           $projects = "${{ steps.changes.outputs.projects }}".Split(',')
+          $version  = "${{ steps.changes.outputs.version }}"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           $versionLines = New-Object System.Collections.Generic.List[string]
 
           foreach ($project in $projects) {
             $csproj = Join-Path $project "$project.csproj"
-            [xml]$proj = Get-Content $csproj
-            $version = ($proj.Project.PropertyGroup | Where-Object { $_.Version } | Select-Object -First 1).Version
 
             $versionLines.Add("$project=$version")
 
@@ -186,8 +136,8 @@ jobs:
 
           # NuGet normalizes PackageReference ranges to use the restored version as
           # the lower bound. For libs to keep accepting older CodeLogic versions,
-          # rewrite each nupkg's .nuspec to use the literal range "[3.2.0, 5.0.0)".
-          $targetRange = '[3.2.0, 5.0.0)'
+          # rewrite each nupkg's .nuspec to use the literal range "[4.0.0, 5.0.0)".
+          $targetRange = '[4.0.0, 5.0.0)'
           foreach ($nupkg in Get-ChildItem artifacts -Filter '*.nupkg') {
             $tmp = "$env:RUNNER_TEMP/nupkg-$([Guid]::NewGuid())"
             New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -237,20 +187,19 @@ jobs:
             artifacts/*.nupkg
             artifacts/package-versions.txt
 
-      # NOTE: version bumps are intentionally NOT synced back to main.
-      # main is the working branch — it never carries auto-bumped csproj
-      # commits. The release branch owns the version line; when a release
-      # cycle finishes, release is ahead of main by one "chore: release —
-      # auto-bump versions [skip ci]" commit, which is the desired state.
+      # NOTE: this workflow no longer writes versions back to the repo.
+      # The package version is composed at pack time as
+      #   {major.minor from version.txt}.{github.run_number}[+short-sha]
+      # via -p:Version=, so no csproj is edited and nothing is committed.
+      # main and release therefore never diverge by a version-bump commit.
       #
       # Workflow:
-      #   - dev pushes feature work to main (no version churn there)
-      #   - when ready to publish: merge or fast-forward main → release
-      #   - this workflow fires, bumps versions, packs, publishes to NuGet,
-      #     and creates a GitHub release on the release branch
-      #   - main stays clean
+      #   - dev pushes feature work to main (no version churn anywhere)
+      #   - bump major/minor by editing version.txt when desired
+      #   - to publish: merge or fast-forward main → release
+      #   - this workflow fires, packs with the composed version, publishes
+      #     to NuGet, and creates a GitHub release
       #
-      # If the same csproj is edited on both branches (e.g. main adds a
-      # dependency while release has a version bump), git's line-level
-      # merge handles it automatically as long as nothing on main touches
-      # the <Version> element.
+      # The git short-sha rides in SemVer build-metadata: nuget.org strips it
+      # from the package version (provenance only), and it survives in each
+      # assembly's InformationalVersion.
