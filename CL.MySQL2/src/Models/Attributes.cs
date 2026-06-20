@@ -231,12 +231,12 @@ public sealed class RetainDaysAttribute : Attribute
 }
 
 /// <summary>
-/// Marks an entity for <b>soft deletes</b>. <see cref="Repository{T}.DeleteAsync"/> sets the
-/// named timestamp column to the current UTC time instead of issuing a physical DELETE, and
+/// Marks an entity for <b>soft deletes</b>. <see cref="CL.MySQL2.Services.Repository{T}.DeleteAsync(object, System.Threading.CancellationToken)"/>
+/// sets the named timestamp column to the current UTC time instead of issuing a physical DELETE, and
 /// reads through <c>mysql.Query&lt;T&gt;()</c> and the repository getters automatically exclude
 /// rows where that column is set (<c>WHERE col IS NULL</c>). Opt back in to deleted rows with
 /// <c>.IncludeDeleted()</c> on a query, or purge for real with
-/// <see cref="Repository{T}.HardDeleteAsync"/>.
+/// <see cref="CL.MySQL2.Services.Repository{T}.HardDeleteAsync(object, System.Threading.CancellationToken)"/>.
 /// <para>
 /// The referenced property must be a nullable <see cref="System.DateTime"/> mapped to a
 /// NULL-able <c>DATETIME</c> column. Auto soft-delete filtering applies to single-table
