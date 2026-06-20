@@ -141,8 +141,9 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
 
         // Re-key parameters into a join-local namespace so multiple predicates
         // (and carried-over left predicates) never collide on @p0/@p1/...
+        // Longer names are replaced first so @p1 can't clobber a substring of @p10/@p11.
         var rekeyed = new Dictionary<string, object?>();
-        foreach (var kv in parms)
+        foreach (var kv in parms.OrderByDescending(k => k.Key.Length))
         {
             var newKey = $"@jn_{_paramCounter++}";
             rekeyed[newKey] = kv.Value;

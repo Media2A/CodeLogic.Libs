@@ -61,8 +61,10 @@ public sealed class QueryBuilder<T> where T : class, new()
     public QueryBuilder<T> Where(Expression<Func<T, bool>> predicate)
     {
         var (clause, parms) = PostgreSQLExpressionVisitor.Translate(predicate);
+        // Re-key parameters to avoid collisions. Longer parameter names are replaced
+        // first so @p1 can't clobber a substring of @p10/@p11 (predicates with 11+ params).
         var rekeyed = new Dictionary<string, object?>();
-        foreach (var kv in parms)
+        foreach (var kv in parms.OrderByDescending(k => k.Key.Length))
         {
             var newKey = $"@qb_{_paramCounter++}";
             rekeyed[newKey] = kv.Value;

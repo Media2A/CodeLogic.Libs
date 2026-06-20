@@ -43,8 +43,23 @@ internal sealed class PostgreSQLExpressionVisitor : ExpressionVisitor
 
     protected override Expression VisitBinary(BinaryExpression node)
     {
-        _sql.Append('(');
-        Visit(node.Left);
+        // Null comparisons translate to IS [NOT] NULL and must be detected BEFORE we
+        // emit "(" and visit the operands — handling both operand orders. Do NOT clear
+        // the buffer here: it holds SQL already produced by enclosing clauses.
+        var isEqual = node.NodeType == ExpressionType.Equal;
+        var isNotEqual = node.NodeType == ExpressionType.NotEqual;
+        if (isEqual || isNotEqual)
+        {
+            // x.Prop == null  /  null == x.Prop
+            if (IsNullConstant(node.Right) || IsNullConstant(node.Left))
+            {
+                var operand = IsNullConstant(node.Right) ? node.Left : node.Right;
+                _sql.Append('(');
+                Visit(operand);
+                _sql.Append(isEqual ? " IS NULL)" : " IS NOT NULL)");
+                return node;
+            }
+        }
 
         var op = node.NodeType switch
         {
@@ -61,27 +76,8 @@ internal sealed class PostgreSQLExpressionVisitor : ExpressionVisitor
             _ => throw new NotSupportedException($"Unsupported binary operator: {node.NodeType}")
         };
 
-        // Handle x.Prop == null → IS NULL
-        if (node.NodeType == ExpressionType.Equal && IsNullConstant(node.Right))
-        {
-            _sql.Append(" IS NULL)");
-            return node;
-        }
-        if (node.NodeType == ExpressionType.NotEqual && IsNullConstant(node.Right))
-        {
-            _sql.Append(" IS NOT NULL)");
-            return node;
-        }
-        // Handle null == x.Prop
-        if (node.NodeType == ExpressionType.Equal && IsNullConstant(node.Left))
-        {
-            _sql.Clear();
-            _sql.Append('(');
-            Visit(node.Right);
-            _sql.Append(" IS NULL)");
-            return node;
-        }
-
+        _sql.Append('(');
+        Visit(node.Left);
         _sql.Append(op);
         Visit(node.Right);
         _sql.Append(')');

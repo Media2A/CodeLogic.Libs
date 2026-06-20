@@ -496,6 +496,9 @@ public sealed class Repository<T> where T : class, new()
         bool desc = false,
         CancellationToken ct = default)
     {
+        if (page < 1 || pageSize < 1)
+            return Result<PagedResult<T>>.Failure(Error.Validation(
+                "sqlite.paging", "page and pageSize must both be >= 1."));
         try
         {
             var offset = (page - 1) * pageSize;
