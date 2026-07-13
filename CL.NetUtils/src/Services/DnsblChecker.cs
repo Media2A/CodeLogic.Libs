@@ -174,8 +174,31 @@ public class DnsblChecker
 
             var addresses = await Task.Run(() => Dns.GetHostAddresses(lookup), linked.Token).ConfigureAwait(false);
 
-            if (addresses.Length > 0)
+            foreach (var answer in addresses)
             {
+                // DNSBL convention: a listing is an A record inside 127.0.0.0/8.
+                // Anything else is a wildcarded/parked domain answering for a dead
+                // zone — treating it as a listing would flag every IP checked.
+                var bytes = answer.AddressFamily == AddressFamily.InterNetwork ? answer.GetAddressBytes() : null;
+                if (bytes is null || bytes[0] != 127)
+                {
+                    if (detailedLogging)
+                        _logger?.Debug($"Ignoring non-127/8 DNSBL answer {answer} from {service}");
+                    continue;
+                }
+
+                // 127.255.255.0/24 is the Spamhaus error range (open resolver,
+                // query volume exceeded, typing error) — a service-side problem,
+                // not a listing. Warn loudly: while this persists the zone is
+                // silently checking nothing.
+                if (bytes[1] == 255 && bytes[2] == 255)
+                {
+                    _logger?.Warning(
+                        $"DNSBL {service} returned error code {answer} (public resolver blocked / query limit / config error) — " +
+                        "results from this zone are unusable until the resolver setup is fixed.");
+                    continue;
+                }
+
                 var addrType = IPAddress.TryParse(originalIp, out var parsed)
                     ? GetAddressType(parsed)
                     : IpAddressType.Unknown;
