@@ -39,12 +39,12 @@ The library speaks one protocol — S3 — but each provider needs slightly diff
 | Setting | AWS S3 | MinIO | Cloudflare R2 |
 |---------|--------|-------|---------------|
 | `serviceUrl` | `https://s3.amazonaws.com` | `http://localhost:9000` | `https://<account>.r2.cloudflarestorage.com` |
-| `region` | your region (e.g. `us-east-1`) | ignored | `auto` (ignored when `serviceUrl` set) |
+| `region` | your region (e.g. `us-east-1`) | signing region | `auto` |
 | `forcePathStyle` | `false` | `true` | `false` |
 | `useHttps` | `true` | `false` (local) | `true` |
 | `disablePayloadSigning` | `false` | `false` | `true` |
 
-`region` is only consulted when `serviceUrl` is blank; once a service URL is set, the endpoint wins and the region is ignored. `forcePathStyle: true` selects `host/bucket/key` addressing (required by MinIO and most non-AWS services); `false` selects `bucket.host/key` virtual-host addressing (AWS and R2). `disablePayloadSigning: true` turns off streaming AWS4 payload signing, which Cloudflare R2 rejects.
+`region` controls request signing even when `serviceUrl` is set; Cloudflare R2 uses `auto`. `forcePathStyle: true` selects `host/bucket/key` addressing (required by MinIO and most non-AWS services); `false` selects `bucket.host/key` virtual-host addressing (AWS and R2). `disablePayloadSigning: true` turns off streaming AWS4 payload signing, which Cloudflare R2 rejects.
 
 ## Bucket operations
 
@@ -311,7 +311,7 @@ The library writes `config.storages3.json` (section `storages3`) on first run. K
 | `secretKey` | `string` (secret) | `""` | Secret access key. Required. |
 | `serviceUrl` | `string` | `""` | Endpoint URL. Required. See the provider table above. |
 | `publicUrl` | `string` | `""` | Base URL for building public object links; leave blank for private buckets. |
-| `region` | `string` | `"us-east-1"` | AWS region; ignored when `serviceUrl` is set. |
+| `region` | `string` | `"us-east-1"` | Request-signing region. Use `"auto"` for Cloudflare R2. |
 | `defaultBucket` | `string` | `""` | Bucket used when code doesn't specify one. |
 | `forcePathStyle` | `bool` | `true` | Path-style addressing (`host/bucket/key`). Required for MinIO and most non-AWS services; set `false` for AWS and R2. |
 | `useHttps` | `bool` | `true` | Use HTTPS for the connection. |
@@ -333,7 +333,7 @@ All three events implement `IEvent` and are published to the CodeLogic event bus
 
 ## Health check
 
-`HealthCheckAsync()` tests every registered connection by listing its buckets, then aggregates:
+`HealthCheckAsync()` tests every registered connection by listing one object from its configured `defaultBucket`. This supports bucket-scoped credentials; connections without a default bucket fall back to listing buckets. Each check is bounded to ten seconds, then the library aggregates:
 
 - **Healthy** — all connections respond (or the library is disabled).
 - **Degraded** — some connections respond, some fail (the report names the failed IDs).

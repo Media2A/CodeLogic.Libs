@@ -3,6 +3,18 @@
 All notable changes to **CodeLogic.StorageS3** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-07-25
+
+### Fixed
+
+- Scope connection health checks to `defaultBucket` when configured, allowing
+  bucket-scoped Cloudflare R2 tokens without account-wide `ListBuckets` access.
+- Bound health checks to ten seconds so a failing endpoint cannot accumulate
+  overlapping SDK retry pipelines.
+- Apply `region` as the authentication region for custom service URLs.
+- Reject malformed Cloudflare R2 endpoints whose account ID is not exactly 32
+  hexadecimal characters.
+
 ## 2026-06-20
 
 ### Documentation

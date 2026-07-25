@@ -54,6 +54,17 @@ public sealed class S3ConnectionConfigTests
     }
 
     [Fact]
+    public void BuildClient_uses_configured_authentication_region_with_service_url()
+    {
+        var cfg = Valid();
+        cfg.Region = "auto";
+
+        using var client = cfg.BuildClient();
+
+        Assert.Equal("auto", client.Config.AuthenticationRegion);
+    }
+
+    [Fact]
     public void BuildClient_works_without_service_url_using_region()
     {
         // No ServiceUrl -> the client is built from the Region endpoint instead.
@@ -135,6 +146,29 @@ public sealed class StorageS3ConfigValidationTests
             Connections = [new S3ConnectionConfig { ConnectionId = "x" }], // no keys / url
         };
         Assert.False(cfg.Validate().IsValid);
+    }
+
+    [Theory]
+    [InlineData("https://b82cfe18700f7455daff39e87a6a3233b.r2.cloudflarestorage.com", false)]
+    [InlineData("https://b82cfe18700f7455daff39e87a6a323b.r2.cloudflarestorage.com", true)]
+    public void Cloudflare_R2_endpoint_requires_32_character_account_id(string endpoint, bool expectedValid)
+    {
+        var cfg = new StorageS3Config
+        {
+            Enabled = true,
+            Connections =
+            [
+                new S3ConnectionConfig
+                {
+                    ConnectionId = "Default",
+                    AccessKey = "test-access-key",
+                    SecretKey = "test-secret-key",
+                    ServiceUrl = endpoint
+                }
+            ]
+        };
+
+        Assert.Equal(expectedValid, cfg.Validate().IsValid);
     }
 }
 
@@ -241,6 +275,7 @@ public sealed class S3RuntimeFixture : IAsyncLifetime
         var serviceUrl = Environment.GetEnvironmentVariable("CL_S3_TEST_SERVICEURL")!;
         var accessKey = Environment.GetEnvironmentVariable("CL_S3_TEST_ACCESSKEY") ?? "";
         var secretKey = Environment.GetEnvironmentVariable("CL_S3_TEST_SECRETKEY") ?? "";
+        var bucket = Environment.GetEnvironmentVariable("CL_S3_TEST_BUCKET") ?? "";
 
         var cfgDir = Path.Combine(TempDir, "Libraries", "CL.StorageS3");
         Directory.CreateDirectory(cfgDir);
@@ -253,11 +288,13 @@ public sealed class S3RuntimeFixture : IAsyncLifetime
               "accessKey": "{{accessKey}}",
               "secretKey": "{{secretKey}}",
               "serviceUrl": "{{serviceUrl}}",
+              "defaultBucket": "{{bucket}}",
               "region": "us-east-1",
               "forcePathStyle": true,
               "useHttps": false,
               "timeoutSeconds": 30,
-              "maxRetries": 3
+              "maxRetries": 3,
+              "disablePayloadSigning": true
             }
           ]
         }
@@ -338,5 +375,15 @@ public sealed class LiveS3Tests
         Assert.True(del.IsSuccess, del.Error?.ToString());
 
         Assert.False(await svc.ObjectExistsAsync(bucket, key, CancellationToken.None));
+    }
+
+    [FactRequiresEnv("CL_S3_TEST_SERVICEURL", "set CL_S3_TEST_* to run live S3/MinIO test")]
+    public async Task Health_check_is_scoped_to_configured_bucket()
+    {
+        var lib = _fx.Library ?? throw new InvalidOperationException("Runtime not booted.");
+
+        var health = await lib.HealthCheckAsync();
+
+        Assert.True(health.IsHealthy, health.Message);
     }
 }
