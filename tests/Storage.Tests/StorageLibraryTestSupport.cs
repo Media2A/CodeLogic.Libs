@@ -88,6 +88,8 @@ internal sealed class TestLogger : ILogger
 
 internal sealed class FakeStorageBackend : IStorageBackend
 {
+    private readonly string _connectionId;
+    private readonly Func<string>? _connectionIdGetter;
     private readonly object? _nativeClient;
     private Func<CancellationToken, Task<Result>> _health;
     private readonly Func<string, CancellationToken, Task<Result<StorageItem>>>? _upload;
@@ -110,9 +112,11 @@ internal sealed class FakeStorageBackend : IStorageBackend
         Func<string, CancellationToken, Task<Result>>? delete = null,
         Func<string, string, CancellationToken, Task<Result>>? copy = null,
         Func<string, string, CancellationToken, Task<Result>>? move = null,
-        Func<ValueTask>? dispose = null)
+        Func<ValueTask>? dispose = null,
+        Func<string>? connectionIdGetter = null)
     {
-        ConnectionId = connectionId;
+        _connectionId = connectionId;
+        _connectionIdGetter = connectionIdGetter;
         Provider = provider;
         Root = root;
         _nativeClient = nativeClient;
@@ -125,7 +129,7 @@ internal sealed class FakeStorageBackend : IStorageBackend
         _dispose = dispose;
     }
 
-    public string ConnectionId { get; }
+    public string ConnectionId => _connectionIdGetter?.Invoke() ?? _connectionId;
     public StorageProvider Provider { get; }
     public string Root { get; }
     public StorageCapabilities Capabilities { get; } = new(true, true, true, true, true, true);

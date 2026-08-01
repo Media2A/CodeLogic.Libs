@@ -21,6 +21,7 @@ public sealed class StorageLibrary : ILibrary
     private readonly Dictionary<string, StorageServiceProxy> _proxies = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, StorageConnectionInfo> _connectionInfos = new(StringComparer.OrdinalIgnoreCase);
     private readonly IReadOnlyDictionary<Type, IStorageBackendFactory> _factories;
+    private readonly Action? _defaultConnectionSnapshotCaptured;
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
     private LocalStorageConfig? _localConfig;
@@ -30,12 +31,17 @@ public sealed class StorageLibrary : ILibrary
     private LifecycleState _state;
     private bool _enabled;
 
-    public StorageLibrary() : this([new LocalStorageBackendFactory()]) { }
+    public StorageLibrary() : this([new LocalStorageBackendFactory()], null) { }
 
-    internal StorageLibrary(IEnumerable<IStorageBackendFactory> factories)
+    internal StorageLibrary(IEnumerable<IStorageBackendFactory> factories) : this(factories, null) { }
+
+    internal StorageLibrary(
+        IEnumerable<IStorageBackendFactory> factories,
+        Action? defaultConnectionSnapshotCaptured)
     {
         ArgumentNullException.ThrowIfNull(factories);
         _factories = factories.ToDictionary(factory => factory.ConfigurationType);
+        _defaultConnectionSnapshotCaptured = defaultConnectionSnapshotCaptured;
         if (_factories.Count == 0)
             throw new ArgumentException("At least one storage backend factory is required.", nameof(factories));
     }
@@ -140,21 +146,26 @@ public sealed class StorageLibrary : ILibrary
                         $"The configured default storage connection '{storage.DefaultConnection}' is not available from an enabled provider factory.");
             }
 
-            lock (_registryGate)
-            {
-                foreach (var pair in builtEntries)
-                    _registry.Add(pair.Key, pair.Value);
-                foreach (var pair in infos)
-                    _connectionInfos.Add(pair.Key, pair.Value);
-            }
-
-            _storageConfig = storage;
-            _localConfig = local;
-            _persistedLocalConfig = CloneLocalConfig(local);
-            _runtimeLocalOverrides.Clear();
-            _enabled = storage.Enabled;
             lock (_stateGate)
+            {
+                if (_state != LifecycleState.Configured || !ReferenceEquals(_context, context))
+                    throw new InvalidOperationException("Storage library stopped before initialization completed.");
+
+                lock (_registryGate)
+                {
+                    foreach (var pair in builtEntries)
+                        _registry.Add(pair.Key, pair.Value);
+                    foreach (var pair in infos)
+                        _connectionInfos.Add(pair.Key, pair.Value);
+                }
+
+                _storageConfig = storage;
+                _localConfig = local;
+                _persistedLocalConfig = CloneLocalConfig(local);
+                _runtimeLocalOverrides.Clear();
+                _enabled = storage.Enabled;
                 _state = LifecycleState.Initialized;
+            }
         }
         catch
         {
@@ -239,21 +250,22 @@ public sealed class StorageLibrary : ILibrary
         {
             if (gateEntered)
                 _mutationGate.Release();
-            _context = null;
-            _storageConfig = null;
-            _localConfig = null;
-            _persistedLocalConfig = null;
-            _runtimeLocalOverrides.Clear();
-            _enabled = false;
             lock (_stateGate)
+            {
+                _context = null;
+                _storageConfig = null;
+                _localConfig = null;
+                _persistedLocalConfig = null;
+                _runtimeLocalOverrides.Clear();
+                _enabled = false;
                 _state = LifecycleState.Stopped;
+            }
         }
     }
 
     public async Task<HealthStatus> HealthCheckAsync()
     {
-        var state = GetLifecycleState();
-        if (state is not (LifecycleState.Initialized or LifecycleState.Started))
+        if (!TryCaptureRuntimeSnapshot(out _, out var state))
             return HealthStatus.Unhealthy($"Storage library is {DescribeState(state)}");
 
         var targets = new List<HealthTarget>();
@@ -270,22 +282,18 @@ public sealed class StorageLibrary : ILibrary
 
         try
         {
-            state = GetLifecycleState();
-            if (state is not (LifecycleState.Initialized or LifecycleState.Started))
+            if (!TryCaptureRuntimeSnapshot(out var runtime, out state))
                 return HealthStatus.Unhealthy($"Storage library is {DescribeState(state)}");
-            if (!_enabled)
+            if (!runtime.Enabled)
                 return HealthStatus.Healthy("Storage library is disabled");
 
-            var config = _storageConfig;
-            if (config is null)
-                return HealthStatus.Unhealthy("Storage library is stopping");
-            timeoutSeconds = config.HealthCheckTimeoutSeconds;
-            logger = _context!.Logger;
+            timeoutSeconds = runtime.HealthCheckTimeoutSeconds;
+            logger = runtime.Logger;
 
             lock (_registryGate)
             {
-                if (!_registry.ContainsKey(config.DefaultConnection))
-                    return HealthStatus.Unhealthy($"Default storage connection '{config.DefaultConnection}' is unavailable");
+                if (!_registry.ContainsKey(runtime.DefaultConnection))
+                    return HealthStatus.Unhealthy($"Default storage connection '{runtime.DefaultConnection}' is unavailable");
                 foreach (var (id, entry) in _registry)
                 {
                     if (!entry.TryAcquire(out var lease))
@@ -421,7 +429,7 @@ public sealed class StorageLibrary : ILibrary
     {
         ValidateConnectionId(id);
         ArgumentNullException.ThrowIfNull(config);
-        EnsureOperational();
+        var runtime = CaptureRuntimeSnapshot();
         cancellationToken.ThrowIfCancellationRequested();
         if (config is not LocalConnectionConfig localConnection)
             return Result.Failure(StorageErrors.Unsupported(
@@ -438,6 +446,7 @@ public sealed class StorageLibrary : ILibrary
             var built = await BuildHealthyLocalReplacementAsync(
                 id,
                 localConnection,
+                runtime,
                 cancellationToken).ConfigureAwait(false);
             if (built.IsFailure)
                 return Result.Failure(built.Error!);
@@ -452,7 +461,7 @@ public sealed class StorageLibrary : ILibrary
             gateEntered = true;
             EnsureOperational();
 
-            var conflictingSection = FindConfiguredNonLocalSection(id);
+            var conflictingSection = FindConfiguredNonLocalSection(id, runtime.Context);
             if (conflictingSection is not null)
                 return Result.Failure(StorageErrors.Conflict(
                     $"Storage connection ID '{id}' is already configured in '{conflictingSection}'. IDs are case-insensitive."));
@@ -464,12 +473,12 @@ public sealed class StorageLibrary : ILibrary
                 candidate.Connections[id] = Clone(localConnection);
                 try
                 {
-                    await _context!.Configuration.SaveAsync(candidate).ConfigureAwait(false);
+                    await runtime.Context.Configuration.SaveAsync(candidate).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception error)
                 {
-                    _context?.Logger.Error($"Failed to persist local storage connection '{id}'.", error);
+                    runtime.Logger.Error($"Failed to persist local storage connection '{id}'.", error);
                     return Result.Failure(StorageErrors.ProviderError(
                         $"Could not persist local storage connection '{id}'."));
                 }
@@ -511,22 +520,23 @@ public sealed class StorageLibrary : ILibrary
     private async Task<Result<BackendEntry>> BuildHealthyLocalReplacementAsync(
         string id,
         LocalConnectionConfig configuration,
+        RuntimeSnapshot runtime,
         CancellationToken cancellationToken)
     {
         BackendEntry? replacement = null;
         Task<Result>? probeTask = null;
         var deferCleanup = false;
-        var logger = _context!.Logger;
+        var logger = runtime.Logger;
         try
         {
             replacement = new BackendEntry(
                 _factories[typeof(LocalConnectionConfig)].Create(
                     id,
                     configuration,
-                    _storageConfig!.MaxBufferedDownloadBytes),
+                    runtime.MaxBufferedDownloadBytes),
                 ownsBackend: true);
 
-            var timeoutDuration = TimeSpan.FromSeconds(_storageConfig.HealthCheckTimeoutSeconds);
+            var timeoutDuration = TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds);
             using var timeout = new CancellationTokenSource(timeoutDuration);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
             Result health;
@@ -590,7 +600,7 @@ public sealed class StorageLibrary : ILibrary
         CancellationToken cancellationToken = default)
     {
         ValidateConnectionId(id);
-        EnsureOperational();
+        var runtime = CaptureRuntimeSnapshot();
         cancellationToken.ThrowIfCancellationRequested();
         BackendEntry? removed = null;
         await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -616,12 +626,12 @@ public sealed class StorageLibrary : ILibrary
                     candidate.Connections.Remove(persistedKey);
                 try
                 {
-                    await _context!.Configuration.SaveAsync(candidate).ConfigureAwait(false);
+                    await runtime.Context.Configuration.SaveAsync(candidate).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception error)
                 {
-                    _context?.Logger.Error($"Failed to persist removal of local storage connection '{id}'.", error);
+                    runtime.Logger.Error($"Failed to persist removal of local storage connection '{id}'.", error);
                     return Result.Failure(StorageErrors.ProviderError(
                         $"Could not persist removal of local storage connection '{id}'."));
                 }
@@ -658,12 +668,16 @@ public sealed class StorageLibrary : ILibrary
     {
         ValidateConnectionId(id);
         ArgumentNullException.ThrowIfNull(backend);
-        EnsureOperational();
+        var runtime = CaptureRuntimeSnapshot();
         if (!string.Equals(id, backend.ConnectionId, StringComparison.OrdinalIgnoreCase))
             return Result.Failure(StorageErrors.Conflict(
                 $"Backend connection ID '{backend.ConnectionId}' does not match registry ID '{id}'."));
 
-        var health = CheckRegistrationHealth(id, backend);
+        var health = CheckRegistrationHealth(
+            id,
+            backend,
+            runtime.HealthCheckTimeoutSeconds,
+            runtime.Logger);
         if (health.IsFailure)
             return health;
 
@@ -694,9 +708,12 @@ public sealed class StorageLibrary : ILibrary
         return Result.Success();
     }
 
-    private Result CheckRegistrationHealth(string id, IStorageBackend backend)
+    private static Result CheckRegistrationHealth(
+        string id,
+        IStorageBackend backend,
+        int timeoutSeconds,
+        ILogger logger)
     {
-        var timeoutSeconds = _storageConfig!.HealthCheckTimeoutSeconds;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
         try
         {
@@ -724,7 +741,7 @@ public sealed class StorageLibrary : ILibrary
         }
         catch (Exception error)
         {
-            _context?.Logger.Error($"Storage backend '{id}' threw during its registration health check.", error);
+            logger.Error($"Storage backend '{id}' threw during its registration health check.", error);
             return Result.Failure(StorageErrors.ProviderError(
                 $"Storage backend '{id}' failed its registration health check."));
         }
@@ -760,7 +777,9 @@ public sealed class StorageLibrary : ILibrary
 
     internal StorageEventPublisher CaptureEventPublisher()
     {
-        var context = _context ?? throw new InvalidOperationException("Storage library context is unavailable.");
+        LibraryContext context;
+        lock (_stateGate)
+            context = _context ?? throw new InvalidOperationException("Storage library context is unavailable.");
         return new StorageEventPublisher(context.Events, context.Logger);
     }
 
@@ -867,19 +886,46 @@ public sealed class StorageLibrary : ILibrary
 
     private string GetDefaultConnectionId()
     {
-        EnsureOperational();
-        return _storageConfig!.DefaultConnection;
+        var runtime = CaptureRuntimeSnapshot();
+        _defaultConnectionSnapshotCaptured?.Invoke();
+        return runtime.DefaultConnection;
     }
 
-    private void EnsureOperational()
+    private RuntimeSnapshot CaptureRuntimeSnapshot()
     {
-        LifecycleState state;
-        lock (_stateGate)
-            state = _state;
-        if (state is LifecycleState.Initialized or LifecycleState.Started)
-            return;
+        if (TryCaptureRuntimeSnapshot(out var runtime, out var state))
+            return runtime;
         throw new InvalidOperationException($"Storage library is {DescribeState(state)}; public access requires an initialized library.");
     }
+
+    private bool TryCaptureRuntimeSnapshot(out RuntimeSnapshot runtime, out LifecycleState state)
+    {
+        lock (_stateGate)
+        {
+            state = _state;
+            if (state is not (LifecycleState.Initialized or LifecycleState.Started))
+            {
+                runtime = default;
+                return false;
+            }
+
+            var context = _context ?? throw new InvalidOperationException(
+                "Storage library runtime context is unavailable while the library is initialized.");
+            var storageConfig = _storageConfig ?? throw new InvalidOperationException(
+                "Storage library runtime configuration is unavailable while the library is initialized.");
+            runtime = new RuntimeSnapshot(
+                context,
+                storageConfig,
+                context.Logger,
+                _enabled,
+                storageConfig.DefaultConnection,
+                storageConfig.MaxBufferedDownloadBytes,
+                storageConfig.HealthCheckTimeoutSeconds);
+            return true;
+        }
+    }
+
+    private void EnsureOperational() => _ = CaptureRuntimeSnapshot();
 
     private static string DescribeState(LifecycleState state) => state switch
     {
@@ -945,9 +991,9 @@ public sealed class StorageLibrary : ILibrary
             throw new ArgumentException("A storage connection ID is required.", nameof(connectionId));
     }
 
-    private string? FindConfiguredNonLocalSection(string id)
+    private static string? FindConfiguredNonLocalSection(string id, LibraryContext context)
     {
-        var configuration = _context!.Configuration;
+        var configuration = context.Configuration;
         if (Contains(configuration.Get<S3StorageConfig>(), id)) return "storage.s3";
         if (Contains(configuration.Get<FtpStorageConfig>(), id)) return "storage.ftp";
         if (Contains(configuration.Get<SftpStorageConfig>(), id)) return "storage.sftp";
@@ -1008,6 +1054,14 @@ public sealed class StorageLibrary : ILibrary
 
     private sealed record HealthProbe(string Id, bool Healthy, string Detail);
     private sealed record HealthTarget(string Id, BackendEntry.BackendOperationLease Lease);
+    private readonly record struct RuntimeSnapshot(
+        LibraryContext Context,
+        StorageConfig StorageConfig,
+        ILogger Logger,
+        bool Enabled,
+        string DefaultConnection,
+        long MaxBufferedDownloadBytes,
+        int HealthCheckTimeoutSeconds);
 
     private enum LifecycleState
     {

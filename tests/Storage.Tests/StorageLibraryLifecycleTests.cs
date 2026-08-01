@@ -7,6 +7,43 @@ namespace Storage.Tests;
 public sealed class StorageLibraryLifecycleTests
 {
     [Fact]
+    public async Task Stop_after_default_snapshot_reports_the_lifecycle_state()
+    {
+        using var directory = new TestDirectory();
+        var snapshotCaptured = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSnapshot = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var factory = new FakeStorageBackendFactory((id, _) => new FakeStorageBackend(id));
+        using var library = new global::CL.Storage.StorageLibrary(
+            [factory],
+            () =>
+            {
+                snapshotCaptured.TrySetResult();
+                releaseSnapshot.Task.GetAwaiter().GetResult();
+            });
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new() { RootPath = directory.Path });
+        var access = Task.Run(() => library.DefaultStorage);
+
+        try
+        {
+            await snapshotCaptured.Task.WaitAsync(TimeSpan.FromMilliseconds(750));
+            await library.OnStopAsync().WaitAsync(TimeSpan.FromMilliseconds(750));
+
+            releaseSnapshot.TrySetResult();
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => access);
+
+            Assert.Contains("stopped", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            releaseSnapshot.TrySetResult();
+        }
+    }
+
+    [Fact]
     public void Public_storage_access_rejects_use_before_initialization()
     {
         using var library = new global::CL.Storage.StorageLibrary();

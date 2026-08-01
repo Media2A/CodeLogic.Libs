@@ -12,6 +12,52 @@ namespace Storage.Tests;
 public sealed class StorageLibraryMutationTests
 {
     [Fact]
+    public async Task Stop_during_replacement_construction_reports_the_lifecycle_state()
+    {
+        using var directory = new TestDirectory();
+        var initial = new FakeStorageBackend("Default", root: "/initial");
+        var replacement = new FakeStorageBackend("Default", root: "/replacement");
+        var createStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCreate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var createCount = 0;
+        var factory = new FakeStorageBackendFactory((_, _) =>
+        {
+            if (Interlocked.Increment(ref createCount) == 1)
+                return initial;
+
+            createStarted.TrySetResult();
+            releaseCreate.Task.GetAwaiter().GetResult();
+            return replacement;
+        });
+        using var library = new global::CL.Storage.StorageLibrary([factory]);
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new() { RootPath = directory.Path });
+        var add = Task.Run(() => library.AddOrUpdateConnectionAsync(
+            "Default",
+            new LocalConnectionConfig { RootPath = directory.Path },
+            persist: false));
+
+        try
+        {
+            await createStarted.Task.WaitAsync(TimeSpan.FromMilliseconds(750));
+            await library.OnStopAsync().WaitAsync(TimeSpan.FromMilliseconds(750));
+
+            releaseCreate.TrySetResult();
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => add);
+
+            Assert.Contains("stopped", error.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(1, replacement.DisposeCount);
+        }
+        finally
+        {
+            releaseCreate.TrySetResult();
+        }
+    }
+
+    [Fact]
     public async Task Cancelled_noncooperative_replacement_probe_defers_disposal_until_probe_settles()
     {
         using var directory = new TestDirectory();
@@ -292,6 +338,46 @@ public sealed class StorageLibraryMutationTests
         Assert.Equal("/runtime", library.GetStorage("runtime").Root);
         Assert.Contains(library.GetConnections(), connection => connection.Id == "Runtime" && connection.Enabled);
         Assert.DoesNotContain((await ReloadLocalAsync(context.ConfigDirectory)).Connections.Keys, id => id == "Runtime");
+    }
+
+    [Fact]
+    public async Task Stop_during_backend_registration_reports_the_lifecycle_state()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var getterStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseGetter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var getterCount = 0;
+        var backend = new FakeStorageBackend(
+            "Runtime",
+            connectionIdGetter: () =>
+            {
+                if (Interlocked.Increment(ref getterCount) == 1)
+                {
+                    getterStarted.TrySetResult();
+                    releaseGetter.Task.GetAwaiter().GetResult();
+                }
+                return "Runtime";
+            });
+        var registration = Task.Run(() => library.RegisterBackend("Runtime", backend));
+
+        try
+        {
+            await getterStarted.Task.WaitAsync(TimeSpan.FromMilliseconds(750));
+            await library.OnStopAsync().WaitAsync(TimeSpan.FromMilliseconds(750));
+
+            releaseGetter.TrySetResult();
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => registration);
+
+            Assert.Contains("stopped", error.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, backend.DisposeCount);
+        }
+        finally
+        {
+            releaseGetter.TrySetResult();
+        }
     }
 
     [Fact]
