@@ -72,17 +72,41 @@ public sealed class S3ConnectionManager : IDisposable
     }
 
     /// <summary>
-    /// Tests whether the connection identified by <paramref name="connectionId"/> is reachable
-    /// by performing a lightweight <c>ListBuckets</c> call.
+    /// Tests whether the connection identified by <paramref name="connectionId"/> is reachable.
+    /// When a default bucket is configured, the check is scoped to that bucket so credentials
+    /// do not need account-wide <c>ListBuckets</c> permission.
     /// </summary>
     /// <param name="connectionId">Connection ID to test. Defaults to <c>"Default"</c>.</param>
+    /// <param name="cancellationToken">Cancels the bounded connectivity check.</param>
     /// <returns><see langword="true"/> when the call succeeds; <see langword="false"/> on error.</returns>
-    public async Task<bool> TestConnectionAsync(string connectionId = "Default")
+    public async Task<bool> TestConnectionAsync(
+        string connectionId = "Default",
+        CancellationToken cancellationToken = default)
     {
         try
         {
+            var config = GetConfiguration(connectionId)
+                ?? throw new InvalidOperationException($"No S3 connection configuration registered for ID '{connectionId}'");
             var client = GetClient(connectionId);
-            await client.ListBucketsAsync();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Min(config.TimeoutSeconds, 10)));
+
+            if (!string.IsNullOrWhiteSpace(config.DefaultBucket))
+            {
+                var request = new ListObjectsV2Request
+                {
+                    BucketName = config.DefaultBucket,
+                    MaxKeys = 1
+                };
+                var operation = client.ListObjectsV2Async(request, timeout.Token);
+                await operation.WaitAsync(timeout.Token);
+            }
+            else
+            {
+                var operation = client.ListBucketsAsync(timeout.Token);
+                await operation.WaitAsync(timeout.Token);
+            }
+
             _logger?.Debug($"S3 connection test succeeded for '{connectionId}'");
             return true;
         }

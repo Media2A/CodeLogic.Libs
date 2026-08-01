@@ -36,6 +36,9 @@ public class StorageS3Config : ConfigModelBase
             if (!conn.IsValid())
                 errors.Add($"Connection '{conn.ConnectionId}' is missing required fields (AccessKey, SecretKey, ServiceUrl)");
 
+            if (!HasValidR2AccountEndpoint(conn.ServiceUrl))
+                errors.Add($"Connection '{conn.ConnectionId}': Cloudflare R2 endpoint must contain a 32-character hexadecimal account ID");
+
             if (conn.TimeoutSeconds <= 0)
                 errors.Add($"Connection '{conn.ConnectionId}': TimeoutSeconds must be > 0");
 
@@ -46,6 +49,19 @@ public class StorageS3Config : ConfigModelBase
         return errors.Count > 0
             ? ConfigValidationResult.Invalid(errors)
             : ConfigValidationResult.Valid();
+    }
+
+    private static bool HasValidR2AccountEndpoint(string serviceUrl)
+    {
+        if (!Uri.TryCreate(serviceUrl, UriKind.Absolute, out var uri))
+            return true;
+
+        const string suffix = ".r2.cloudflarestorage.com";
+        if (!uri.Host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var accountId = uri.Host[..^suffix.Length];
+        return accountId.Length == 32 && accountId.All(Uri.IsHexDigit);
     }
 }
 
@@ -89,8 +105,8 @@ public class S3ConnectionConfig
         Placeholder = "https://cdn.example.com", Group = "Connection", Order = 14)]
     public string PublicUrl { get; set; } = "";
 
-    /// <summary>AWS region name (e.g. <c>us-east-1</c>). Defaults to <c>us-east-1</c>.</summary>
-    [ConfigField(Label = "Region", Description = "AWS region name (ignored when Service URL is set).",
+    /// <summary>Request-signing region (e.g. <c>us-east-1</c> or <c>auto</c> for R2). Defaults to <c>us-east-1</c>.</summary>
+    [ConfigField(Label = "Region", Description = "Request-signing region. Use auto for Cloudflare R2.",
         RequiresRestart = true, Group = "Connection", Order = 15)]
     public string Region { get; set; } = "us-east-1";
 
@@ -144,6 +160,7 @@ public class S3ConnectionConfig
         if (!string.IsNullOrWhiteSpace(ServiceUrl))
         {
             s3Config.ServiceURL = ServiceUrl;
+            s3Config.AuthenticationRegion = Region;
         }
         else
         {

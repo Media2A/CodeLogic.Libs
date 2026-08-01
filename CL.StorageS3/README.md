@@ -59,7 +59,7 @@ Existence checks (`BucketExistsAsync`, `ObjectExistsAsync`) return a plain `Task
 - **Presigned URLs** — temporary GET access links with a configurable expiry.
 - **Public URLs** — optional public base URL auto-populated on `S3ObjectInfo.PublicUrl`.
 - **Events** — `ObjectUploadedEvent`, `ObjectDeletedEvent`, and `BucketCreatedEvent` on the CodeLogic event bus.
-- **Health check** — tests every configured connection (`Healthy` / `Degraded` / `Unhealthy`).
+- **Health check** — tests every configured connection inside its `defaultBucket` when available, so bucket-scoped credentials are sufficient (`Healthy` / `Degraded` / `Unhealthy`).
 
 ## Configuration
 
@@ -96,7 +96,7 @@ Auto-generated on first run as `config.storages3.json` (section `storages3`):
 | `secretKey` | `""` | Secret access key (secret). |
 | `serviceUrl` | `""` | Endpoint URL. AWS `https://s3.amazonaws.com`; MinIO `http://localhost:9000`; R2 `https://<account>.r2.cloudflarestorage.com`. |
 | `publicUrl` | `""` | Optional public base URL for object links; leave blank for private buckets. |
-| `region` | `"us-east-1"` | AWS region; ignored when `serviceUrl` is set. |
+| `region` | `"us-east-1"` | Request-signing region. Use `"auto"` for Cloudflare R2. |
 | `defaultBucket` | `""` | Bucket used when code doesn't specify one. |
 | `forcePathStyle` | `true` | Path-style addressing; required for MinIO and most non-AWS services. |
 | `useHttps` | `true` | Use HTTPS for the connection. |
