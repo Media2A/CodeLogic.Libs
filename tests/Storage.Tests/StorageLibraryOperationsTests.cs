@@ -237,6 +237,30 @@ public sealed class StorageLibraryOperationsTests
     }
 
     [Fact]
+    public async Task Successful_mutation_uses_event_snapshot_when_stop_completes_during_publication()
+    {
+        using var directory = new TestDirectory();
+        var library = new global::CL.Storage.StorageLibrary();
+        var eventBus = new StopDuringPublishEventBus(library.OnStopAsync);
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path, eventBus);
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var backend = new FakeStorageBackend("Events", provider: StorageProvider.S3, root: "/original");
+        Assert.True(library.RegisterBackend("Events", backend).IsSuccess);
+
+        var result = await library.GetStorage("Events").UploadBytesAsync("saved.bin", [1]);
+
+        Assert.True(result.IsSuccess, result.Error?.Message);
+        var published = Assert.IsType<StorageItemWrittenEvent>(Assert.Single(eventBus.Published));
+        Assert.Equal("Events", published.ConnectionId);
+        Assert.Equal(StorageProvider.S3, published.Provider);
+        Assert.Equal("saved.bin", published.Path);
+        Assert.Contains(((TestLogger)context.Logger).Errors,
+            message => message.Contains("event", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, backend.DisposeCount);
+        library.Dispose();
+    }
+
+    [Fact]
     public async Task Mutation_event_handler_can_remove_same_connection_without_deadlocking_operation_lease()
     {
         using var directory = new TestDirectory();
@@ -310,20 +334,75 @@ public sealed class StorageLibraryOperationsTests
         var slowTwo = new FakeStorageBackend("SlowTwo");
         Assert.True(library.RegisterBackend("SlowOne", slowOne).IsSuccess);
         Assert.True(library.RegisterBackend("SlowTwo", slowTwo).IsSuccess);
-        slowOne.SetHealth(_ => new TaskCompletionSource<Result>().Task);
-        slowTwo.SetHealth(_ => new TaskCompletionSource<Result>().Task);
+        var releaseSlowOne = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSlowTwo = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
+        slowOne.SetHealth(_ => releaseSlowOne.Task);
+        slowTwo.SetHealth(_ => releaseSlowTwo.Task);
         var stopwatch = Stopwatch.StartNew();
 
-        var health = await library.HealthCheckAsync();
+        try
+        {
+            var health = await library.HealthCheckAsync();
 
-        stopwatch.Stop();
-        Assert.Equal(HealthStatusLevel.Degraded, health.Status);
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(1800), $"Health check took {stopwatch.Elapsed}.");
-        Assert.Contains("SlowOne", health.Message, StringComparison.Ordinal);
-        Assert.Contains("SlowTwo", health.Message, StringComparison.Ordinal);
-        var failed = Assert.IsType<Dictionary<string, object>>(health.Data!["failedConnections"]);
-        Assert.Equal("storage.timeout", failed["SlowOne"]);
-        Assert.Equal("storage.timeout", failed["SlowTwo"]);
+            stopwatch.Stop();
+            Assert.Equal(HealthStatusLevel.Degraded, health.Status);
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(1800), $"Health check took {stopwatch.Elapsed}.");
+            Assert.Contains("SlowOne", health.Message, StringComparison.Ordinal);
+            Assert.Contains("SlowTwo", health.Message, StringComparison.Ordinal);
+            var failed = Assert.IsType<Dictionary<string, object>>(health.Data!["failedConnections"]);
+            Assert.Equal("storage.timeout", failed["SlowOne"]);
+            Assert.Equal("storage.timeout", failed["SlowTwo"]);
+        }
+        finally
+        {
+            releaseSlowOne.TrySetResult(Result.Success());
+            releaseSlowTwo.TrySetResult(Result.Success());
+        }
+    }
+
+    [Fact]
+    public async Task Timed_out_health_probe_retains_backend_lease_until_real_probe_settles()
+    {
+        using var directory = new TestDirectory();
+        var defaultRoot = directory.CreateDirectory("default");
+        var context = StorageLibraryTestSupport.CreateContext(directory.CreateDirectory("library"));
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            storage => storage.HealthCheckTimeoutSeconds = 1,
+            local => local.Connections["Default"] = new() { RootPath = defaultRoot });
+        var releaseProbe = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var backend = new FakeStorageBackend("Default");
+        Assert.True(library.RegisterBackend("Default", backend).IsSuccess);
+        backend.SetHealth(_ => releaseProbe.Task);
+
+        Task<Result>? removal = null;
+        try
+        {
+            var healthTask = library.HealthCheckAsync();
+            var healthCompleted = await Task.WhenAny(healthTask, Task.Delay(TimeSpan.FromMilliseconds(1800)));
+            Assert.Same(healthTask, healthCompleted);
+            var health = await healthTask;
+            Assert.Equal(HealthStatusLevel.Unhealthy, health.Status);
+            var failed = Assert.IsType<Dictionary<string, object>>(health.Data!["failedConnections"]);
+            Assert.Equal(StorageErrors.TimeoutCode, failed["Default"]);
+
+            removal = library.RemoveConnectionAsync("DEFAULT", persist: false);
+            await Task.Delay(50);
+            Assert.False(removal.IsCompleted);
+            Assert.Equal(0, backend.DisposeCount);
+
+            releaseProbe.TrySetResult(Result.Success());
+            Assert.True((await removal).IsSuccess);
+            Assert.Equal(1, backend.DisposeCount);
+        }
+        finally
+        {
+            releaseProbe.TrySetResult(Result.Success());
+            if (removal is not null)
+                await removal;
+        }
     }
 
     [Fact]

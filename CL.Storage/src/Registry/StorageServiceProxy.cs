@@ -1,5 +1,7 @@
 using CL.Storage.Abstractions;
+using CL.Storage.Events;
 using CL.Storage.Models;
+using CodeLogic.Core.Events;
 using CodeLogic.Core.Results;
 
 namespace CL.Storage.Registry;
@@ -47,17 +49,20 @@ internal sealed class StorageServiceProxy : IStorageService
     public Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default) =>
         MutateWithEventAsync(
             backend => backend.DeleteAsync(path, options, cancellationToken),
-            (connectionId, provider) => _library.PublishDeletedAsync(connectionId, provider, path));
+            (connectionId, provider) => new StorageItemDeletedEvent(
+                connectionId, provider, path, DateTimeOffset.UtcNow));
 
     public Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
         MutateWithEventAsync(
             backend => backend.CopyAsync(sourcePath, destinationPath, options, cancellationToken),
-            (connectionId, provider) => _library.PublishCopiedAsync(connectionId, provider, sourcePath, destinationPath));
+            (connectionId, provider) => new StorageItemCopiedEvent(
+                connectionId, provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
 
     public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
         MutateWithEventAsync(
             backend => backend.MoveAsync(sourcePath, destinationPath, options, cancellationToken),
-            (connectionId, provider) => _library.PublishMovedAsync(connectionId, provider, sourcePath, destinationPath));
+            (connectionId, provider) => new StorageItemMovedEvent(
+                connectionId, provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
 
     private T Read<T>(Func<IStorageBackend, T> read)
     {
@@ -100,17 +105,19 @@ internal sealed class StorageServiceProxy : IStorageService
     {
         var lease = _library.AcquireOperation(_connectionId);
         Result<StorageItem> result;
-        string? connectionId = null;
-        StorageProvider provider = default;
-        string? eventPath = null;
+        StorageEventPublisher? publisher = null;
+        StorageItemWrittenEvent? @event = null;
         try
         {
             result = await operation(lease.Backend).ConfigureAwait(false);
             if (result.IsSuccess)
             {
-                connectionId = lease.Backend.ConnectionId;
-                provider = lease.Backend.Provider;
-                eventPath = result.Value?.Path ?? requestedPath;
+                @event = new StorageItemWrittenEvent(
+                    lease.Backend.ConnectionId,
+                    lease.Backend.Provider,
+                    result.Value?.Path ?? requestedPath,
+                    DateTimeOffset.UtcNow);
+                publisher = _library.CaptureEventPublisher();
             }
         }
         finally
@@ -118,25 +125,26 @@ internal sealed class StorageServiceProxy : IStorageService
             lease.Dispose();
         }
         if (result.IsSuccess)
-            await _library.PublishWrittenAsync(connectionId!, provider, eventPath!).ConfigureAwait(false);
+            await publisher!.PublishAsync(@event!).ConfigureAwait(false);
         return result;
     }
 
-    private async Task<Result> MutateWithEventAsync(
+    private async Task<Result> MutateWithEventAsync<TEvent>(
         Func<IStorageBackend, Task<Result>> operation,
-        Func<string, StorageProvider, Task> publish)
+        Func<string, StorageProvider, TEvent> createEvent)
+        where TEvent : IEvent
     {
         var lease = _library.AcquireOperation(_connectionId);
         Result result;
-        string? connectionId = null;
-        StorageProvider provider = default;
+        StorageEventPublisher? publisher = null;
+        TEvent? @event = default;
         try
         {
             result = await operation(lease.Backend).ConfigureAwait(false);
             if (result.IsSuccess)
             {
-                connectionId = lease.Backend.ConnectionId;
-                provider = lease.Backend.Provider;
+                @event = createEvent(lease.Backend.ConnectionId, lease.Backend.Provider);
+                publisher = _library.CaptureEventPublisher();
             }
         }
         finally
@@ -144,7 +152,7 @@ internal sealed class StorageServiceProxy : IStorageService
             lease.Dispose();
         }
         if (result.IsSuccess)
-            await publish(connectionId!, provider).ConfigureAwait(false);
+            await publisher!.PublishAsync(@event!).ConfigureAwait(false);
         return result;
     }
 }

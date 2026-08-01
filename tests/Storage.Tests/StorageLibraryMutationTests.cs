@@ -12,19 +12,25 @@ namespace Storage.Tests;
 public sealed class StorageLibraryMutationTests
 {
     [Fact]
-    public async Task Cancelled_replacement_probe_disposes_unpublished_owned_backend_exactly_once()
+    public async Task Cancelled_noncooperative_replacement_probe_defers_disposal_until_probe_settles()
     {
         using var directory = new TestDirectory();
         var initial = new FakeStorageBackend("Default", root: "/initial");
         var probeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseProbe = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var replacement = new FakeStorageBackend(
             "Default",
             root: "/replacement",
-            health: async cancellationToken =>
+            health: _ =>
             {
                 probeStarted.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-                return Result.Success();
+                return releaseProbe.Task;
+            },
+            dispose: () =>
+            {
+                disposed.TrySetResult();
+                return ValueTask.CompletedTask;
             });
         var backends = new Queue<IStorageBackend>([initial, replacement]);
         var factory = new FakeStorageBackendFactory((_, _) => backends.Dequeue());
@@ -43,10 +49,27 @@ public sealed class StorageLibraryMutationTests
         await probeStarted.Task;
 
         cancellation.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => add);
+        try
+        {
+            var completed = await Task.WhenAny(add, Task.Delay(TimeSpan.FromMilliseconds(750)));
+            Assert.Same(add, completed);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => add);
 
-        Assert.Equal(1, replacement.DisposeCount);
-        Assert.Equal("/initial", library.DefaultStorage.Root);
+            Assert.Equal(0, replacement.DisposeCount);
+            Assert.Equal("/initial", library.DefaultStorage.Root);
+
+            releaseProbe.TrySetException(new InvalidOperationException("late probe failure"));
+            await disposed.Task.WaitAsync(TimeSpan.FromMilliseconds(750));
+            Assert.Equal(1, replacement.DisposeCount);
+            Assert.Contains(((TestLogger)context.Logger).Errors,
+                message => message.Contains("probe", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            releaseProbe.TrySetResult(Result.Success());
+            try { await releaseProbe.Task; }
+            catch (InvalidOperationException) { }
+        }
     }
 
     [Fact]
@@ -55,10 +78,16 @@ public sealed class StorageLibraryMutationTests
         using var directory = new TestDirectory();
         var initial = new FakeStorageBackend("Default", root: "/initial");
         var releaseProbe = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var replacement = new FakeStorageBackend(
             "Default",
             root: "/replacement",
-            health: _ => releaseProbe.Task);
+            health: _ => releaseProbe.Task,
+            dispose: () =>
+            {
+                disposed.TrySetResult();
+                return ValueTask.CompletedTask;
+            });
         var backends = new Queue<IStorageBackend>([initial, replacement]);
         var factory = new FakeStorageBackendFactory((_, _) => backends.Dequeue());
         using var library = new global::CL.Storage.StorageLibrary([factory]);
@@ -83,8 +112,12 @@ public sealed class StorageLibraryMutationTests
             Assert.True(result.IsFailure);
             Assert.Equal(StorageErrors.TimeoutCode, result.Error!.Code);
             Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(1800), $"Probe took {stopwatch.Elapsed}.");
-            Assert.Equal(1, replacement.DisposeCount);
+            Assert.Equal(0, replacement.DisposeCount);
             Assert.Equal("/initial", library.DefaultStorage.Root);
+
+            releaseProbe.TrySetResult(Result.Success());
+            await disposed.Task.WaitAsync(TimeSpan.FromMilliseconds(750));
+            Assert.Equal(1, replacement.DisposeCount);
         }
         finally
         {

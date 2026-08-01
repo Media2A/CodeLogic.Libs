@@ -2,11 +2,10 @@ using System.Collections.ObjectModel;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
-using CL.Storage.Events;
 using CL.Storage.Models;
 using CL.Storage.Providers;
 using CL.Storage.Registry;
-using CodeLogic.Core.Events;
+using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
 using CodeLogic.Framework.Libraries;
 
@@ -259,6 +258,7 @@ public sealed class StorageLibrary : ILibrary
 
         var targets = new List<HealthTarget>();
         int timeoutSeconds;
+        ILogger logger;
         try
         {
             await _mutationGate.WaitAsync().ConfigureAwait(false);
@@ -280,6 +280,7 @@ public sealed class StorageLibrary : ILibrary
             if (config is null)
                 return HealthStatus.Unhealthy("Storage library is stopping");
             timeoutSeconds = config.HealthCheckTimeoutSeconds;
+            logger = _context!.Logger;
 
             lock (_registryGate)
             {
@@ -303,16 +304,8 @@ public sealed class StorageLibrary : ILibrary
             _mutationGate.Release();
         }
 
-        HealthProbe[] probes;
-        try
-        {
-            probes = await Task.WhenAll(targets.Select(target => ProbeHealthAsync(target, timeoutSeconds))).ConfigureAwait(false);
-        }
-        finally
-        {
-            foreach (var target in targets)
-                target.Lease.Dispose();
-        }
+        var probes = await Task.WhenAll(
+            targets.Select(target => ProbeHealthAsync(target, timeoutSeconds, logger))).ConfigureAwait(false);
 
         state = GetLifecycleState();
         if (state is not (LifecycleState.Initialized or LifecycleState.Started))
@@ -521,6 +514,9 @@ public sealed class StorageLibrary : ILibrary
         CancellationToken cancellationToken)
     {
         BackendEntry? replacement = null;
+        Task<Result>? probeTask = null;
+        var deferCleanup = false;
+        var logger = _context!.Logger;
         try
         {
             replacement = new BackendEntry(
@@ -536,22 +532,26 @@ public sealed class StorageLibrary : ILibrary
             Result health;
             try
             {
-                health = await replacement.Backend.CheckHealthAsync(linked.Token)
+                probeTask = replacement.Backend.CheckHealthAsync(linked.Token);
+                health = await probeTask
                     .WaitAsync(timeoutDuration, cancellationToken)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                deferCleanup = true;
                 throw;
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
+                deferCleanup = true;
                 return Result<BackendEntry>.Failure(StorageErrors.Timeout(
                     $"Storage connection '{id}' timed out during replacement health check."));
             }
             catch (TimeoutException)
             {
                 timeout.Cancel();
+                deferCleanup = true;
                 return Result<BackendEntry>.Failure(StorageErrors.Timeout(
                     $"Storage connection '{id}' timed out during replacement health check."));
             }
@@ -574,13 +574,11 @@ public sealed class StorageLibrary : ILibrary
         {
             if (replacement is not null)
             {
-                try { await replacement.RetireAndDisposeAsync().ConfigureAwait(false); }
-                catch (Exception error)
-                {
-                    _context?.Logger.Error(
-                        $"Failed to dispose unpublished storage replacement '{id}'.",
-                        error);
-                }
+                var cleanup = ObserveProbeAndDisposeReplacementAsync(id, replacement, probeTask, logger);
+                if (deferCleanup || probeTask is { IsCompleted: false })
+                    _ = cleanup;
+                else
+                    await cleanup.ConfigureAwait(false);
             }
         }
     }
@@ -760,37 +758,47 @@ public sealed class StorageLibrary : ILibrary
         }
     }
 
-    internal Task PublishWrittenAsync(string connectionId, StorageProvider provider, string path) => PublishEventAsync(
-        new StorageItemWrittenEvent(connectionId, provider, path, DateTimeOffset.UtcNow));
-
-    internal Task PublishDeletedAsync(string connectionId, StorageProvider provider, string path) => PublishEventAsync(
-        new StorageItemDeletedEvent(connectionId, provider, path, DateTimeOffset.UtcNow));
-
-    internal Task PublishCopiedAsync(string connectionId, StorageProvider provider, string sourcePath, string destinationPath) => PublishEventAsync(
-        new StorageItemCopiedEvent(connectionId, provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
-
-    internal Task PublishMovedAsync(string connectionId, StorageProvider provider, string sourcePath, string destinationPath) => PublishEventAsync(
-        new StorageItemMovedEvent(connectionId, provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
-
-    private async Task PublishEventAsync<TEvent>(TEvent @event) where TEvent : IEvent
+    internal StorageEventPublisher CaptureEventPublisher()
     {
-        try
+        var context = _context ?? throw new InvalidOperationException("Storage library context is unavailable.");
+        return new StorageEventPublisher(context.Events, context.Logger);
+    }
+
+    private static async Task ObserveProbeAndDisposeReplacementAsync(
+        string id,
+        BackendEntry replacement,
+        Task<Result>? probeTask,
+        ILogger logger)
+    {
+        if (probeTask is not null)
         {
-            await _context!.Events.PublishAsync(@event).ConfigureAwait(false);
+            try { await probeTask.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                TryLog(logger, $"Unpublished storage replacement '{id}' health probe failed after the caller stopped waiting.", error);
+            }
         }
+
+        try { await replacement.RetireAndDisposeAsync().ConfigureAwait(false); }
         catch (Exception error)
         {
-            _context?.Logger.Error($"Storage event publication failed for '{typeof(TEvent).Name}'.", error);
+            TryLog(logger, $"Failed to dispose unpublished storage replacement '{id}'.", error);
         }
     }
 
-    private static async Task<HealthProbe> ProbeHealthAsync(HealthTarget target, int timeoutSeconds)
+    private static async Task<HealthProbe> ProbeHealthAsync(
+        HealthTarget target,
+        int timeoutSeconds,
+        ILogger logger)
     {
+        Task<Result>? probeTask = null;
         using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
         {
             try
             {
-                var result = await target.Lease.Backend.CheckHealthAsync(timeout.Token)
+                probeTask = target.Lease.Backend.CheckHealthAsync(timeout.Token);
+                var result = await probeTask
                     .WaitAsync(TimeSpan.FromSeconds(timeoutSeconds))
                     .ConfigureAwait(false);
                 return result.IsSuccess
@@ -810,7 +818,45 @@ public sealed class StorageLibrary : ILibrary
             {
                 return new HealthProbe(target.Id, false, "storage.provider_error");
             }
+            finally
+            {
+                if (probeTask is null)
+                {
+                    target.Lease.Dispose();
+                }
+                else
+                {
+                    var release = ObserveProbeAndReleaseHealthLeaseAsync(target, probeTask, logger);
+                    if (probeTask.IsCompleted)
+                        await release.ConfigureAwait(false);
+                    else
+                        _ = release;
+                }
+            }
         }
+    }
+
+    private static async Task ObserveProbeAndReleaseHealthLeaseAsync(
+        HealthTarget target,
+        Task<Result> probeTask,
+        ILogger logger)
+    {
+        try { await probeTask.ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            TryLog(logger, $"Storage connection '{target.Id}' health probe failed after the caller stopped waiting.", error);
+        }
+        finally
+        {
+            target.Lease.Dispose();
+        }
+    }
+
+    private static void TryLog(ILogger logger, string message, Exception error)
+    {
+        try { logger.Error(message, error); }
+        catch { }
     }
 
     private LifecycleState GetLifecycleState()

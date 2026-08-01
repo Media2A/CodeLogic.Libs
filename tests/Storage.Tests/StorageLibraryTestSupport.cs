@@ -218,6 +218,23 @@ internal sealed class ThrowingEventBus : IEventBus
     public IEventSubscription SubscribeAsync<T>(Func<T, Task> handler) where T : IEvent => throw new NotSupportedException();
 }
 
+internal sealed class StopDuringPublishEventBus(Func<Task> stop) : IEventBus
+{
+    public List<IEvent> Published { get; } = [];
+
+    public void Publish<T>(T @event) where T : IEvent => throw new NotSupportedException();
+
+    public async Task PublishAsync<T>(T @event) where T : IEvent
+    {
+        await stop();
+        Published.Add(@event);
+        throw new InvalidOperationException("event failure after stop");
+    }
+
+    public IEventSubscription Subscribe<T>(Action<T> handler) where T : IEvent => throw new NotSupportedException();
+    public IEventSubscription SubscribeAsync<T>(Func<T, Task> handler) where T : IEvent => throw new NotSupportedException();
+}
+
 internal sealed class FakeStorageBackendFactory(
     Func<string, object, IStorageBackend> create) : IStorageBackendFactory
 {
