@@ -3,6 +3,7 @@ using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
+using CL.Storage.Providers;
 using CodeLogic.Core.Configuration;
 using CodeLogic.Core.Events;
 using CodeLogic.Core.Localization;
@@ -215,4 +216,13 @@ internal sealed class ThrowingEventBus : IEventBus
     }
     public IEventSubscription Subscribe<T>(Action<T> handler) where T : IEvent => throw new NotSupportedException();
     public IEventSubscription SubscribeAsync<T>(Func<T, Task> handler) where T : IEvent => throw new NotSupportedException();
+}
+
+internal sealed class FakeStorageBackendFactory(
+    Func<string, object, IStorageBackend> create) : IStorageBackendFactory
+{
+    public Type ConfigurationType => typeof(LocalConnectionConfig);
+    public StorageProvider Provider => StorageProvider.Local;
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes) =>
+        create(connectionId, configuration);
 }

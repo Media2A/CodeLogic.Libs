@@ -237,6 +237,39 @@ public sealed class StorageLibraryOperationsTests
     }
 
     [Fact]
+    public async Task Mutation_event_handler_can_remove_same_connection_without_deadlocking_operation_lease()
+    {
+        using var directory = new TestDirectory();
+        var eventBus = new EventBus();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path, eventBus);
+        var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var backend = new FakeStorageBackend("Reentrant", provider: StorageProvider.S3, root: "/original");
+        Assert.True(library.RegisterBackend("Reentrant", backend).IsSuccess);
+        StorageItemWrittenEvent? observed = null;
+        Result removal = default;
+        using var subscription = eventBus.SubscribeAsync<StorageItemWrittenEvent>(async @event =>
+        {
+            observed = @event;
+            removal = await library.RemoveConnectionAsync("REENTRANT", persist: false);
+        });
+
+        var upload = library.GetStorage("Reentrant").UploadBytesAsync("written.bin", [1]);
+        var completed = await Task.WhenAny(upload, Task.Delay(TimeSpan.FromMilliseconds(750)));
+
+        Assert.Same(upload, completed);
+        Assert.True((await upload).IsSuccess);
+        Assert.True(removal.IsSuccess, removal.Error?.Message);
+        Assert.NotNull(observed);
+        Assert.Equal("Reentrant", observed.ConnectionId);
+        Assert.Equal(StorageProvider.S3, observed.Provider);
+        Assert.Equal("written.bin", observed.Path);
+        Assert.Equal(1, backend.DisposeCount);
+        await library.OnStopAsync();
+        library.Dispose();
+    }
+
+    [Fact]
     public async Task Proxy_propagates_cancellation_and_never_disposes_the_caller_upload_stream()
     {
         using var directory = new TestDirectory();

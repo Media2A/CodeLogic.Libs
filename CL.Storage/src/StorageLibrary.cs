@@ -21,9 +21,7 @@ public sealed class StorageLibrary : ILibrary
     private readonly Dictionary<string, BackendEntry> _registry = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, StorageServiceProxy> _proxies = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, StorageConnectionInfo> _connectionInfos = new(StringComparer.OrdinalIgnoreCase);
-    private readonly IReadOnlyDictionary<Type, IStorageBackendFactory> _factories =
-        new IStorageBackendFactory[] { new LocalStorageBackendFactory() }
-            .ToDictionary(factory => factory.ConfigurationType);
+    private readonly IReadOnlyDictionary<Type, IStorageBackendFactory> _factories;
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
     private LocalStorageConfig? _localConfig;
@@ -32,6 +30,16 @@ public sealed class StorageLibrary : ILibrary
     private Task? _stopTask;
     private LifecycleState _state;
     private bool _enabled;
+
+    public StorageLibrary() : this([new LocalStorageBackendFactory()]) { }
+
+    internal StorageLibrary(IEnumerable<IStorageBackendFactory> factories)
+    {
+        ArgumentNullException.ThrowIfNull(factories);
+        _factories = factories.ToDictionary(factory => factory.ConfigurationType);
+        if (_factories.Count == 0)
+            throw new ArgumentException("At least one storage backend factory is required.", nameof(factories));
+    }
 
     public LibraryManifest Manifest { get; } = new()
     {
@@ -434,28 +442,13 @@ public sealed class StorageLibrary : ILibrary
         BackendEntry? replacement = null;
         if (localConnection.Enabled)
         {
-            try
-            {
-                replacement = new BackendEntry(
-                    _factories[typeof(LocalConnectionConfig)].Create(
-                        id,
-                        localConnection,
-                        _storageConfig!.MaxBufferedDownloadBytes),
-                    ownsBackend: true);
-                var health = await replacement.Backend.CheckHealthAsync(cancellationToken).ConfigureAwait(false);
-                if (health.IsFailure)
-                {
-                    await replacement.RetireAndDisposeAsync().ConfigureAwait(false);
-                    return Result.Failure(health.Error!);
-                }
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception error)
-            {
-                if (replacement is not null)
-                    await replacement.RetireAndDisposeAsync().ConfigureAwait(false);
-                return Result.Failure(StorageErrors.ProviderError($"Could not build local storage connection '{id}'.", error.Message));
-            }
+            var built = await BuildHealthyLocalReplacementAsync(
+                id,
+                localConnection,
+                cancellationToken).ConfigureAwait(false);
+            if (built.IsFailure)
+                return Result.Failure(built.Error!);
+            replacement = built.Value!;
         }
 
         BackendEntry? previous = null;
@@ -520,6 +513,76 @@ public sealed class StorageLibrary : ILibrary
         if (previous is not null)
             await previous.RetireAndDisposeAsync().ConfigureAwait(false);
         return Result.Success();
+    }
+
+    private async Task<Result<BackendEntry>> BuildHealthyLocalReplacementAsync(
+        string id,
+        LocalConnectionConfig configuration,
+        CancellationToken cancellationToken)
+    {
+        BackendEntry? replacement = null;
+        try
+        {
+            replacement = new BackendEntry(
+                _factories[typeof(LocalConnectionConfig)].Create(
+                    id,
+                    configuration,
+                    _storageConfig!.MaxBufferedDownloadBytes),
+                ownsBackend: true);
+
+            var timeoutDuration = TimeSpan.FromSeconds(_storageConfig.HealthCheckTimeoutSeconds);
+            using var timeout = new CancellationTokenSource(timeoutDuration);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+            Result health;
+            try
+            {
+                health = await replacement.Backend.CheckHealthAsync(linked.Token)
+                    .WaitAsync(timeoutDuration, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                return Result<BackendEntry>.Failure(StorageErrors.Timeout(
+                    $"Storage connection '{id}' timed out during replacement health check."));
+            }
+            catch (TimeoutException)
+            {
+                timeout.Cancel();
+                return Result<BackendEntry>.Failure(StorageErrors.Timeout(
+                    $"Storage connection '{id}' timed out during replacement health check."));
+            }
+
+            if (health.IsFailure)
+                return Result<BackendEntry>.Failure(health.Error!);
+
+            var result = replacement;
+            replacement = null;
+            return Result<BackendEntry>.Success(result);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error)
+        {
+            return Result<BackendEntry>.Failure(StorageErrors.ProviderError(
+                $"Could not build local storage connection '{id}'.",
+                error.Message));
+        }
+        finally
+        {
+            if (replacement is not null)
+            {
+                try { await replacement.RetireAndDisposeAsync().ConfigureAwait(false); }
+                catch (Exception error)
+                {
+                    _context?.Logger.Error(
+                        $"Failed to dispose unpublished storage replacement '{id}'.",
+                        error);
+                }
+            }
+        }
     }
 
     /// <summary>Removes an effective connection and, for local connections, optionally persists the removal.</summary>
@@ -697,17 +760,17 @@ public sealed class StorageLibrary : ILibrary
         }
     }
 
-    internal Task PublishWrittenAsync(IStorageBackend backend, string path) => PublishEventAsync(
-        new StorageItemWrittenEvent(backend.ConnectionId, backend.Provider, path, DateTimeOffset.UtcNow));
+    internal Task PublishWrittenAsync(string connectionId, StorageProvider provider, string path) => PublishEventAsync(
+        new StorageItemWrittenEvent(connectionId, provider, path, DateTimeOffset.UtcNow));
 
-    internal Task PublishDeletedAsync(IStorageBackend backend, string path) => PublishEventAsync(
-        new StorageItemDeletedEvent(backend.ConnectionId, backend.Provider, path, DateTimeOffset.UtcNow));
+    internal Task PublishDeletedAsync(string connectionId, StorageProvider provider, string path) => PublishEventAsync(
+        new StorageItemDeletedEvent(connectionId, provider, path, DateTimeOffset.UtcNow));
 
-    internal Task PublishCopiedAsync(IStorageBackend backend, string sourcePath, string destinationPath) => PublishEventAsync(
-        new StorageItemCopiedEvent(backend.ConnectionId, backend.Provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
+    internal Task PublishCopiedAsync(string connectionId, StorageProvider provider, string sourcePath, string destinationPath) => PublishEventAsync(
+        new StorageItemCopiedEvent(connectionId, provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
 
-    internal Task PublishMovedAsync(IStorageBackend backend, string sourcePath, string destinationPath) => PublishEventAsync(
-        new StorageItemMovedEvent(backend.ConnectionId, backend.Provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
+    internal Task PublishMovedAsync(string connectionId, StorageProvider provider, string sourcePath, string destinationPath) => PublishEventAsync(
+        new StorageItemMovedEvent(connectionId, provider, sourcePath, destinationPath, DateTimeOffset.UtcNow));
 
     private async Task PublishEventAsync<TEvent>(TEvent @event) where TEvent : IEvent
     {

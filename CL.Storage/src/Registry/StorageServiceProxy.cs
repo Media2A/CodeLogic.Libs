@@ -47,17 +47,17 @@ internal sealed class StorageServiceProxy : IStorageService
     public Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default) =>
         MutateWithEventAsync(
             backend => backend.DeleteAsync(path, options, cancellationToken),
-            backend => _library.PublishDeletedAsync(backend, path));
+            (connectionId, provider) => _library.PublishDeletedAsync(connectionId, provider, path));
 
     public Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
         MutateWithEventAsync(
             backend => backend.CopyAsync(sourcePath, destinationPath, options, cancellationToken),
-            backend => _library.PublishCopiedAsync(backend, sourcePath, destinationPath));
+            (connectionId, provider) => _library.PublishCopiedAsync(connectionId, provider, sourcePath, destinationPath));
 
     public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
         MutateWithEventAsync(
             backend => backend.MoveAsync(sourcePath, destinationPath, options, cancellationToken),
-            backend => _library.PublishMovedAsync(backend, sourcePath, destinationPath));
+            (connectionId, provider) => _library.PublishMovedAsync(connectionId, provider, sourcePath, destinationPath));
 
     private T Read<T>(Func<IStorageBackend, T> read)
     {
@@ -98,21 +98,53 @@ internal sealed class StorageServiceProxy : IStorageService
         string requestedPath,
         Func<IStorageBackend, Task<Result<StorageItem>>> operation)
     {
-        using var lease = _library.AcquireOperation(_connectionId);
-        var result = await operation(lease.Backend).ConfigureAwait(false);
+        var lease = _library.AcquireOperation(_connectionId);
+        Result<StorageItem> result;
+        string? connectionId = null;
+        StorageProvider provider = default;
+        string? eventPath = null;
+        try
+        {
+            result = await operation(lease.Backend).ConfigureAwait(false);
+            if (result.IsSuccess)
+            {
+                connectionId = lease.Backend.ConnectionId;
+                provider = lease.Backend.Provider;
+                eventPath = result.Value?.Path ?? requestedPath;
+            }
+        }
+        finally
+        {
+            lease.Dispose();
+        }
         if (result.IsSuccess)
-            await _library.PublishWrittenAsync(lease.Backend, result.Value?.Path ?? requestedPath).ConfigureAwait(false);
+            await _library.PublishWrittenAsync(connectionId!, provider, eventPath!).ConfigureAwait(false);
         return result;
     }
 
     private async Task<Result> MutateWithEventAsync(
         Func<IStorageBackend, Task<Result>> operation,
-        Func<IStorageBackend, Task> publish)
+        Func<string, StorageProvider, Task> publish)
     {
-        using var lease = _library.AcquireOperation(_connectionId);
-        var result = await operation(lease.Backend).ConfigureAwait(false);
+        var lease = _library.AcquireOperation(_connectionId);
+        Result result;
+        string? connectionId = null;
+        StorageProvider provider = default;
+        try
+        {
+            result = await operation(lease.Backend).ConfigureAwait(false);
+            if (result.IsSuccess)
+            {
+                connectionId = lease.Backend.ConnectionId;
+                provider = lease.Backend.Provider;
+            }
+        }
+        finally
+        {
+            lease.Dispose();
+        }
         if (result.IsSuccess)
-            await publish(lease.Backend).ConfigureAwait(false);
+            await publish(connectionId!, provider).ConfigureAwait(false);
         return result;
     }
 }

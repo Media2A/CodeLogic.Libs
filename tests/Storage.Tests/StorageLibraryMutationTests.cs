@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
@@ -9,6 +11,89 @@ namespace Storage.Tests;
 
 public sealed class StorageLibraryMutationTests
 {
+    [Fact]
+    public async Task Cancelled_replacement_probe_disposes_unpublished_owned_backend_exactly_once()
+    {
+        using var directory = new TestDirectory();
+        var initial = new FakeStorageBackend("Default", root: "/initial");
+        var probeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var replacement = new FakeStorageBackend(
+            "Default",
+            root: "/replacement",
+            health: async cancellationToken =>
+            {
+                probeStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return Result.Success();
+            });
+        var backends = new Queue<IStorageBackend>([initial, replacement]);
+        var factory = new FakeStorageBackendFactory((_, _) => backends.Dequeue());
+        using var library = new global::CL.Storage.StorageLibrary([factory]);
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new() { RootPath = directory.Path });
+        using var cancellation = new CancellationTokenSource();
+        var add = library.AddOrUpdateConnectionAsync(
+            "Default",
+            new LocalConnectionConfig { RootPath = directory.Path },
+            persist: false,
+            cancellation.Token);
+        await probeStarted.Task;
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => add);
+
+        Assert.Equal(1, replacement.DisposeCount);
+        Assert.Equal("/initial", library.DefaultStorage.Root);
+    }
+
+    [Fact]
+    public async Task Noncooperative_replacement_probe_honors_hard_timeout_and_is_not_published()
+    {
+        using var directory = new TestDirectory();
+        var initial = new FakeStorageBackend("Default", root: "/initial");
+        var releaseProbe = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var replacement = new FakeStorageBackend(
+            "Default",
+            root: "/replacement",
+            health: _ => releaseProbe.Task);
+        var backends = new Queue<IStorageBackend>([initial, replacement]);
+        var factory = new FakeStorageBackendFactory((_, _) => backends.Dequeue());
+        using var library = new global::CL.Storage.StorageLibrary([factory]);
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            storage => storage.HealthCheckTimeoutSeconds = 1,
+            local => local.Connections["Default"] = new() { RootPath = directory.Path });
+        var stopwatch = Stopwatch.StartNew();
+        var add = library.AddOrUpdateConnectionAsync(
+            "Default",
+            new LocalConnectionConfig { RootPath = directory.Path },
+            persist: false);
+
+        try
+        {
+            var completed = await Task.WhenAny(add, Task.Delay(TimeSpan.FromMilliseconds(1800)));
+            Assert.Same(add, completed);
+            var result = await add;
+            stopwatch.Stop();
+            Assert.True(result.IsFailure);
+            Assert.Equal(StorageErrors.TimeoutCode, result.Error!.Code);
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromMilliseconds(1800), $"Probe took {stopwatch.Elapsed}.");
+            Assert.Equal(1, replacement.DisposeCount);
+            Assert.Equal("/initial", library.DefaultStorage.Root);
+        }
+        finally
+        {
+            releaseProbe.TrySetResult(Result.Success());
+            if (!add.IsCompleted)
+                await add;
+        }
+    }
+
     [Fact]
     public async Task Local_add_and_remove_persist_to_storage_local_and_reload_from_real_CodeLogic_configuration()
     {
