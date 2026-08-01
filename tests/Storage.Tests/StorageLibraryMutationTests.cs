@@ -1,0 +1,206 @@
+using CL.Storage.Configuration;
+using CL.Storage.Errors;
+using CodeLogic.Core.Configuration;
+using CodeLogic.Core.Results;
+using Xunit;
+
+namespace Storage.Tests;
+
+public sealed class StorageLibraryMutationTests
+{
+    [Fact]
+    public async Task Local_add_and_remove_persist_to_storage_local_and_reload_from_real_CodeLogic_configuration()
+    {
+        using var directory = new TestDirectory();
+        var libraryRoot = directory.CreateDirectory("library");
+        var defaultRoot = directory.CreateDirectory("default");
+        var archiveRoot = directory.CreateDirectory("archive");
+        var context = StorageLibraryTestSupport.CreateContext(libraryRoot);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new LocalConnectionConfig { RootPath = defaultRoot });
+
+        var add = await library.AddOrUpdateConnectionAsync(
+            "Archive",
+            new LocalConnectionConfig { RootPath = archiveRoot });
+
+        Assert.True(add.IsSuccess, add.Error?.Message);
+        Assert.Equal(archiveRoot, library.GetStorage("archive").Root);
+        Assert.True(File.Exists(Path.Combine(context.ConfigDirectory, "config.storage.local.json")));
+        var reloadedAfterAdd = await ReloadLocalAsync(context.ConfigDirectory);
+        Assert.Equal(archiveRoot, reloadedAfterAdd.Connections["Archive"].RootPath);
+
+        var remove = await library.RemoveConnectionAsync("ARCHIVE");
+
+        Assert.True(remove.IsSuccess, remove.Error?.Message);
+        Assert.Throws<KeyNotFoundException>(() => library.GetStorage("Archive"));
+        var reloadedAfterRemove = await ReloadLocalAsync(context.ConfigDirectory);
+        Assert.DoesNotContain(reloadedAfterRemove.Connections.Keys, id =>
+            string.Equals(id, "Archive", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Failed_local_replacement_preserves_the_old_backend_and_persisted_config()
+    {
+        using var directory = new TestDirectory();
+        var libraryRoot = directory.CreateDirectory("library");
+        var oldRoot = directory.CreateDirectory("old");
+        var missingRoot = Path.Combine(directory.Path, "missing");
+        var context = StorageLibraryTestSupport.CreateContext(libraryRoot);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new LocalConnectionConfig { RootPath = oldRoot });
+        await context.Configuration.SaveAsync(context.Configuration.Get<LocalStorageConfig>());
+        var stableProxy = library.DefaultStorage;
+
+        var replacement = await library.AddOrUpdateConnectionAsync(
+            "default",
+            new LocalConnectionConfig { RootPath = missingRoot });
+
+        Assert.True(replacement.IsFailure);
+        Assert.Equal(oldRoot, stableProxy.Root);
+        Assert.Equal(oldRoot, context.Configuration.Get<LocalStorageConfig>().Connections["Default"].RootPath);
+        Assert.Equal(oldRoot, (await ReloadLocalAsync(context.ConfigDirectory)).Connections["Default"].RootPath);
+    }
+
+    [Fact]
+    public async Task Persistence_failure_does_not_publish_an_healthy_replacement()
+    {
+        using var directory = new TestDirectory();
+        var libraryRoot = directory.CreateDirectory("library");
+        var oldRoot = directory.CreateDirectory("old");
+        var replacementRoot = directory.CreateDirectory("replacement");
+        var context = StorageLibraryTestSupport.CreateContext(libraryRoot);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new LocalConnectionConfig { RootPath = oldRoot });
+        await context.Configuration.SaveAsync(context.Configuration.Get<LocalStorageConfig>());
+        var configPath = Path.Combine(context.ConfigDirectory, "config.storage.local.json");
+        var stableProxy = library.DefaultStorage;
+
+        Result result;
+        using (new FileStream(configPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            result = await library.AddOrUpdateConnectionAsync(
+                "Default",
+                new LocalConnectionConfig { RootPath = replacementRoot });
+        }
+
+        Assert.True(result.IsFailure);
+        Assert.Equal(oldRoot, stableProxy.Root);
+        Assert.Equal(oldRoot, context.Configuration.Get<LocalStorageConfig>().Connections["Default"].RootPath);
+        Assert.Equal(oldRoot, (await ReloadLocalAsync(context.ConfigDirectory)).Connections["Default"].RootPath);
+    }
+
+    [Fact]
+    public async Task Custom_backends_are_runtime_only_and_report_sanitized_information()
+    {
+        using var directory = new TestDirectory();
+        var root = directory.CreateDirectory("default");
+        var context = StorageLibraryTestSupport.CreateContext(directory.CreateDirectory("library"));
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new LocalConnectionConfig { RootPath = root });
+        await context.Configuration.SaveAsync(context.Configuration.Get<LocalStorageConfig>());
+        var backend = new FakeStorageBackend("Runtime", root: "/runtime");
+
+        var result = library.RegisterBackend("Runtime", backend, ownsBackend: false);
+
+        Assert.True(result.IsSuccess, result.Error?.Message);
+        Assert.Equal("/runtime", library.GetStorage("runtime").Root);
+        Assert.Contains(library.GetConnections(), connection => connection.Id == "Runtime" && connection.Enabled);
+        Assert.DoesNotContain((await ReloadLocalAsync(context.ConfigDirectory)).Connections.Keys, id => id == "Runtime");
+    }
+
+    [Fact]
+    public async Task Failed_custom_replacement_health_check_preserves_the_old_backend()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var oldBackend = new FakeStorageBackend("Custom", root: "/old");
+        var failedReplacement = new FakeStorageBackend(
+            "Custom",
+            root: "/failed",
+            health: _ => Task.FromResult(Result.Failure(StorageErrors.Unavailable("offline"))));
+        Assert.True(library.RegisterBackend("Custom", oldBackend).IsSuccess);
+        var stableProxy = library.GetStorage("Custom");
+
+        var result = library.RegisterBackend("CUSTOM", failedReplacement);
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("/old", stableProxy.Root);
+        Assert.Equal(0, oldBackend.DisposeCount);
+        Assert.Equal(0, failedReplacement.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Owned_backends_are_disposed_once_and_unowned_backends_are_never_disposed()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var ownedFirst = new FakeStorageBackend("Owned");
+        var ownedSecond = new FakeStorageBackend("Owned");
+        var unowned = new FakeStorageBackend("Unowned");
+
+        Assert.True(library.RegisterBackend("Owned", ownedFirst).IsSuccess);
+        Assert.True(library.RegisterBackend("Owned", ownedSecond).IsSuccess);
+        Assert.True(library.RegisterBackend("Unowned", unowned, ownsBackend: false).IsSuccess);
+        Assert.True((await library.RemoveConnectionAsync("Unowned", persist: false)).IsSuccess);
+
+        Assert.Equal(1, ownedFirst.DisposeCount);
+        Assert.Equal(0, unowned.DisposeCount);
+        await library.OnStopAsync();
+        Assert.Equal(1, ownedSecond.DisposeCount);
+        Assert.Equal(0, unowned.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Native_access_checks_types_and_session_lease_retains_backend_until_released()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var client = new NativeClient("native");
+        var backend = new FakeStorageBackend("Session", nativeClient: client);
+        Assert.True(library.RegisterBackend("Session", backend).IsSuccess);
+
+        Assert.Same(client, library.GetNativeClient<NativeClient>("session"));
+        Assert.Throws<InvalidOperationException>(() => library.GetNativeClient<MemoryStream>("session"));
+        var opened = await library.OpenNativeConnectionAsync<NativeClient>("session");
+        Assert.True(opened.IsSuccess, opened.Error?.Message);
+
+        var removal = library.RemoveConnectionAsync("SESSION", persist: false);
+        await Task.Delay(50);
+        Assert.False(removal.IsCompleted);
+        Assert.Equal(0, backend.DisposeCount);
+
+        await opened.Value!.DisposeAsync();
+        var removed = await removal;
+        Assert.True(removed.IsSuccess, removed.Error?.Message);
+        Assert.Equal(1, backend.SessionReleases);
+        Assert.Equal(1, backend.DisposeCount);
+    }
+
+    private static async Task<LocalStorageConfig> ReloadLocalAsync(string configDirectory)
+    {
+        var manager = new ConfigurationManager(configDirectory);
+        manager.Register<LocalStorageConfig>("storage.local");
+        await manager.LoadAsync<LocalStorageConfig>();
+        return manager.Get<LocalStorageConfig>();
+    }
+
+    private sealed record NativeClient(string Name);
+}
