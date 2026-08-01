@@ -1,9 +1,17 @@
 using System.Collections.ObjectModel;
+using System.Text.Json;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
 using CL.Storage.Providers;
+using CL.Storage.Providers.Azure;
+using CL.Storage.Providers.Ftp;
+using CL.Storage.Providers.GoogleCloud;
+using CL.Storage.Providers.S3;
+using CL.Storage.Providers.Sftp;
+using CL.Storage.Providers.Swift;
+using CL.Storage.Providers.WebDav;
 using CL.Storage.Registry;
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
@@ -31,7 +39,16 @@ public sealed class StorageLibrary : ILibrary
     private LifecycleState _state;
     private bool _enabled;
 
-    public StorageLibrary() : this([new LocalStorageBackendFactory()], null) { }
+    public StorageLibrary() : this([
+        new LocalStorageBackendFactory(),
+        new S3StorageBackendFactory(),
+        new FtpStorageBackendFactory(),
+        new SftpStorageBackendFactory(),
+        new WebDavStorageBackendFactory(),
+        new AzureBlobStorageBackendFactory(),
+        new GoogleCloudStorageBackendFactory(),
+        new SwiftStorageBackendFactory()
+    ], null) { }
 
     internal StorageLibrary(IEnumerable<IStorageBackendFactory> factories) : this(factories, null) { }
 
@@ -133,13 +150,13 @@ public sealed class StorageLibrary : ILibrary
                     builtEntries.Add(id, new BackendEntry(backend, ownsBackend: true));
                 }
 
-                AddRemoteInfos(infos, s3, StorageProvider.S3);
-                AddRemoteInfos(infos, ftp, StorageProvider.Ftp);
-                AddRemoteInfos(infos, sftp, StorageProvider.Sftp);
-                AddRemoteInfos(infos, webDav, StorageProvider.WebDav);
-                AddRemoteInfos(infos, azure, StorageProvider.AzureBlob);
-                AddRemoteInfos(infos, gcs, StorageProvider.GoogleCloudStorage);
-                AddRemoteInfos(infos, swift, StorageProvider.OpenStackSwift);
+                AddProviderConnections(builtEntries, infos, s3, StorageProvider.S3, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, ftp, StorageProvider.Ftp, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, sftp, StorageProvider.Sftp, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, webDav, StorageProvider.WebDav, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, azure, StorageProvider.AzureBlob, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, gcs, StorageProvider.GoogleCloudStorage, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, swift, StorageProvider.OpenStackSwift, storage.MaxBufferedDownloadBytes);
 
                 if (!builtEntries.ContainsKey(storage.DefaultConnection))
                     throw new InvalidOperationException(
@@ -420,7 +437,7 @@ public sealed class StorageLibrary : ILibrary
         }
     }
 
-    /// <summary>Adds or replaces a built-in typed connection. Task 2 supports local connections.</summary>
+    /// <summary>Adds or replaces a built-in typed connection and optionally persists its JSON section.</summary>
     public async Task<Result> AddOrUpdateConnectionAsync<TConfig>(
         string id,
         TConfig config,
@@ -432,8 +449,17 @@ public sealed class StorageLibrary : ILibrary
         var runtime = CaptureRuntimeSnapshot();
         cancellationToken.ThrowIfCancellationRequested();
         if (config is not LocalConnectionConfig localConnection)
+        {
+            if (config is StorageConnectionConfigBase providerConnection)
+                return await AddOrUpdateProviderConnectionAsync(
+                    id,
+                    providerConnection,
+                    persist,
+                    runtime,
+                    cancellationToken).ConfigureAwait(false);
             return Result.Failure(StorageErrors.Unsupported(
                 $"Connection configuration type '{typeof(TConfig).Name}' does not have a provider factory in this version."));
+        }
 
         var validation = localConnection.Validate();
         if (!validation.IsValid)
@@ -515,6 +541,170 @@ public sealed class StorageLibrary : ILibrary
         if (previous is not null)
             await previous.RetireAndDisposeAsync().ConfigureAwait(false);
         return Result.Success();
+    }
+
+    private async Task<Result> AddOrUpdateProviderConnectionAsync(
+        string id,
+        StorageConnectionConfigBase connection,
+        bool persist,
+        RuntimeSnapshot runtime,
+        CancellationToken cancellationToken)
+    {
+        var descriptor = DescribeProviderConnection(connection.GetType());
+        if (descriptor is null || !_factories.ContainsKey(connection.GetType()))
+            return Result.Failure(StorageErrors.Unsupported(
+                $"Connection configuration type '{connection.GetType().Name}' does not have a provider factory."));
+
+        var errors = connection.GetValidationErrors().ToArray();
+        if (errors.Length > 0)
+            return Result.Failure(StorageErrors.ProviderError(
+                $"{descriptor.Value.Provider} storage connection '{id}' is invalid: {string.Join("; ", errors)}"));
+
+        var effectiveConnection = CloneProviderConnection(connection);
+        BackendEntry? replacement = null;
+        if (effectiveConnection.Enabled)
+        {
+            var built = await BuildHealthyProviderReplacementAsync(
+                id,
+                effectiveConnection,
+                descriptor.Value,
+                runtime,
+                cancellationToken).ConfigureAwait(false);
+            if (built.IsFailure) return Result.Failure(built.Error!);
+            replacement = built.Value!;
+        }
+
+        BackendEntry? previous = null;
+        var gateEntered = false;
+        try
+        {
+            await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            gateEntered = true;
+            EnsureOperational();
+
+            var conflictingSection = FindConfiguredSection(
+                id,
+                runtime.Context,
+                exceptConnectionType: effectiveConnection.GetType());
+            if (conflictingSection is not null)
+                return Result.Failure(StorageErrors.Conflict(
+                    $"Storage connection ID '{id}' is already configured in '{conflictingSection}'. IDs are case-insensitive."));
+            lock (_registryGate)
+            {
+                if (_connectionInfos.TryGetValue(id, out var existing) && existing.Provider != descriptor.Value.Provider)
+                    return Result.Failure(StorageErrors.Conflict(
+                        $"Storage connection ID '{id}' is already registered for provider '{existing.Provider}'."));
+            }
+
+            if (persist)
+            {
+                var current = GetProviderConfig(runtime.Context, effectiveConnection.GetType());
+                var candidate = current.DeepClone();
+                candidate.SetConnection(id, effectiveConnection);
+                try
+                {
+                    await SaveProviderConfigAsync(runtime.Context, candidate).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception error)
+                {
+                    runtime.Logger.Error($"Failed to persist {descriptor.Value.Provider} storage connection '{id}'.", error);
+                    return Result.Failure(StorageErrors.ProviderError(
+                        $"Could not persist {descriptor.Value.Provider} storage connection '{id}'."));
+                }
+            }
+
+            lock (_registryGate)
+            {
+                if (_registry.TryGetValue(id, out previous)) _registry.Remove(id);
+                if (replacement is not null) _registry[id] = replacement;
+                _connectionInfos[id] = new StorageConnectionInfo(
+                    id,
+                    descriptor.Value.Provider,
+                    effectiveConnection.MountRoot,
+                    effectiveConnection.Enabled);
+            }
+            replacement = null;
+        }
+        catch (OperationCanceledException) { throw; }
+        finally
+        {
+            if (gateEntered) _mutationGate.Release();
+            if (replacement is not null)
+                await replacement.RetireAndDisposeAsync().ConfigureAwait(false);
+        }
+
+        if (previous is not null)
+            await previous.RetireAndDisposeAsync().ConfigureAwait(false);
+        return Result.Success();
+    }
+
+    private async Task<Result<BackendEntry>> BuildHealthyProviderReplacementAsync(
+        string id,
+        StorageConnectionConfigBase configuration,
+        ProviderDescriptor descriptor,
+        RuntimeSnapshot runtime,
+        CancellationToken cancellationToken)
+    {
+        BackendEntry? replacement = null;
+        Task<Result>? probeTask = null;
+        var deferCleanup = false;
+        try
+        {
+            replacement = new BackendEntry(
+                _factories[configuration.GetType()].Create(
+                    id,
+                    configuration,
+                    runtime.MaxBufferedDownloadBytes),
+                ownsBackend: true);
+            var timeoutDuration = TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds);
+            using var timeout = new CancellationTokenSource(timeoutDuration);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+            Result health;
+            try
+            {
+                probeTask = replacement.Backend.CheckHealthAsync(linked.Token);
+                health = await probeTask.WaitAsync(timeoutDuration, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                deferCleanup = true;
+                throw;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                deferCleanup = true;
+                return Result<BackendEntry>.Failure(StorageErrors.Timeout(
+                    $"Storage connection '{id}' timed out during replacement health check."));
+            }
+            catch (TimeoutException)
+            {
+                timeout.Cancel();
+                deferCleanup = true;
+                return Result<BackendEntry>.Failure(StorageErrors.Timeout(
+                    $"Storage connection '{id}' timed out during replacement health check."));
+            }
+            if (health.IsFailure) return Result<BackendEntry>.Failure(health.Error!);
+            var result = replacement;
+            replacement = null;
+            return Result<BackendEntry>.Success(result);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception error)
+        {
+            return Result<BackendEntry>.Failure(StorageErrors.ProviderError(
+                $"Could not build {descriptor.Provider} storage connection '{id}'.",
+                error.Message));
+        }
+        finally
+        {
+            if (replacement is not null)
+            {
+                var cleanup = ObserveProbeAndDisposeReplacementAsync(id, replacement, probeTask, runtime.Logger);
+                if (deferCleanup || probeTask is { IsCompleted: false }) _ = cleanup;
+                else await cleanup.ConfigureAwait(false);
+            }
+        }
     }
 
     private async Task<Result<BackendEntry>> BuildHealthyLocalReplacementAsync(
@@ -611,15 +801,38 @@ public sealed class StorageLibrary : ILibrary
             StorageConnectionInfo? info;
             lock (_registryGate)
                 exists = _registry.ContainsKey(id) || _connectionInfos.TryGetValue(id, out info);
+            var providerMatch = FindProviderConfigContaining(id, runtime.Context);
             exists = exists ||
                 TryFindKey(_localConfig!.Connections, id, out _) ||
-                TryFindKey(_persistedLocalConfig!.Connections, id, out _);
+                TryFindKey(_persistedLocalConfig!.Connections, id, out _) ||
+                providerMatch is not null;
             if (!exists)
                 return Result.Failure(StorageErrors.NotFound($"Storage connection '{id}' is not registered."));
 
             var effectiveLocal = TryFindKey(_localConfig!.Connections, id, out _);
             var persistedLocal = TryFindKey(_persistedLocalConfig!.Connections, id, out var persistedKey);
-            if (persist && (effectiveLocal || persistedLocal))
+            if (providerMatch is not null)
+            {
+                if (persist)
+                {
+                    var candidate = providerMatch.Config.DeepClone();
+                    candidate.RemoveConnection(id);
+                    try
+                    {
+                        await SaveProviderConfigAsync(runtime.Context, candidate).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception error)
+                    {
+                        runtime.Logger.Error(
+                            $"Failed to persist removal of {providerMatch.Descriptor.Provider} storage connection '{id}'.",
+                            error);
+                        return Result.Failure(StorageErrors.ProviderError(
+                            $"Could not persist removal of {providerMatch.Descriptor.Provider} storage connection '{id}'."));
+                    }
+                }
+            }
+            else if (persist && (effectiveLocal || persistedLocal))
             {
                 var candidate = CloneLocalConfig(_persistedLocalConfig);
                 if (persistedKey is not null)
@@ -943,6 +1156,103 @@ public sealed class StorageLibrary : ILibrary
             throw new InvalidOperationException($"Storage configuration section '{section}' is invalid: {string.Join("; ", validation.Errors)}");
     }
 
+    private static StorageConnectionConfigBase CloneProviderConnection(StorageConnectionConfigBase source) =>
+        (StorageConnectionConfigBase)JsonSerializer.Deserialize(
+            JsonSerializer.Serialize(source, source.GetType()),
+            source.GetType())!;
+
+    private static ProviderDescriptor? DescribeProviderConnection(Type connectionType)
+    {
+        if (connectionType == typeof(S3ConnectionConfig))
+            return new ProviderDescriptor(StorageProvider.S3, "storage.s3");
+        if (connectionType == typeof(FtpConnectionConfig))
+            return new ProviderDescriptor(StorageProvider.Ftp, "storage.ftp");
+        if (connectionType == typeof(SftpConnectionConfig))
+            return new ProviderDescriptor(StorageProvider.Sftp, "storage.sftp");
+        if (connectionType == typeof(WebDavConnectionConfig))
+            return new ProviderDescriptor(StorageProvider.WebDav, "storage.webdav");
+        if (connectionType == typeof(AzureBlobConnectionConfig))
+            return new ProviderDescriptor(StorageProvider.AzureBlob, "storage.azure");
+        if (connectionType == typeof(GoogleCloudConnectionConfig))
+            return new ProviderDescriptor(StorageProvider.GoogleCloudStorage, "storage.gcs");
+        if (connectionType == typeof(SwiftConnectionConfig))
+            return new ProviderDescriptor(StorageProvider.OpenStackSwift, "storage.swift");
+        return null;
+    }
+
+    private static ProviderStorageConfigBase GetProviderConfig(LibraryContext context, Type connectionType)
+    {
+        var configuration = context.Configuration;
+        if (connectionType == typeof(S3ConnectionConfig)) return configuration.Get<S3StorageConfig>();
+        if (connectionType == typeof(FtpConnectionConfig)) return configuration.Get<FtpStorageConfig>();
+        if (connectionType == typeof(SftpConnectionConfig)) return configuration.Get<SftpStorageConfig>();
+        if (connectionType == typeof(WebDavConnectionConfig)) return configuration.Get<WebDavStorageConfig>();
+        if (connectionType == typeof(AzureBlobConnectionConfig)) return configuration.Get<AzureStorageConfig>();
+        if (connectionType == typeof(GoogleCloudConnectionConfig)) return configuration.Get<GoogleCloudStorageConfig>();
+        if (connectionType == typeof(SwiftConnectionConfig)) return configuration.Get<SwiftStorageConfig>();
+        throw new NotSupportedException($"Provider connection type '{connectionType.FullName}' is not supported.");
+    }
+
+    private static Task SaveProviderConfigAsync(LibraryContext context, ProviderStorageConfigBase config) => config switch
+    {
+        S3StorageConfig value => context.Configuration.SaveAsync(value),
+        FtpStorageConfig value => context.Configuration.SaveAsync(value),
+        SftpStorageConfig value => context.Configuration.SaveAsync(value),
+        WebDavStorageConfig value => context.Configuration.SaveAsync(value),
+        AzureStorageConfig value => context.Configuration.SaveAsync(value),
+        GoogleCloudStorageConfig value => context.Configuration.SaveAsync(value),
+        SwiftStorageConfig value => context.Configuration.SaveAsync(value),
+        _ => throw new NotSupportedException($"Provider configuration type '{config.GetType().FullName}' is not supported.")
+    };
+
+    private static string? FindConfiguredSection(
+        string id,
+        LibraryContext context,
+        Type? exceptConnectionType = null)
+    {
+        var configuration = context.Configuration;
+        if (exceptConnectionType != typeof(LocalConnectionConfig) &&
+            TryFindKey(configuration.Get<LocalStorageConfig>().Connections, id, out _))
+            return "storage.local";
+        if (exceptConnectionType != typeof(S3ConnectionConfig) && configuration.Get<S3StorageConfig>().ContainsConnection(id))
+            return "storage.s3";
+        if (exceptConnectionType != typeof(FtpConnectionConfig) && configuration.Get<FtpStorageConfig>().ContainsConnection(id))
+            return "storage.ftp";
+        if (exceptConnectionType != typeof(SftpConnectionConfig) && configuration.Get<SftpStorageConfig>().ContainsConnection(id))
+            return "storage.sftp";
+        if (exceptConnectionType != typeof(WebDavConnectionConfig) && configuration.Get<WebDavStorageConfig>().ContainsConnection(id))
+            return "storage.webdav";
+        if (exceptConnectionType != typeof(AzureBlobConnectionConfig) && configuration.Get<AzureStorageConfig>().ContainsConnection(id))
+            return "storage.azure";
+        if (exceptConnectionType != typeof(GoogleCloudConnectionConfig) && configuration.Get<GoogleCloudStorageConfig>().ContainsConnection(id))
+            return "storage.gcs";
+        if (exceptConnectionType != typeof(SwiftConnectionConfig) && configuration.Get<SwiftStorageConfig>().ContainsConnection(id))
+            return "storage.swift";
+        return null;
+    }
+
+    private static ProviderConfigMatch? FindProviderConfigContaining(string id, LibraryContext context)
+    {
+        var configuration = context.Configuration;
+        ProviderStorageConfigBase[] configs =
+        [
+            configuration.Get<S3StorageConfig>(),
+            configuration.Get<FtpStorageConfig>(),
+            configuration.Get<SftpStorageConfig>(),
+            configuration.Get<WebDavStorageConfig>(),
+            configuration.Get<AzureStorageConfig>(),
+            configuration.Get<GoogleCloudStorageConfig>(),
+            configuration.Get<SwiftStorageConfig>()
+        ];
+        foreach (var config in configs)
+        {
+            if (!config.ContainsConnection(id)) continue;
+            var connectionType = config.EnumerateConnections().First().Value.GetType();
+            return new ProviderConfigMatch(config, DescribeProviderConnection(connectionType)!.Value);
+        }
+        return null;
+    }
+
     private static void ValidateGlobalIds(
         LocalStorageConfig local,
         S3StorageConfig s3,
@@ -976,13 +1286,26 @@ public sealed class StorageLibrary : ILibrary
         }
     }
 
-    private static void AddRemoteInfos(
+    private void AddProviderConnections<TConnection>(
+        IDictionary<string, BackendEntry> entries,
         IDictionary<string, StorageConnectionInfo> infos,
-        ProviderStorageConfigBase config,
-        StorageProvider provider)
+        ProviderStorageConfigBase<TConnection> config,
+        StorageProvider provider,
+        long maxBufferedDownloadBytes)
+        where TConnection : StorageConnectionConfigBase
     {
+        _factories.TryGetValue(typeof(TConnection), out var factory);
         foreach (var (id, connection) in config.Connections)
-            infos.Add(id, new StorageConnectionInfo(id, provider, connection.Root, connection.Enabled));
+        {
+            infos.Add(id, new StorageConnectionInfo(id, provider, connection.MountRoot, connection.Enabled));
+            if (!connection.Enabled)
+                continue;
+            if (factory is null)
+                throw new InvalidOperationException($"The {provider} provider factory is not registered.");
+            entries.Add(id, new BackendEntry(
+                factory.Create(id, connection, maxBufferedDownloadBytes),
+                ownsBackend: true));
+        }
     }
 
     private static void ValidateConnectionId(string connectionId)
@@ -1004,8 +1327,7 @@ public sealed class StorageLibrary : ILibrary
         return null;
 
         static bool Contains(ProviderStorageConfigBase providerConfig, string connectionId) =>
-            providerConfig.Connections.Keys.Any(candidate =>
-                string.Equals(candidate, connectionId, StringComparison.OrdinalIgnoreCase));
+            providerConfig.ContainsConnection(connectionId);
     }
 
     private static LocalStorageConfig CloneLocalConfig(LocalStorageConfig source)
@@ -1054,6 +1376,8 @@ public sealed class StorageLibrary : ILibrary
 
     private sealed record HealthProbe(string Id, bool Healthy, string Detail);
     private sealed record HealthTarget(string Id, BackendEntry.BackendOperationLease Lease);
+    private readonly record struct ProviderDescriptor(StorageProvider Provider, string Section);
+    private sealed record ProviderConfigMatch(ProviderStorageConfigBase Config, ProviderDescriptor Descriptor);
     private readonly record struct RuntimeSnapshot(
         LibraryContext Context,
         StorageConfig StorageConfig,

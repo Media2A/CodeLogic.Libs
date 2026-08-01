@@ -1,50 +1,76 @@
+using CodeLogic.Core.Configuration;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using CodeLogic.Core.Configuration;
 
 namespace CL.Storage.Configuration;
 
-/// <summary>Forward-compatible connection data used until a provider adapter supplies its typed model.</summary>
-public sealed class ProviderConnectionConfig
+/// <summary>Common shape used by provider connection configuration.</summary>
+public abstract class StorageConnectionConfigBase
 {
     public bool Enabled { get; set; } = true;
-    public string Root { get; set; } = string.Empty;
+    [JsonIgnore]
+    public abstract string MountRoot { get; }
+    internal virtual IEnumerable<string> GetValidationErrors() => [];
+}
 
-    [JsonExtensionData]
-    public Dictionary<string, JsonElement> AdditionalProperties { get; set; } = [];
+/// <summary>Forward-compatible connection data used until a provider adapter supplies its typed model.</summary>
+public sealed class ProviderConnectionConfig : StorageConnectionConfigBase
+{
+    public string Root { get; set; } = string.Empty;
+    public override string MountRoot => Root;
 }
 
 public abstract class ProviderStorageConfigBase : ConfigModelBase
 {
-    public Dictionary<string, ProviderConnectionConfig> Connections { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    internal abstract IEnumerable<KeyValuePair<string, StorageConnectionConfigBase>> EnumerateConnections();
+    internal abstract bool ContainsConnection(string connectionId);
+    internal abstract ProviderStorageConfigBase DeepClone();
+    internal abstract void SetConnection(string connectionId, StorageConnectionConfigBase connection);
+    internal abstract bool RemoveConnection(string connectionId);
+}
+
+public abstract class ProviderStorageConfigBase<TConnection> : ProviderStorageConfigBase
+    where TConnection : StorageConnectionConfigBase
+{
+    public Dictionary<string, TConnection> Connections { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public override ConfigValidationResult Validate()
     {
-        var errors = Connections.Keys
-            .Where(string.IsNullOrWhiteSpace)
-            .Select(_ => "Connection IDs cannot be blank")
-            .ToArray();
-        return errors.Length == 0 ? ConfigValidationResult.Valid() : ConfigValidationResult.Invalid(errors);
+        var errors = new List<string>();
+        foreach (var (id, connection) in Connections)
+        {
+            if (string.IsNullOrWhiteSpace(id))
+                errors.Add("Connection IDs cannot be blank");
+            foreach (var error in connection.GetValidationErrors())
+                errors.Add($"Connection '{id}': {error}");
+        }
+        return errors.Count == 0 ? ConfigValidationResult.Valid() : ConfigValidationResult.Invalid(errors);
+    }
+
+    internal override IEnumerable<KeyValuePair<string, StorageConnectionConfigBase>> EnumerateConnections() =>
+        Connections.Select(pair => new KeyValuePair<string, StorageConnectionConfigBase>(pair.Key, pair.Value));
+
+    internal override bool ContainsConnection(string connectionId) => Connections.Keys.Any(
+        candidate => string.Equals(candidate, connectionId, StringComparison.OrdinalIgnoreCase));
+
+    internal override ProviderStorageConfigBase DeepClone()
+    {
+        var json = JsonSerializer.Serialize(this, GetType());
+        var clone = (ProviderStorageConfigBase<TConnection>)JsonSerializer.Deserialize(json, GetType())!;
+        clone.Connections = new Dictionary<string, TConnection>(clone.Connections, StringComparer.OrdinalIgnoreCase);
+        return clone;
+    }
+
+    internal override void SetConnection(string connectionId, StorageConnectionConfigBase connection)
+    {
+        RemoveConnection(connectionId);
+        Connections[connectionId] = (TConnection)connection;
+    }
+
+    internal override bool RemoveConnection(string connectionId)
+    {
+        var key = Connections.Keys.FirstOrDefault(
+            candidate => string.Equals(candidate, connectionId, StringComparison.OrdinalIgnoreCase));
+        return key is not null && Connections.Remove(key);
     }
 }
-
-[ConfigSection("storage.s3")]
-public sealed class S3StorageConfig : ProviderStorageConfigBase { }
-
-[ConfigSection("storage.ftp")]
-public sealed class FtpStorageConfig : ProviderStorageConfigBase { }
-
-[ConfigSection("storage.sftp")]
-public sealed class SftpStorageConfig : ProviderStorageConfigBase { }
-
-[ConfigSection("storage.webdav")]
-public sealed class WebDavStorageConfig : ProviderStorageConfigBase { }
-
-[ConfigSection("storage.azure")]
-public sealed class AzureStorageConfig : ProviderStorageConfigBase { }
-
-[ConfigSection("storage.gcs")]
-public sealed class GoogleCloudStorageConfig : ProviderStorageConfigBase { }
-
-[ConfigSection("storage.swift")]
-public sealed class SwiftStorageConfig : ProviderStorageConfigBase { }
