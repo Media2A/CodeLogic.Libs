@@ -39,7 +39,7 @@ internal sealed class StorageServiceProxy : IStorageService
         UploadWithEventAsync(path, backend => backend.UploadBytesAsync(path, content, options, cancellationToken));
 
     public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        InvokeAsync(backend => backend.DownloadAsync(path, options, cancellationToken));
+        DownloadWithLeaseAsync(path, options, cancellationToken);
 
     public Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
         InvokeAsync(backend => backend.DownloadBytesAsync(path, options, cancellationToken));
@@ -69,6 +69,29 @@ internal sealed class StorageServiceProxy : IStorageService
     {
         using var lease = _library.AcquireOperation(_connectionId);
         return await operation(lease.Backend).ConfigureAwait(false);
+    }
+
+    private async Task<Result<Stream>> DownloadWithLeaseAsync(
+        string path,
+        StorageDownloadOptions? options,
+        CancellationToken cancellationToken)
+    {
+        var lease = _library.AcquireOperation(_connectionId);
+        try
+        {
+            var result = await lease.Backend.DownloadAsync(path, options, cancellationToken).ConfigureAwait(false);
+            if (result.IsFailure)
+            {
+                lease.Dispose();
+                return Result<Stream>.Failure(result.Error!);
+            }
+            return Result<Stream>.Success(new LeaseOwnedStream(result.Value!, lease));
+        }
+        catch
+        {
+            lease.Dispose();
+            throw;
+        }
     }
 
     private async Task<Result<StorageItem>> UploadWithEventAsync(

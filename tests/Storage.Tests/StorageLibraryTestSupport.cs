@@ -90,9 +90,11 @@ internal sealed class FakeStorageBackend : IStorageBackend
     private readonly object? _nativeClient;
     private Func<CancellationToken, Task<Result>> _health;
     private readonly Func<string, CancellationToken, Task<Result<StorageItem>>>? _upload;
+    private readonly Func<string, CancellationToken, Task<Result<Stream>>>? _download;
     private readonly Func<string, CancellationToken, Task<Result>>? _delete;
     private readonly Func<string, string, CancellationToken, Task<Result>>? _copy;
     private readonly Func<string, string, CancellationToken, Task<Result>>? _move;
+    private readonly Func<ValueTask>? _dispose;
     private int _disposeCount;
     private int _sessionReleases;
 
@@ -103,9 +105,11 @@ internal sealed class FakeStorageBackend : IStorageBackend
         object? nativeClient = null,
         Func<CancellationToken, Task<Result>>? health = null,
         Func<string, CancellationToken, Task<Result<StorageItem>>>? upload = null,
+        Func<string, CancellationToken, Task<Result<Stream>>>? download = null,
         Func<string, CancellationToken, Task<Result>>? delete = null,
         Func<string, string, CancellationToken, Task<Result>>? copy = null,
-        Func<string, string, CancellationToken, Task<Result>>? move = null)
+        Func<string, string, CancellationToken, Task<Result>>? move = null,
+        Func<ValueTask>? dispose = null)
     {
         ConnectionId = connectionId;
         Provider = provider;
@@ -113,9 +117,11 @@ internal sealed class FakeStorageBackend : IStorageBackend
         _nativeClient = nativeClient;
         _health = health ?? (_ => Task.FromResult(Result.Success()));
         _upload = upload;
+        _download = download;
         _delete = delete;
         _copy = copy;
         _move = move;
+        _dispose = dispose;
     }
 
     public string ConnectionId { get; }
@@ -147,7 +153,7 @@ internal sealed class FakeStorageBackend : IStorageBackend
         UploadCoreAsync(path, cancellationToken);
 
     public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        Task.FromResult(Result<Stream>.Success(new MemoryStream()));
+        _download?.Invoke(path, cancellationToken) ?? Task.FromResult(Result<Stream>.Success(new MemoryStream()));
 
     public Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
         Task.FromResult(Result<byte[]>.Success([]));
@@ -186,7 +192,7 @@ internal sealed class FakeStorageBackend : IStorageBackend
     public ValueTask DisposeAsync()
     {
         Interlocked.Increment(ref _disposeCount);
-        return ValueTask.CompletedTask;
+        return _dispose?.Invoke() ?? ValueTask.CompletedTask;
     }
 
     private Task<Result<StorageItem>> UploadCoreAsync(string path, CancellationToken cancellationToken) =>

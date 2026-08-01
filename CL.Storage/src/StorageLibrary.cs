@@ -27,6 +27,8 @@ public sealed class StorageLibrary : ILibrary
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
     private LocalStorageConfig? _localConfig;
+    private LocalStorageConfig? _persistedLocalConfig;
+    private readonly Dictionary<string, LocalConnectionConfig?> _runtimeLocalOverrides = new(StringComparer.OrdinalIgnoreCase);
     private Task? _stopTask;
     private LifecycleState _state;
     private bool _enabled;
@@ -141,6 +143,8 @@ public sealed class StorageLibrary : ILibrary
 
             _storageConfig = storage;
             _localConfig = local;
+            _persistedLocalConfig = CloneLocalConfig(local);
+            _runtimeLocalOverrides.Clear();
             _enabled = storage.Enabled;
             lock (_stateGate)
                 _state = LifecycleState.Initialized;
@@ -170,10 +174,10 @@ public sealed class StorageLibrary : ILibrary
     {
         lock (_stateGate)
         {
-            if (_stopTask is not null)
-                return _stopTask;
             if (_state is LifecycleState.Stopped or LifecycleState.Disposed)
                 return Task.CompletedTask;
+            if (_stopTask is not null)
+                return _stopTask;
             _state = LifecycleState.Stopping;
             _stopTask = StopCoreAsync();
             return _stopTask;
@@ -182,15 +186,108 @@ public sealed class StorageLibrary : ILibrary
 
     private async Task StopCoreAsync()
     {
-        BackendEntry[] entries;
-        await _mutationGate.WaitAsync().ConfigureAwait(false);
+        BackendEntry[] entries = [];
+        var gateEntered = false;
         try
         {
+            await _mutationGate.WaitAsync().ConfigureAwait(false);
+            gateEntered = true;
+            try
+            {
+                lock (_registryGate)
+                {
+                    entries = _registry.Values.ToArray();
+                    _registry.Clear();
+                    _connectionInfos.Clear();
+                }
+            }
+            finally
+            {
+                _mutationGate.Release();
+                gateEntered = false;
+            }
+
+            var disposals = entries
+                .Select(entry => (entry.Backend.ConnectionId, Task: entry.RetireAndDisposeAsync()))
+                .ToArray();
+            try
+            {
+                await Task.WhenAll(disposals.Select(disposal => disposal.Task)).ConfigureAwait(false);
+            }
+            catch
+            {
+                var failedIds = new List<string>();
+                foreach (var disposal in disposals.Where(disposal => disposal.Task.IsFaulted))
+                {
+                    failedIds.Add(disposal.ConnectionId);
+                    _context?.Logger.Error(
+                        $"Storage backend '{disposal.ConnectionId}' failed during disposal.",
+                        disposal.Task.Exception?.GetBaseException());
+                }
+                throw new InvalidOperationException(
+                    $"Failed to dispose storage backend(s): {string.Join(", ", failedIds)}.");
+            }
+        }
+        finally
+        {
+            if (gateEntered)
+                _mutationGate.Release();
+            _context = null;
+            _storageConfig = null;
+            _localConfig = null;
+            _persistedLocalConfig = null;
+            _runtimeLocalOverrides.Clear();
+            _enabled = false;
+            lock (_stateGate)
+                _state = LifecycleState.Stopped;
+        }
+    }
+
+    public async Task<HealthStatus> HealthCheckAsync()
+    {
+        var state = GetLifecycleState();
+        if (state is not (LifecycleState.Initialized or LifecycleState.Started))
+            return HealthStatus.Unhealthy($"Storage library is {DescribeState(state)}");
+
+        var targets = new List<HealthTarget>();
+        int timeoutSeconds;
+        try
+        {
+            await _mutationGate.WaitAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return HealthStatus.Unhealthy("Storage library is disposed");
+        }
+
+        try
+        {
+            state = GetLifecycleState();
+            if (state is not (LifecycleState.Initialized or LifecycleState.Started))
+                return HealthStatus.Unhealthy($"Storage library is {DescribeState(state)}");
+            if (!_enabled)
+                return HealthStatus.Healthy("Storage library is disabled");
+
+            var config = _storageConfig;
+            if (config is null)
+                return HealthStatus.Unhealthy("Storage library is stopping");
+            timeoutSeconds = config.HealthCheckTimeoutSeconds;
+
             lock (_registryGate)
             {
-                entries = _registry.Values.ToArray();
-                _registry.Clear();
-                _connectionInfos.Clear();
+                if (!_registry.ContainsKey(config.DefaultConnection))
+                    return HealthStatus.Unhealthy($"Default storage connection '{config.DefaultConnection}' is unavailable");
+                foreach (var (id, entry) in _registry)
+                {
+                    if (!entry.TryAcquire(out var lease))
+                    {
+                        foreach (var target in targets)
+                            target.Lease.Dispose();
+                        targets.Clear();
+                        return HealthStatus.Unhealthy($"Storage connection '{id}' is retiring");
+                    }
+                    targets.Add(new HealthTarget(id, lease!));
+                }
             }
         }
         finally
@@ -198,36 +295,21 @@ public sealed class StorageLibrary : ILibrary
             _mutationGate.Release();
         }
 
-        await Task.WhenAll(entries.Select(entry => entry.RetireAndDisposeAsync())).ConfigureAwait(false);
-        _context = null;
-        _storageConfig = null;
-        _localConfig = null;
-        _enabled = false;
-        lock (_stateGate)
-            _state = LifecycleState.Stopped;
-    }
-
-    public async Task<HealthStatus> HealthCheckAsync()
-    {
-        LifecycleState state;
-        lock (_stateGate)
-            state = _state;
-        if (state is not (LifecycleState.Initialized or LifecycleState.Started))
-            return HealthStatus.Unhealthy($"Storage library is {DescribeState(state)}");
-        if (!_enabled)
-            return HealthStatus.Healthy("Storage library is disabled");
-
-        var defaultId = _storageConfig!.DefaultConnection;
-        lock (_registryGate)
+        HealthProbe[] probes;
+        try
         {
-            if (!_registry.ContainsKey(defaultId))
-                return HealthStatus.Unhealthy($"Default storage connection '{defaultId}' is unavailable");
+            probes = await Task.WhenAll(targets.Select(target => ProbeHealthAsync(target, timeoutSeconds))).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (var target in targets)
+                target.Lease.Dispose();
         }
 
-        string[] ids;
-        lock (_registryGate)
-            ids = _registry.Keys.ToArray();
-        var probes = await Task.WhenAll(ids.Select(ProbeHealthAsync)).ConfigureAwait(false);
+        state = GetLifecycleState();
+        if (state is not (LifecycleState.Initialized or LifecycleState.Started))
+            return HealthStatus.Unhealthy($"Storage library is {DescribeState(state)}");
+
         var failed = probes.Where(probe => !probe.Healthy).ToArray();
         if (failed.Length == 0)
             return HealthStatus.Healthy($"All {probes.Length} storage connection(s) are healthy");
@@ -384,11 +466,16 @@ public sealed class StorageLibrary : ILibrary
             gateEntered = true;
             EnsureOperational();
 
-            var candidate = CloneLocalConfig(_localConfig!);
-            RemoveKey(candidate.Connections, id);
-            candidate.Connections[id] = Clone(localConnection);
+            var conflictingSection = FindConfiguredNonLocalSection(id);
+            if (conflictingSection is not null)
+                return Result.Failure(StorageErrors.Conflict(
+                    $"Storage connection ID '{id}' is already configured in '{conflictingSection}'. IDs are case-insensitive."));
+
             if (persist)
             {
+                var candidate = CloneLocalConfig(_persistedLocalConfig!);
+                RemoveKey(candidate.Connections, id);
+                candidate.Connections[id] = Clone(localConnection);
                 try
                 {
                     await _context!.Configuration.SaveAsync(candidate).ConfigureAwait(false);
@@ -400,7 +487,15 @@ public sealed class StorageLibrary : ILibrary
                     return Result.Failure(StorageErrors.ProviderError(
                         $"Could not persist local storage connection '{id}'."));
                 }
+                _persistedLocalConfig = CloneLocalConfig(candidate);
+                _runtimeLocalOverrides.Remove(id);
+                ApplyRuntimeLocalOverrides(candidate);
                 _localConfig = candidate;
+            }
+            else
+            {
+                _runtimeLocalOverrides[id] = Clone(localConnection);
+                SetLocalConnection(_localConfig!, id, localConnection);
             }
 
             lock (_registryGate)
@@ -445,14 +540,19 @@ public sealed class StorageLibrary : ILibrary
             StorageConnectionInfo? info;
             lock (_registryGate)
                 exists = _registry.ContainsKey(id) || _connectionInfos.TryGetValue(id, out info);
+            exists = exists ||
+                TryFindKey(_localConfig!.Connections, id, out _) ||
+                TryFindKey(_persistedLocalConfig!.Connections, id, out _);
             if (!exists)
                 return Result.Failure(StorageErrors.NotFound($"Storage connection '{id}' is not registered."));
 
-            var configuredLocally = TryFindKey(_localConfig!.Connections, id, out var configuredKey);
-            if (persist && configuredLocally)
+            var effectiveLocal = TryFindKey(_localConfig!.Connections, id, out _);
+            var persistedLocal = TryFindKey(_persistedLocalConfig!.Connections, id, out var persistedKey);
+            if (persist && (effectiveLocal || persistedLocal))
             {
-                var candidate = CloneLocalConfig(_localConfig);
-                candidate.Connections.Remove(configuredKey!);
+                var candidate = CloneLocalConfig(_persistedLocalConfig);
+                if (persistedKey is not null)
+                    candidate.Connections.Remove(persistedKey);
                 try
                 {
                     await _context!.Configuration.SaveAsync(candidate).ConfigureAwait(false);
@@ -464,7 +564,15 @@ public sealed class StorageLibrary : ILibrary
                     return Result.Failure(StorageErrors.ProviderError(
                         $"Could not persist removal of local storage connection '{id}'."));
                 }
+                _persistedLocalConfig = CloneLocalConfig(candidate);
+                _runtimeLocalOverrides.Remove(id);
+                ApplyRuntimeLocalOverrides(candidate);
                 _localConfig = candidate;
+            }
+            else if (!persist && effectiveLocal)
+            {
+                _runtimeLocalOverrides[id] = null;
+                RemoveKey(_localConfig.Connections, id);
             }
 
             lock (_registryGate)
@@ -569,17 +677,8 @@ public sealed class StorageLibrary : ILibrary
         if (state == LifecycleState.Disposed)
             return;
         OnStopAsync().ConfigureAwait(false).GetAwaiter().GetResult();
-        var disposeGate = false;
         lock (_stateGate)
-        {
-            if (_state != LifecycleState.Disposed)
-            {
-                _state = LifecycleState.Disposed;
-                disposeGate = true;
-            }
-        }
-        if (disposeGate)
-            _mutationGate.Dispose();
+            _state = LifecycleState.Disposed;
     }
 
     internal BackendEntry.BackendOperationLease AcquireOperation(string connectionId)
@@ -622,37 +721,39 @@ public sealed class StorageLibrary : ILibrary
         }
     }
 
-    private async Task<HealthProbe> ProbeHealthAsync(string id)
+    private static async Task<HealthProbe> ProbeHealthAsync(HealthTarget target, int timeoutSeconds)
     {
-        BackendEntry.BackendOperationLease lease;
-        try { lease = AcquireOperation(id); }
-        catch (KeyNotFoundException) { return new HealthProbe(id, false, "connection removed"); }
-        using (lease)
-        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(_storageConfig!.HealthCheckTimeoutSeconds)))
+        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
         {
             try
             {
-                var result = await lease.Backend.CheckHealthAsync(timeout.Token)
-                    .WaitAsync(TimeSpan.FromSeconds(_storageConfig.HealthCheckTimeoutSeconds))
+                var result = await target.Lease.Backend.CheckHealthAsync(timeout.Token)
+                    .WaitAsync(TimeSpan.FromSeconds(timeoutSeconds))
                     .ConfigureAwait(false);
                 return result.IsSuccess
-                    ? new HealthProbe(id, true, string.Empty)
-                    : new HealthProbe(id, false, result.Error?.Code ?? "storage.provider_error");
+                    ? new HealthProbe(target.Id, true, string.Empty)
+                    : new HealthProbe(target.Id, false, result.Error?.Code ?? "storage.provider_error");
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
-                return new HealthProbe(id, false, "storage.timeout");
+                return new HealthProbe(target.Id, false, "storage.timeout");
             }
             catch (TimeoutException)
             {
                 timeout.Cancel();
-                return new HealthProbe(id, false, "storage.timeout");
+                return new HealthProbe(target.Id, false, "storage.timeout");
             }
             catch (Exception)
             {
-                return new HealthProbe(id, false, "storage.provider_error");
+                return new HealthProbe(target.Id, false, "storage.provider_error");
             }
         }
+    }
+
+    private LifecycleState GetLifecycleState()
+    {
+        lock (_stateGate)
+            return _state;
     }
 
     private string GetDefaultConnectionId()
@@ -735,6 +836,23 @@ public sealed class StorageLibrary : ILibrary
             throw new ArgumentException("A storage connection ID is required.", nameof(connectionId));
     }
 
+    private string? FindConfiguredNonLocalSection(string id)
+    {
+        var configuration = _context!.Configuration;
+        if (Contains(configuration.Get<S3StorageConfig>(), id)) return "storage.s3";
+        if (Contains(configuration.Get<FtpStorageConfig>(), id)) return "storage.ftp";
+        if (Contains(configuration.Get<SftpStorageConfig>(), id)) return "storage.sftp";
+        if (Contains(configuration.Get<WebDavStorageConfig>(), id)) return "storage.webdav";
+        if (Contains(configuration.Get<AzureStorageConfig>(), id)) return "storage.azure";
+        if (Contains(configuration.Get<GoogleCloudStorageConfig>(), id)) return "storage.gcs";
+        if (Contains(configuration.Get<SwiftStorageConfig>(), id)) return "storage.swift";
+        return null;
+
+        static bool Contains(ProviderStorageConfigBase providerConfig, string connectionId) =>
+            providerConfig.Connections.Keys.Any(candidate =>
+                string.Equals(candidate, connectionId, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static LocalStorageConfig CloneLocalConfig(LocalStorageConfig source)
     {
         var clone = new LocalStorageConfig();
@@ -751,6 +869,22 @@ public sealed class StorageLibrary : ILibrary
         TimeoutSeconds = source.TimeoutSeconds
     };
 
+    private void ApplyRuntimeLocalOverrides(LocalStorageConfig target)
+    {
+        foreach (var (id, connection) in _runtimeLocalOverrides)
+        {
+            RemoveKey(target.Connections, id);
+            if (connection is not null)
+                target.Connections[id] = Clone(connection);
+        }
+    }
+
+    private static void SetLocalConnection(LocalStorageConfig target, string id, LocalConnectionConfig connection)
+    {
+        RemoveKey(target.Connections, id);
+        target.Connections[id] = Clone(connection);
+    }
+
     private static void RemoveKey<T>(IDictionary<string, T> dictionary, string id)
     {
         if (TryFindKey(dictionary, id, out var key))
@@ -764,6 +898,7 @@ public sealed class StorageLibrary : ILibrary
     }
 
     private sealed record HealthProbe(string Id, bool Healthy, string Detail);
+    private sealed record HealthTarget(string Id, BackendEntry.BackendOperationLease Lease);
 
     private enum LifecycleState
     {

@@ -50,6 +50,35 @@ public sealed class StorageLibraryOperationsTests
     }
 
     [Fact]
+    public async Task Returned_download_stream_retains_backend_until_the_caller_disposes_it()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        FakeStorageBackend? oldBackend = null;
+        oldBackend = new FakeStorageBackend(
+            "Download",
+            root: "/old",
+            download: (_, _) => Task.FromResult(Result<Stream>.Success(
+                new DisposalSensitiveStream([42], () => oldBackend!.DisposeCount > 0))));
+        var replacement = new FakeStorageBackend("Download", root: "/new");
+        Assert.True(library.RegisterBackend("Download", oldBackend).IsSuccess);
+        var download = await library.GetStorage("Download").DownloadAsync("item.bin");
+        Assert.True(download.IsSuccess, download.Error?.Message);
+
+        var swap = Task.Run(() => library.RegisterBackend("DOWNLOAD", replacement));
+        await Task.Delay(50);
+
+        Assert.False(swap.IsCompleted);
+        Assert.Equal(42, download.Value!.ReadByte());
+        Assert.Equal(0, oldBackend.DisposeCount);
+        await download.Value.DisposeAsync();
+        Assert.True((await swap).IsSuccess);
+        Assert.Equal(1, oldBackend.DisposeCount);
+    }
+
+    [Fact]
     public async Task Concurrent_stop_callers_share_the_same_operation_drain()
     {
         using var directory = new TestDirectory();
@@ -81,6 +110,35 @@ public sealed class StorageLibraryOperationsTests
         Assert.True((await upload).IsSuccess);
         await Task.WhenAll(firstStop, secondStop);
         Assert.Equal(1, backend.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Disposal_failure_attempts_all_backends_and_never_strands_lifecycle_cleanup()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var throwing = new FakeStorageBackend(
+            "Throwing",
+            dispose: () => ValueTask.FromException(new InvalidOperationException("provider secret detail")));
+        var survivor = new FakeStorageBackend("Survivor");
+        Assert.True(library.RegisterBackend("Throwing", throwing).IsSuccess);
+        Assert.True(library.RegisterBackend("Survivor", survivor).IsSuccess);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => library.OnStopAsync());
+
+        Assert.Contains("Throwing", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, throwing.DisposeCount);
+        Assert.Equal(1, survivor.DisposeCount);
+        var lifecycleError = Assert.Throws<InvalidOperationException>(() => library.GetConnections());
+        Assert.Contains("stopped", lifecycleError.Message, StringComparison.OrdinalIgnoreCase);
+        await library.OnStopAsync();
+        library.Dispose();
+        library.Dispose();
+        Assert.Equal(1, throwing.DisposeCount);
+        Assert.Equal(1, survivor.DisposeCount);
     }
 
     [Fact]
@@ -257,10 +315,48 @@ public sealed class StorageLibraryOperationsTests
         Assert.Contains("Default", missingDefault.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Health_returns_stopping_status_when_shutdown_begins_during_a_probe()
+    {
+        using var directory = new TestDirectory();
+        var defaultRoot = directory.CreateDirectory("default");
+        var context = StorageLibraryTestSupport.CreateContext(directory.CreateDirectory("library"));
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new() { RootPath = defaultRoot });
+        var defaultBackend = new FakeStorageBackend("Default");
+        Assert.True(library.RegisterBackend("Default", defaultBackend).IsSuccess);
+        Assert.True(library.RegisterBackend("Other", new FakeStorageBackend("Other")).IsSuccess);
+        Task? stop = null;
+        defaultBackend.SetHealth(_ =>
+        {
+            stop = library.OnStopAsync();
+            return Task.FromResult(Result.Success());
+        });
+
+        var health = await library.HealthCheckAsync();
+
+        Assert.Equal(HealthStatusLevel.Unhealthy, health.Status);
+        Assert.Contains("stop", health.Message, StringComparison.OrdinalIgnoreCase);
+        await stop!;
+    }
+
     private static StorageItem Item(string path) => new()
     {
         Path = path,
         Name = Path.GetFileName(path),
         ItemType = StorageItemType.File
     };
+
+    private sealed class DisposalSensitiveStream(byte[] content, Func<bool> isBackendDisposed) : MemoryStream(content)
+    {
+        public override int ReadByte()
+        {
+            if (isBackendDisposed())
+                throw new ObjectDisposedException("backend");
+            return base.ReadByte();
+        }
+    }
 }

@@ -1,5 +1,6 @@
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
+using CL.Storage.Models;
 using CodeLogic.Core.Configuration;
 using CodeLogic.Core.Results;
 using Xunit;
@@ -99,6 +100,61 @@ public sealed class StorageLibraryMutationTests
     }
 
     [Fact]
+    public async Task Runtime_only_local_mutations_stay_context_visible_but_never_leak_into_later_persistence()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.CreateDirectory("library"));
+        var defaultRoot = directory.CreateDirectory("default");
+        var runtimeRoot = directory.CreateDirectory("runtime");
+        var persistedRoot = directory.CreateDirectory("persisted");
+        var laterRoot = directory.CreateDirectory("later");
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(
+            library,
+            context,
+            configureLocal: local => local.Connections["Default"] = new() { RootPath = defaultRoot });
+        await context.Configuration.SaveAsync(context.Configuration.Get<LocalStorageConfig>());
+        var initialContextConfig = context.Configuration.Get<LocalStorageConfig>();
+
+        Assert.True((await library.AddOrUpdateConnectionAsync(
+            "RuntimeOnly", new LocalConnectionConfig { RootPath = runtimeRoot }, persist: false)).IsSuccess);
+
+        Assert.Same(initialContextConfig, context.Configuration.Get<LocalStorageConfig>());
+        Assert.Equal(runtimeRoot, initialContextConfig.Connections["RuntimeOnly"].RootPath);
+        Assert.DoesNotContain((await ReloadLocalAsync(context.ConfigDirectory)).Connections.Keys, id => id == "RuntimeOnly");
+
+        Assert.True((await library.AddOrUpdateConnectionAsync(
+            "Persisted", new LocalConnectionConfig { RootPath = persistedRoot }, persist: true)).IsSuccess);
+
+        var effectiveAfterSave = context.Configuration.Get<LocalStorageConfig>();
+        Assert.Equal(runtimeRoot, effectiveAfterSave.Connections["RuntimeOnly"].RootPath);
+        Assert.Equal(persistedRoot, effectiveAfterSave.Connections["Persisted"].RootPath);
+        var diskAfterSave = await ReloadLocalAsync(context.ConfigDirectory);
+        Assert.DoesNotContain(diskAfterSave.Connections.Keys, id => id == "RuntimeOnly");
+        Assert.Equal(persistedRoot, diskAfterSave.Connections["Persisted"].RootPath);
+
+        Assert.True((await library.RemoveConnectionAsync("Persisted", persist: false)).IsSuccess);
+        Assert.DoesNotContain(context.Configuration.Get<LocalStorageConfig>().Connections.Keys, id => id == "Persisted");
+
+        Assert.True((await library.AddOrUpdateConnectionAsync(
+            "Later", new LocalConnectionConfig { RootPath = laterRoot }, persist: true)).IsSuccess);
+
+        var finalEffective = context.Configuration.Get<LocalStorageConfig>();
+        Assert.DoesNotContain(finalEffective.Connections.Keys, id => id == "Persisted");
+        Assert.Equal(runtimeRoot, finalEffective.Connections["RuntimeOnly"].RootPath);
+        var finalDisk = await ReloadLocalAsync(context.ConfigDirectory);
+        Assert.Equal(persistedRoot, finalDisk.Connections["Persisted"].RootPath);
+        Assert.Equal(laterRoot, finalDisk.Connections["Later"].RootPath);
+        Assert.DoesNotContain(finalDisk.Connections.Keys, id => id == "RuntimeOnly");
+
+        Assert.True((await library.RemoveConnectionAsync("RuntimeOnly", persist: false)).IsSuccess);
+        Assert.True((await library.RemoveConnectionAsync("Persisted", persist: true)).IsSuccess);
+        Assert.DoesNotContain(context.Configuration.Get<LocalStorageConfig>().Connections.Keys, id => id == "RuntimeOnly" || id == "Persisted");
+        var diskAfterPersistedRemove = await ReloadLocalAsync(context.ConfigDirectory);
+        Assert.DoesNotContain(diskAfterPersistedRemove.Connections.Keys, id => id == "Persisted" || id == "RuntimeOnly");
+    }
+
+    [Fact]
     public async Task Custom_backends_are_runtime_only_and_report_sanitized_information()
     {
         using var directory = new TestDirectory();
@@ -141,6 +197,34 @@ public sealed class StorageLibraryMutationTests
         Assert.Equal("/old", stableProxy.Root);
         Assert.Equal(0, oldBackend.DisposeCount);
         Assert.Equal(0, failedReplacement.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Runtime_local_add_rejects_case_insensitive_id_from_a_remote_config_section()
+    {
+        using var directory = new TestDirectory();
+        var defaultRoot = directory.CreateDirectory("default");
+        var localRoot = directory.CreateDirectory("local-shared");
+        var context = StorageLibraryTestSupport.CreateContext(directory.CreateDirectory("library"));
+        using var library = new global::CL.Storage.StorageLibrary();
+        await library.OnConfigureAsync(context);
+        await context.Configuration.LoadAllAsync();
+        context.Configuration.Get<LocalStorageConfig>().Connections["Default"] = new() { RootPath = defaultRoot };
+        context.Configuration.Get<S3StorageConfig>().Connections["Shared"] = new() { Root = "bucket/prefix" };
+        await library.OnInitializeAsync(context);
+
+        var result = await library.AddOrUpdateConnectionAsync(
+            "shared",
+            new LocalConnectionConfig { RootPath = localRoot },
+            persist: true);
+
+        Assert.True(result.IsFailure);
+        Assert.Equal(StorageErrors.ConflictCode, result.Error!.Code);
+        Assert.Equal(StorageProvider.S3, Assert.Single(library.GetConnections(), connection =>
+            string.Equals(connection.Id, "Shared", StringComparison.OrdinalIgnoreCase)).Provider);
+        Assert.DoesNotContain(context.Configuration.Get<LocalStorageConfig>().Connections.Keys, id =>
+            string.Equals(id, "shared", StringComparison.OrdinalIgnoreCase));
+        Assert.Throws<KeyNotFoundException>(() => library.GetStorage("shared"));
     }
 
     [Fact]
