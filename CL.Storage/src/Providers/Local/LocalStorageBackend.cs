@@ -268,23 +268,28 @@ public sealed class LocalStorageBackend : IStorageBackend
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
         if (info.IsFailure)
             return Result<byte[]>.Failure(info.Error!);
-        var available = Math.Max(0, info.Value!.Size!.Value - options.Offset);
-        var expected = options.Length.HasValue ? Math.Min(options.Length.Value, available) : available;
-        if (expected > limit || expected > int.MaxValue)
-            return Result<byte[]>.Failure(StorageErrors.TooLarge($"The download exceeds the {limit} byte buffering limit."));
+        long? expected = null;
+        if (info.Value!.Size is { } knownSize)
+        {
+            var available = Math.Max(0, knownSize - options.Offset);
+            expected = options.Length.HasValue ? Math.Min(options.Length.Value, available) : available;
+            if (expected > limit || expected > int.MaxValue)
+                return Result<byte[]>.Failure(StorageErrors.TooLarge($"The download exceeds the {limit} byte buffering limit."));
+        }
 
         var download = await DownloadAsync(path, options, cancellationToken).ConfigureAwait(false);
         if (download.IsFailure)
             return Result<byte[]>.Failure(download.Error!);
         await using var source = download.Value!;
-        using var destination = new MemoryStream((int)expected);
+        using var destination = expected.HasValue ? new MemoryStream((int)expected.Value) : new MemoryStream();
+        var effectiveLimit = Math.Min(limit, int.MaxValue);
         var buffer = new byte[81_920];
         while (true)
         {
             var read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (read == 0)
                 break;
-            if (destination.Length > limit - read)
+            if (destination.Length > effectiveLimit - read)
                 return Result<byte[]>.Failure(StorageErrors.TooLarge($"The download exceeds the {limit} byte buffering limit."));
             destination.Write(buffer, 0, read);
         }

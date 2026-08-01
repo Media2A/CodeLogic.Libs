@@ -121,6 +121,36 @@ public sealed class LocalStorageBackendTests : IDisposable
     }
 
     [Fact]
+    public async Task Byte_download_follows_an_allowed_in_root_file_link()
+    {
+        var targetDirectory = Path.Combine(_root, "targets");
+        Directory.CreateDirectory(targetDirectory);
+        var targetPath = Path.Combine(targetDirectory, "target.bin");
+        await File.WriteAllBytesAsync(targetPath, [1, 2, 3, 4]);
+        var linkPath = Path.Combine(_root, "linked.bin");
+        await using var backend = CreateBackend(followLinks: true);
+
+        try
+        {
+            File.CreateSymbolicLink(linkPath, targetPath);
+            var result = await backend.DownloadBytesAsync("linked.bin");
+
+            Assert.True(result.IsSuccess, result.Error?.Message);
+            Assert.Equal(new byte[] { 1, 2, 3, 4 }, result.Value);
+        }
+        catch (Exception error) when (OperatingSystem.IsWindows() && error is UnauthorizedAccessException or IOException)
+        {
+            // Windows without Developer Mode cannot create file symlinks. A directory
+            // junction has the same Size=null link metadata and still proves the crash.
+            var metadataLink = Path.Combine(_root, "linked-directory");
+            CreateDirectoryLink(metadataLink, targetDirectory);
+            var result = await backend.DownloadBytesAsync("linked-directory");
+
+            Assert.True(result.IsFailure);
+        }
+    }
+
+    [Fact]
     public async Task Range_download_returns_only_the_requested_bytes()
     {
         await using var backend = CreateBackend();
