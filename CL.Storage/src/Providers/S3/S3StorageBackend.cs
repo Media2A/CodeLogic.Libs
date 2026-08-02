@@ -55,6 +55,17 @@ public sealed class S3StorageBackend :
     private readonly long _maxBufferedDownloadBytes;
     private int _disposed;
 
+    /// <summary>Initializes a backend over an Amazon S3 or S3-compatible client.</summary>
+    /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
+    /// <param name="client">S3 client used for all operations.</param>
+    /// <param name="bucket">Bucket mounted by this connection.</param>
+    /// <param name="prefix">Optional key prefix mounted as the connection root.</param>
+    /// <param name="ownsClient">Whether disposal of this backend also disposes the client.</param>
+    /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
+    /// <param name="disablePayloadSigning">Whether compatible endpoints receive unsigned request payloads.</param>
+    /// <param name="disableDefaultChecksumValidation">Whether SDK default response checksum validation is disabled.</param>
+    /// <param name="multipartPartSizeBytes">Part size used for multipart uploads.</param>
+    /// <param name="multipartThresholdBytes">Content size at which multipart upload begins.</param>
     public S3StorageBackend(
         string connectionId,
         IAmazonS3 client,
@@ -100,11 +111,16 @@ public sealed class S3StorageBackend :
         });
     }
 
+    /// <inheritdoc />
     public string ConnectionId { get; }
+    /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.S3;
+    /// <inheritdoc />
     public string Root { get; }
+    /// <inheritdoc />
     public StorageCapabilities Capabilities => _capabilities;
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -130,6 +146,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get S3 item info")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
@@ -139,6 +156,7 @@ public sealed class S3StorageBackend :
             : Result<bool>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageListOptions();
@@ -188,6 +206,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List S3 objects")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -205,6 +224,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Create S3 directory")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -262,6 +282,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Upload S3 object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -269,6 +290,7 @@ public sealed class S3StorageBackend :
         return await UploadAsync(path, stream, options, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -293,6 +315,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<Stream>.Failure(Map(error, "Download S3 object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -313,6 +336,7 @@ public sealed class S3StorageBackend :
         return Result<byte[]>.Success(target.ToArray());
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
@@ -368,6 +392,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Delete S3 object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -413,6 +438,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Copy S3 object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
@@ -425,6 +451,7 @@ public sealed class S3StorageBackend :
                 $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
     }
 
+    /// <inheritdoc />
     public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -441,6 +468,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Check S3 health")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -451,6 +479,7 @@ public sealed class S3StorageBackend :
             : Result<IReadOnlyDictionary<string, string>>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> SetMetadataAsync(
         string path,
         IReadOnlyDictionary<string, string> metadata,
@@ -516,6 +545,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Update S3 metadata")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<IReadOnlyDictionary<string, string>>> GetTagsAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -543,6 +573,7 @@ public sealed class S3StorageBackend :
         }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> SetTagsAsync(
         string path,
         IReadOnlyDictionary<string, string> tags,
@@ -593,6 +624,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Update S3 object tags")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageVersionPage>> ListVersionsAsync(
         string path,
         StorageVersionListOptions? options = null,
@@ -659,6 +691,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<StorageVersionPage>.Failure(Map(error, "List S3 object versions")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteVersionAsync(
         string path,
         string versionId,
@@ -683,6 +716,7 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Delete S3 object version")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageSignedUrl>> CreateSignedUrlAsync(
         string path,
         StorageSignedUrlOptions? options = null,
@@ -717,12 +751,14 @@ public sealed class S3StorageBackend :
         catch (Exception error) { return Result<StorageSignedUrl>.Failure(Map(error, "Create S3 signed URL")); }
     }
 
+    /// <inheritdoc />
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
     {
         client = _client as TClient;
         return client is not null;
     }
 
+    /// <inheritdoc />
     public Task<Result<NativeConnectionLease<TClient>>> OpenNativeConnectionAsync<TClient>(CancellationToken cancellationToken = default) where TClient : class
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -731,6 +767,7 @@ public sealed class S3StorageBackend :
         return Task.FromResult(Result<NativeConnectionLease<TClient>>.Success(new NativeConnectionLease<TClient>(typed, _ => ValueTask.CompletedTask)));
     }
 
+    /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
         if (_ownsClient && Interlocked.Exchange(ref _disposed, 1) == 0)

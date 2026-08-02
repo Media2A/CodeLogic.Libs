@@ -11,7 +11,7 @@
     <PackageTags>storage;filesystem;cloud;s3;ftp;ftps;sftp;webdav;azure;gcs;swift</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Description>Provider-neutral storage abstractions and providers for CodeLogic applications</Description>
-    <NoWarn>CS1591</NoWarn>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591</WarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.0.101.6" />

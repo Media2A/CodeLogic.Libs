@@ -41,6 +41,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private LifecycleState _state;
     private bool _enabled;
 
+    /// <summary>Initializes the storage library with every built-in provider factory.</summary>
     public StorageLibrary() : this([
         new LocalStorageBackendFactory(),
         new S3StorageBackendFactory(),
@@ -66,6 +67,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             throw new ArgumentException("At least one storage backend factory is required.", nameof(factories));
     }
 
+    /// <inheritdoc />
     public LibraryManifest Manifest { get; } = new()
     {
         Id = "CL.Storage",
@@ -79,6 +81,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     /// <summary>Returns the service for the configured default connection.</summary>
     public IStorageService DefaultStorage => GetStorage(GetDefaultConnectionId());
 
+    /// <inheritdoc />
     public Task OnConfigureAsync(LibraryContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -102,6 +105,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc />
     public async Task OnInitializeAsync(LibraryContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -194,6 +198,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
     }
 
+    /// <inheritdoc />
     public Task OnStartAsync(LibraryContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -208,6 +213,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc />
     public Task OnStopAsync()
     {
         lock (_stateGate)
@@ -283,6 +289,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
     }
 
+    /// <inheritdoc />
     public async Task<HealthStatus> HealthCheckAsync()
     {
         if (!TryCaptureRuntimeSnapshot(out _, out var state))
@@ -1506,6 +1513,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         LifecycleState state;
@@ -1518,6 +1526,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             _state = LifecycleState.Disposed;
     }
 
+    /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
         LifecycleState state;

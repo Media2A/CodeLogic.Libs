@@ -50,6 +50,11 @@ public sealed class AzureBlobStorageBackend :
     private readonly string _prefix;
     private readonly long _maxBufferedDownloadBytes;
 
+    /// <summary>Initializes a backend over an Azure Blob container client.</summary>
+    /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
+    /// <param name="container">Azure container client used for all operations.</param>
+    /// <param name="prefix">Optional blob prefix mounted as the connection root.</param>
+    /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
     public AzureBlobStorageBackend(
         string connectionId,
         BlobContainerClient container,
@@ -72,11 +77,16 @@ public sealed class AzureBlobStorageBackend :
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
 
+    /// <inheritdoc />
     public string ConnectionId { get; }
+    /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.AzureBlob;
+    /// <inheritdoc />
     public string Root { get; }
+    /// <inheritdoc />
     public StorageCapabilities Capabilities => _capabilities;
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -96,6 +106,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Azure blob info")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
@@ -105,6 +116,7 @@ public sealed class AzureBlobStorageBackend :
             : Result<bool>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageListOptions();
@@ -153,6 +165,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Azure blobs")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -169,6 +182,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Create Azure blob directory")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -227,6 +241,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Upload Azure blob")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -234,6 +249,7 @@ public sealed class AzureBlobStorageBackend :
         return await UploadAsync(path, source, options, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -256,6 +272,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result<Stream>.Failure(Map(error, "Download Azure blob")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -276,6 +293,7 @@ public sealed class AzureBlobStorageBackend :
         return Result<byte[]>.Success(destination.ToArray());
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
@@ -328,6 +346,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Delete Azure blob")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -369,6 +388,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Copy Azure blob")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
@@ -381,6 +401,7 @@ public sealed class AzureBlobStorageBackend :
                 $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
     }
 
+    /// <inheritdoc />
     public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -392,6 +413,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Check Azure blob health")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -402,6 +424,7 @@ public sealed class AzureBlobStorageBackend :
             : Result<IReadOnlyDictionary<string, string>>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> SetMetadataAsync(
         string path,
         IReadOnlyDictionary<string, string> metadata,
@@ -450,6 +473,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Update Azure blob metadata")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<IReadOnlyDictionary<string, string>>> GetTagsAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -473,6 +497,7 @@ public sealed class AzureBlobStorageBackend :
         }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> SetTagsAsync(
         string path,
         IReadOnlyDictionary<string, string> tags,
@@ -509,6 +534,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Update Azure blob tags")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageVersionPage>> ListVersionsAsync(
         string path,
         StorageVersionListOptions? options = null,
@@ -563,6 +589,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result<StorageVersionPage>.Failure(Map(error, "List Azure blob versions")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteVersionAsync(
         string path,
         string versionId,
@@ -586,6 +613,7 @@ public sealed class AzureBlobStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Delete Azure blob version")); }
     }
 
+    /// <inheritdoc />
     public Task<Result<StorageSignedUrl>> CreateSignedUrlAsync(
         string path,
         StorageSignedUrlOptions? options = null,
@@ -622,12 +650,14 @@ public sealed class AzureBlobStorageBackend :
         }
     }
 
+    /// <inheritdoc />
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
     {
         client = _container as TClient;
         return client is not null;
     }
 
+    /// <inheritdoc />
     public Task<Result<NativeConnectionLease<TClient>>> OpenNativeConnectionAsync<TClient>(CancellationToken cancellationToken = default) where TClient : class
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -636,6 +666,7 @@ public sealed class AzureBlobStorageBackend :
         return Task.FromResult(Result<NativeConnectionLease<TClient>>.Success(new NativeConnectionLease<TClient>(typed, _ => ValueTask.CompletedTask)));
     }
 
+    /// <inheritdoc />
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private async Task<Result<StorageItem>> GetDirectoryInfoAsync(string path, CancellationToken cancellationToken)
