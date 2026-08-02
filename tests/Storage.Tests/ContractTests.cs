@@ -321,6 +321,39 @@ public sealed class StorageConfigurationTests
     }
 }
 
+public sealed class CertificateFingerprintTests
+{
+    private const string Hex = "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
+    private const string Base64 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    [Theory]
+    [InlineData(Hex)]
+    [InlineData("00:01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F")]
+    [InlineData(Base64)]
+    [InlineData("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")]
+    [InlineData("SHA256:" + Base64)]
+    [InlineData("SHA256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")]
+    public void Sha256_fingerprint_normalization_accepts_canonical_hex_and_base64(string value)
+    {
+        Assert.True(CertificateFingerprint.TryNormalizeSha256(value, out var normalized));
+        Assert.Equal(Hex, normalized);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("SHA256:")]
+    [InlineData("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8==")]
+    [InlineData("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh9")]
+    [InlineData("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwd Hh8")]
+    [InlineData("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh*")]
+    [InlineData("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E")]
+    public void Sha256_fingerprint_normalization_rejects_malformed_or_noncanonical_values(string value)
+    {
+        Assert.False(CertificateFingerprint.TryNormalizeSha256(value, out var normalized));
+        Assert.Equal(string.Empty, normalized);
+    }
+}
+
 public sealed class NativeConnectionLeaseTests
 {
     [Fact]
