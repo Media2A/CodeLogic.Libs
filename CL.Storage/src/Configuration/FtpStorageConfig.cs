@@ -115,23 +115,43 @@ internal static class CertificateFingerprint
             return false;
         var text = value.Trim();
         if (text.StartsWith("SHA256:", StringComparison.OrdinalIgnoreCase))
-        {
-            try
-            {
-                var bytes = Convert.FromBase64String(text[7..]);
-                if (bytes.Length != 32) return false;
-                normalized = Convert.ToHexString(bytes);
-                return true;
-            }
-            catch (FormatException) { return false; }
-        }
+            return TryNormalizeBase64(text[7..], out normalized);
 
-        text = text.Replace(":", string.Empty, StringComparison.Ordinal)
+        var hex = text.Replace(":", string.Empty, StringComparison.Ordinal)
             .Replace("-", string.Empty, StringComparison.Ordinal)
             .Replace(" ", string.Empty, StringComparison.Ordinal);
-        if (text.Length != 64 || text.Any(character => !Uri.IsHexDigit(character)))
+        if (hex.Length == 64 && hex.All(Uri.IsHexDigit))
+        {
+            normalized = hex.ToUpperInvariant();
+            return true;
+        }
+
+        // SSH.NET reports HostKeyEventArgs.FingerPrintSHA256 as canonical,
+        // unpadded Base64 without the OpenSSH "SHA256:" display prefix.
+        return TryNormalizeBase64(text, out normalized);
+    }
+
+    private static bool TryNormalizeBase64(string value, out string normalized)
+    {
+        normalized = string.Empty;
+        if (value.Length is not (43 or 44) ||
+            value.Any(character => char.IsWhiteSpace(character) || char.IsControl(character)) ||
+            value.Length == 44 && value[^1] != '=')
             return false;
-        normalized = text.ToUpperInvariant();
-        return true;
+
+        var padded = value.Length == 43 ? value + "=" : value;
+        try
+        {
+            var bytes = Convert.FromBase64String(padded);
+            if (bytes.Length != 32 ||
+                !string.Equals(Convert.ToBase64String(bytes), padded, StringComparison.Ordinal))
+                return false;
+            normalized = Convert.ToHexString(bytes);
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 }

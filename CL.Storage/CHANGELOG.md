@@ -24,6 +24,8 @@
 
 ### Safety
 
+- Accept SSH.NET's canonical unpadded Base64 SHA-256 host-key fingerprints while continuing to
+  reject malformed, noncanonical, or non-SHA-256 values before SFTP trust decisions.
 - Centralized path normalization and source/destination relationship checks; equal transfers and
   directory moves/copies below their source are rejected by the library and direct backends.
 - Staged local, FTP, SFTP, and WebDAV overwrites so a failed upload cannot truncate existing data.
