@@ -1,5 +1,9 @@
 # CodeLogic.StorageS3
 
+> **Legacy package:** use [`CodeLogic.Storage`](../CL.Storage/) for new development. The replacement
+> adds mounted S3 connections, seven additional providers, bounded multipart uploads, version APIs,
+> and rollback-safe cross-provider transfers.
+
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.StorageS3)](https://www.nuget.org/packages/CodeLogic.StorageS3)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 

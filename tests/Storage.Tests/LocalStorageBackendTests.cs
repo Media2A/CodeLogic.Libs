@@ -91,6 +91,35 @@ public sealed class LocalStorageBackendTests : IDisposable
     }
 
     [Fact]
+    public async Task Same_path_copy_and_move_are_rejected_without_changing_the_file()
+    {
+        await using var backend = CreateBackend();
+        await backend.UploadBytesAsync("same.bin", [1, 2, 3]);
+
+        var copy = await backend.CopyAsync("same.bin", "./same.bin");
+        var move = await backend.MoveAsync("same.bin", "same.bin");
+
+        Assert.Equal("storage.invalid_path", copy.Error!.Code);
+        Assert.Equal("storage.invalid_path", move.Error!.Code);
+        Assert.Equal(new byte[] { 1, 2, 3 }, (await backend.DownloadBytesAsync("same.bin")).Value);
+    }
+
+    [Fact]
+    public async Task Directory_transfer_into_its_own_descendant_is_rejected_without_mutation()
+    {
+        await using var backend = CreateBackend();
+        await backend.UploadBytesAsync("tree/child.bin", [7]);
+
+        var copy = await backend.CopyAsync("tree", "tree/nested/copy");
+        var move = await backend.MoveAsync("tree", "tree/nested/move");
+
+        Assert.Equal("storage.invalid_path", copy.Error!.Code);
+        Assert.Equal("storage.invalid_path", move.Error!.Code);
+        Assert.Equal(new byte[] { 7 }, (await backend.DownloadBytesAsync("tree/child.bin")).Value);
+        Assert.False((await backend.ExistsAsync("tree/nested")).Value);
+    }
+
+    [Fact]
     public async Task Upload_does_not_dispose_the_caller_owned_stream()
     {
         await using var backend = CreateBackend();
@@ -103,6 +132,24 @@ public sealed class LocalStorageBackendTests : IDisposable
         source.Position = 0;
         Assert.Equal((byte)'o', source.ReadByte());
         source.Dispose();
+    }
+
+    [Fact]
+    public async Task Failed_overwrite_upload_preserves_the_original_and_removes_staging_files()
+    {
+        await using var backend = CreateBackend();
+        await backend.UploadBytesAsync("important.bin", [1, 2, 3, 4]);
+        var source = new ThrowingReadStream([9, 9]);
+
+        var result = await backend.UploadAsync(
+            "important.bin",
+            source,
+            new StorageUploadOptions { Overwrite = true });
+
+        Assert.True(result.IsFailure);
+        Assert.Equal([1, 2, 3, 4], (await backend.DownloadBytesAsync("important.bin")).Value);
+        Assert.Empty(Directory.EnumerateFiles(_root, ".cl-storage-*", SearchOption.AllDirectories));
+        Assert.True(source.CanRead);
     }
 
     [Fact]
@@ -292,5 +339,38 @@ public sealed class LocalStorageBackendTests : IDisposable
             WasDisposed = true;
             base.Dispose(disposing);
         }
+    }
+
+    private sealed class ThrowingReadStream(byte[] firstChunk) : Stream
+    {
+        private bool _returnedChunk;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_returnedChunk)
+                return ValueTask.FromException<int>(new IOException("simulated source failure"));
+            _returnedChunk = true;
+            var count = Math.Min(firstChunk.Length, buffer.Length);
+            firstChunk.AsSpan(0, count).CopyTo(buffer.Span);
+            return ValueTask.FromResult(count);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            ReadAsync(buffer.AsMemory(offset, count)).GetAwaiter().GetResult();
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

@@ -47,6 +47,8 @@ internal sealed class S3StorageBackendFactory : IStorageBackendFactory
             ownsClient: true,
             maxBufferedDownloadBytes,
             value.DisablePayloadSigning,
-            value.DisableDefaultChecksumValidation);
+            value.DisableDefaultChecksumValidation,
+            value.MultipartPartSizeBytes,
+            value.MultipartThresholdBytes);
     }
 }

@@ -46,9 +46,6 @@ public sealed class FtpConnectionConfig : StorageConnectionConfigBase
     /// <summary>Optional SHA-256 fingerprints of trusted TLS leaf certificates.</summary>
     public List<string> TrustedCertificateSha256 { get; set; } = [];
 
-    /// <summary>Allows an invalid TLS certificate. Keep disabled unless the endpoint is otherwise authenticated.</summary>
-    public bool AcceptAnyCertificate { get; set; }
-
     [ConfigField(Label = "Client certificate", Group = "TLS", Order = 30)]
     public string? ClientCertificatePath { get; set; }
 
@@ -73,7 +70,9 @@ public sealed class FtpConnectionConfig : StorageConnectionConfigBase
             yield return "Root is invalid";
         if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && !Path.IsPathFullyQualified(ClientCertificatePath))
             yield return "ClientCertificatePath must be an absolute path";
-        foreach (var fingerprint in TrustedCertificateSha256)
+        if (EncryptionMode == StorageFtpEncryptionMode.None && TrustedCertificateSha256?.Count > 0)
+            yield return "TrustedCertificateSha256 requires an encrypted FTP connection";
+        foreach (var fingerprint in TrustedCertificateSha256 ?? [])
         {
             if (!CertificateFingerprint.IsValidSha256(fingerprint))
                 yield return $"Trusted certificate fingerprint '{fingerprint}' is not a SHA-256 fingerprint";

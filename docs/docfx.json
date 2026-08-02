@@ -12,6 +12,7 @@
             "CL.PostgreSQL/CL.PostgreSQL.csproj",
             "CL.SQLite/CL.SQLite.csproj",
             "CL.SocialConnect/CL.SocialConnect.csproj",
+            "CL.Storage/CL.Storage.csproj",
             "CL.StorageS3/CL.StorageS3.csproj",
             "CL.SystemStats/CL.SystemStats.csproj",
             "CL.TwoFactorAuth/CL.TwoFactorAuth.csproj",

@@ -187,7 +187,8 @@ public sealed class StorageLibraryOperationsTests
             provider: StorageProvider.S3,
             upload: (path, _) => Task.FromResult(path == "failed.bin"
                 ? Result<StorageItem>.Failure(StorageErrors.Unavailable("offline"))
-                : Result<StorageItem>.Success(Item(path))));
+                : Result<StorageItem>.Success(Item(path))),
+            getInfo: (path, _) => Task.FromResult(Result<StorageItem>.Success(Item(path))));
         Assert.True(library.RegisterBackend("Events", backend).IsSuccess);
         var service = library.GetStorage("Events");
 
@@ -217,6 +218,77 @@ public sealed class StorageLibraryOperationsTests
             };
             Assert.Equal(TimeSpan.Zero, timestamp.Offset);
         });
+    }
+
+    [Fact]
+    public async Task Stable_proxy_normalizes_transfer_paths_for_the_backend_and_events()
+    {
+        using var directory = new TestDirectory();
+        var eventBus = new EventBus();
+        StorageItemCopiedEvent? published = null;
+        using var subscription = eventBus.Subscribe<StorageItemCopiedEvent>(value => published = value);
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path, eventBus);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        (string Source, string Destination)? received = null;
+        var backend = new FakeStorageBackend(
+            "Normalized",
+            copy: (source, destination, _) =>
+            {
+                received = (source, destination);
+                return Task.FromResult(Result.Success());
+            },
+            getInfo: (path, _) => Task.FromResult(Result<StorageItem>.Success(Item(path))));
+        Assert.True(library.RegisterBackend("Normalized", backend).IsSuccess);
+
+        var result = await library.GetStorage("Normalized").CopyAsync(
+            @"folder\.\source.bin",
+            "/folder//destination.bin");
+
+        Assert.True(result.IsSuccess, result.Error?.Message);
+        Assert.Equal(("folder/source.bin", "folder/destination.bin"), received);
+        Assert.NotNull(published);
+        Assert.Equal("folder/source.bin", published.SourcePath);
+        Assert.Equal("folder/destination.bin", published.DestinationPath);
+    }
+
+    [Fact]
+    public async Task Stable_proxy_rejects_equivalent_transfer_paths_without_calling_custom_backend()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var calls = 0;
+        var backend = new FakeStorageBackend(
+            "Guarded",
+            copy: (_, _, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                return Task.FromResult(Result.Success());
+            });
+        Assert.True(library.RegisterBackend("Guarded", backend).IsSuccess);
+
+        var result = await library.GetStorage("Guarded").CopyAsync("folder/./item.bin", "folder/item.bin");
+
+        Assert.True(result.IsFailure);
+        Assert.Equal(StorageErrors.InvalidPathCode, result.Error!.Code);
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task Stable_proxy_honors_pre_cancellation_before_calling_custom_backend()
+    {
+        using var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        Assert.True(library.RegisterBackend("Cancelled", new FakeStorageBackend("Cancelled")).IsSuccess);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            library.GetStorage("Cancelled").ExistsAsync("item.bin", cancellation.Token));
     }
 
     [Fact]

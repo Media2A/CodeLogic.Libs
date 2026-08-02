@@ -71,8 +71,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             var hash = eventArgs.Certificate is null
                 ? null
                 : Convert.ToHexString(SHA256.HashData(eventArgs.Certificate.GetRawCertData()));
-            eventArgs.Accept = value.AcceptAnyCertificate ||
-                (hash is not null && pins.Contains(hash)) ||
+            eventArgs.Accept = (hash is not null && pins.Contains(hash)) ||
                 (pins.Count == 0 && eventArgs.PolicyErrors == SslPolicyErrors.None);
         };
         return client;

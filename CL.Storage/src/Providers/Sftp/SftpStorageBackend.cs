@@ -14,12 +14,13 @@ namespace CL.Storage.Providers.Sftp;
 public sealed class SftpStorageBackend : IStorageBackend
 {
     private static readonly StorageCapabilities SftpCapabilities = new(
-        Directories: true,
-        NativeCopy: false,
-        NativeMove: true,
-        RangeReads: true,
-        Metadata: false,
-        ServerPagination: false);
+        StorageFeature.PhysicalDirectories |
+        StorageFeature.FileCopy |
+        StorageFeature.FileMove |
+        StorageFeature.DirectoryMove |
+        StorageFeature.RelayedCopy |
+        StorageFeature.ServerSideMove |
+        StorageFeature.RangeReads);
 
     private readonly Func<SftpClient> _clientFactory;
     private readonly RemotePathResolver _paths;
@@ -47,6 +48,7 @@ public sealed class SftpStorageBackend : IStorageBackend
 
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure) return Result<StorageItem>.Failure(resolved.Error!);
         if (resolved.Value!.StoragePath.Length == 0)
@@ -106,6 +108,7 @@ public sealed class SftpStorageBackend : IStorageBackend
 
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure) return Result.Failure(resolved.Error!);
         SftpClient? client = null;
@@ -126,9 +129,16 @@ public sealed class SftpStorageBackend : IStorageBackend
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
+        if (options.Condition is { IsEmpty: false })
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported(
+                "SFTP does not expose portable atomic upload conditions."));
+        if (options.Metadata.Count > 0)
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported(
+                "SFTP does not support portable user metadata."));
         var resolved = _paths.Resolve(path, requireNonRoot: true);
         if (resolved.IsFailure) return Result<StorageItem>.Failure(resolved.Error!);
         SftpClient? client = null;
+        string? stagingPath = null;
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
@@ -145,13 +155,31 @@ public sealed class SftpStorageBackend : IStorageBackend
                 if (!options.Overwrite)
                     return Result<StorageItem>.Failure(StorageErrors.Conflict("The SFTP destination already exists."));
             }
-            await client.UploadFileAsync(source, resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
+            var staging = await AllocateTemporaryPathAsync(client, parent, "upload", cancellationToken).ConfigureAwait(false);
+            if (staging.IsFailure)
+                return Result<StorageItem>.Failure(staging.Error!);
+            stagingPath = staging.Value!;
+            await client.UploadFileAsync(source, stagingPath, cancellationToken).ConfigureAwait(false);
+            var committed = await CommitPathAsync(
+                client,
+                stagingPath,
+                resolved.Value.RemotePath,
+                options.Overwrite,
+                cancellationToken).ConfigureAwait(false);
+            if (committed.IsFailure)
+                return Result<StorageItem>.Failure(committed.Error!);
+            stagingPath = null;
             var attributes = await client.GetAttributesAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
             return Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, attributes));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Upload SFTP file")); }
-        finally { client?.Dispose(); }
+        finally
+        {
+            if (client is not null && stagingPath is not null)
+                await TryDeletePathAsync(client, stagingPath).ConfigureAwait(false);
+            client?.Dispose();
+        }
     }
 
     public async Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
@@ -166,6 +194,9 @@ public sealed class SftpStorageBackend : IStorageBackend
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<Stream>.Failure(validation.Error!);
+        if (options.VersionId is not null)
+            return Result<Stream>.Failure(StorageErrors.Unsupported(
+                "SFTP does not support version-specific downloads."));
         var resolved = _paths.Resolve(path, requireNonRoot: true);
         if (resolved.IsFailure) return Result<Stream>.Failure(resolved.Error!);
         SftpClient? client = null;
@@ -216,6 +247,11 @@ public sealed class SftpStorageBackend : IStorageBackend
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
+        if (options.Condition is { IsEmpty: false })
+            return Result.Failure(StorageErrors.Unsupported(
+                "SFTP does not expose portable atomic delete conditions."));
         var resolved = _paths.Resolve(path, requireNonRoot: true);
         if (resolved.IsFailure) return Result.Failure(resolved.Error!);
         SftpClient? client = null;
@@ -240,14 +276,30 @@ public sealed class SftpStorageBackend : IStorageBackend
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
-        var info = await GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
+        var source = _paths.Resolve(sourcePath, requireNonRoot: true);
+        if (source.IsFailure) return Result.Failure(source.Error!);
+        var destination = _paths.Resolve(destinationPath, requireNonRoot: true);
+        if (destination.IsFailure) return Result.Failure(destination.Error!);
+        var relationship = StorageTransferPath.ValidateDistinct(
+            source.Value!.StoragePath,
+            destination.Value!.StoragePath);
+        if (relationship.IsFailure) return relationship;
+        var info = await GetInfoAsync(source.Value.StoragePath, cancellationToken).ConfigureAwait(false);
         if (info.IsFailure) return Result.Failure(info.Error!);
         if (info.Value!.ItemType == StorageItemType.Directory)
+        {
+            relationship = StorageTransferPath.ValidateDirectoryDestination(
+                source.Value.StoragePath,
+                destination.Value.StoragePath);
+            if (relationship.IsFailure) return relationship;
             return Result.Failure(StorageErrors.Unsupported("SFTP directory copy is not supported."));
-        var download = await DownloadAsync(sourcePath, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        var download = await DownloadAsync(source.Value.StoragePath, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (download.IsFailure) return Result.Failure(download.Error!);
         await using var stream = download.Value!;
-        var upload = await UploadAsync(destinationPath, stream, new StorageUploadOptions
+        var upload = await UploadAsync(destination.Value.StoragePath, stream, new StorageUploadOptions
         {
             Overwrite = options.Overwrite,
             CreateParents = options.CreateParents
@@ -258,30 +310,41 @@ public sealed class SftpStorageBackend : IStorageBackend
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
         var source = _paths.Resolve(sourcePath, requireNonRoot: true);
         if (source.IsFailure) return Result.Failure(source.Error!);
         var destination = _paths.Resolve(destinationPath, requireNonRoot: true);
         if (destination.IsFailure) return Result.Failure(destination.Error!);
+        var relationship = StorageTransferPath.ValidateDistinct(
+            source.Value!.StoragePath,
+            destination.Value!.StoragePath);
+        if (relationship.IsFailure) return relationship;
         SftpClient? client = null;
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
             if (!await client.ExistsAsync(source.Value!.RemotePath, cancellationToken).ConfigureAwait(false))
                 return Result.Failure(StorageErrors.NotFound($"SFTP item '{source.Value.StoragePath}' was not found."));
+            var sourceAttributes = await client.GetAttributesAsync(source.Value.RemotePath, cancellationToken).ConfigureAwait(false);
+            if (sourceAttributes.IsDirectory)
+            {
+                relationship = StorageTransferPath.ValidateDirectoryDestination(
+                    source.Value.StoragePath,
+                    destination.Value!.StoragePath);
+                if (relationship.IsFailure) return relationship;
+            }
             var parent = RemotePathResolver.Parent(destination.Value!.RemotePath);
             if (options.CreateParents)
                 await EnsureDirectoryAsync(client, parent, cancellationToken).ConfigureAwait(false);
             else if (!await client.ExistsAsync(parent, cancellationToken).ConfigureAwait(false))
                 return Result.Failure(StorageErrors.NotFound("The SFTP destination parent directory was not found."));
-            if (await client.ExistsAsync(destination.Value.RemotePath, cancellationToken).ConfigureAwait(false))
-            {
-                if (!options.Overwrite)
-                    return Result.Failure(StorageErrors.Conflict("The SFTP destination already exists."));
-                var attributes = await client.GetAttributesAsync(destination.Value.RemotePath, cancellationToken).ConfigureAwait(false);
-                await DeleteRemoteAsync(client, destination.Value.RemotePath, attributes.IsDirectory, recursive: true, cancellationToken).ConfigureAwait(false);
-            }
-            await client.RenameFileAsync(source.Value.RemotePath, destination.Value.RemotePath, cancellationToken).ConfigureAwait(false);
-            return Result.Success();
+            return await CommitPathAsync(
+                client,
+                source.Value.RemotePath,
+                destination.Value.RemotePath,
+                options.Overwrite,
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Move SFTP item")); }
@@ -374,6 +437,156 @@ public sealed class SftpStorageBackend : IStorageBackend
         return items;
     }
 
+    private static async Task<Result> CommitPathAsync(
+        SftpClient client,
+        string sourcePath,
+        string destinationPath,
+        bool overwrite,
+        CancellationToken cancellationToken)
+    {
+        if (!await client.ExistsAsync(destinationPath, cancellationToken).ConfigureAwait(false))
+        {
+            await client.RenameFileAsync(sourcePath, destinationPath, cancellationToken).ConfigureAwait(false);
+            return Result.Success();
+        }
+        if (!overwrite)
+            return Result.Failure(StorageErrors.Conflict("The SFTP destination already exists."));
+
+        var destinationAttributes = await client.GetAttributesAsync(destinationPath, cancellationToken).ConfigureAwait(false);
+        var backup = await AllocateTemporaryPathAsync(
+            client,
+            RemotePathResolver.Parent(destinationPath),
+            "backup",
+            cancellationToken).ConfigureAwait(false);
+        if (backup.IsFailure)
+            return Result.Failure(backup.Error!);
+        var backupPath = backup.Value!;
+        await client.RenameFileAsync(destinationPath, backupPath, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await client.RenameFileAsync(sourcePath, destinationPath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (await IsCommitCompleteAsync(client, sourcePath, destinationPath).ConfigureAwait(false))
+            {
+                _ = await DeleteBackupAsync(client, backupPath, destinationAttributes.IsDirectory).ConfigureAwait(false);
+                return Result.Success();
+            }
+            _ = await TryRestoreBackupAsync(client, backupPath, destinationPath).ConfigureAwait(false);
+            throw;
+        }
+        catch (Exception error)
+        {
+            if (await IsCommitCompleteAsync(client, sourcePath, destinationPath).ConfigureAwait(false))
+                return await DeleteBackupAsync(client, backupPath, destinationAttributes.IsDirectory).ConfigureAwait(false);
+            var restored = await TryRestoreBackupAsync(client, backupPath, destinationPath).ConfigureAwait(false);
+            return restored
+                ? Result.Failure(Map(error, "Commit SFTP replacement"))
+                : Result.Failure(StorageErrors.PartialFailure(
+                    "The SFTP replacement failed and its previous destination could not be restored.",
+                    "destinationState=backup"));
+        }
+
+        return await DeleteBackupAsync(client, backupPath, destinationAttributes.IsDirectory).ConfigureAwait(false);
+    }
+
+    private static async Task<Result<string>> AllocateTemporaryPathAsync(
+        SftpClient client,
+        string parent,
+        string purpose,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            var candidate = parent.TrimEnd('/') + $"/.cl-storage-{purpose}-{Guid.NewGuid():N}.tmp";
+            if (!await client.ExistsAsync(candidate, cancellationToken).ConfigureAwait(false))
+                return Result<string>.Success(candidate);
+        }
+        return Result<string>.Failure(StorageErrors.Conflict(
+            "Unable to allocate a unique SFTP staging path."));
+    }
+
+    private static async Task<bool> IsCommitCompleteAsync(
+        SftpClient client,
+        string sourcePath,
+        string destinationPath)
+    {
+        try
+        {
+            var sourceExists = await client.ExistsAsync(sourcePath, CancellationToken.None).ConfigureAwait(false);
+            var destinationExists = await client.ExistsAsync(destinationPath, CancellationToken.None).ConfigureAwait(false);
+            return !sourceExists && destinationExists;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> TryRestoreBackupAsync(
+        SftpClient client,
+        string backupPath,
+        string destinationPath)
+    {
+        try
+        {
+            if (!await client.ExistsAsync(backupPath, CancellationToken.None).ConfigureAwait(false) ||
+                await client.ExistsAsync(destinationPath, CancellationToken.None).ConfigureAwait(false))
+                return false;
+            await client.RenameFileAsync(backupPath, destinationPath, CancellationToken.None).ConfigureAwait(false);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<Result> DeleteBackupAsync(
+        SftpClient client,
+        string backupPath,
+        bool directory)
+    {
+        try
+        {
+            await DeleteRemoteAsync(
+                client,
+                backupPath,
+                directory,
+                recursive: true,
+                CancellationToken.None).ConfigureAwait(false);
+            return Result.Success();
+        }
+        catch
+        {
+            return Result.Failure(StorageErrors.PartialFailure(
+                "The SFTP destination committed, but its temporary backup could not be removed.",
+                "destinationState=complete;backupState=present"));
+        }
+    }
+
+    private static async Task TryDeletePathAsync(SftpClient client, string path)
+    {
+        try
+        {
+            if (!await client.ExistsAsync(path, CancellationToken.None).ConfigureAwait(false))
+                return;
+            var attributes = await client.GetAttributesAsync(path, CancellationToken.None).ConfigureAwait(false);
+            await DeleteRemoteAsync(
+                client,
+                path,
+                attributes.IsDirectory,
+                recursive: true,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort cleanup must not mask the primary upload result.
+        }
+    }
+
     private static async Task EnsureDirectoryAsync(SftpClient client, string remotePath, CancellationToken cancellationToken)
     {
         var current = string.Empty;
@@ -443,6 +656,6 @@ public sealed class SftpStorageBackend : IStorageBackend
         SftpPermissionDeniedException or SshAuthenticationException => StorageErrors.Unauthorized($"{operation}: access was denied."),
         SshOperationTimeoutException or TimeoutException or TaskCanceledException => StorageErrors.Timeout($"{operation}: operation timed out."),
         SshConnectionException => StorageErrors.Unavailable($"{operation}: SFTP service is unavailable."),
-        _ => StorageErrors.ProviderError($"{operation}: SFTP provider failed.", exception.Message)
+        _ => StorageErrors.ProviderError($"{operation}: SFTP provider failed.")
     };
 }

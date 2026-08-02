@@ -1,5 +1,8 @@
 # CL.StorageS3
 
+> **Legacy package:** new development should use [CL.Storage](storage.md). See its migration guide
+> for mounted S3 connections, version APIs, bounded multipart uploads, and safe cross-provider transfers.
+
 > S3-compatible object storage — one API across Amazon S3, MinIO, and Cloudflare R2.
 
 `CL.StorageS3` adds object storage to a CodeLogic 4 application over [AWSSDK.S3](https://www.nuget.org/packages/AWSSDK.S3). You configure one or more named **connections** (each pointing at an S3, MinIO, or R2 endpoint), then perform bucket and object operations through an `S3StorageService` scoped to a connection. Every operation returns the framework `Result<T>` so exceptions are caught and wrapped — check `IsSuccess` / `IsFailure` and read `Error?.Message` rather than using try/catch. The two existence checks are the exception: they return a plain `Task<bool>`.

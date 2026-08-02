@@ -16,6 +16,8 @@ public sealed record StorageItem
     public DateTimeOffset? LastModified { get; init; }
     public string? ContentType { get; init; }
     public string? ETag { get; init; }
+    /// <summary>Provider version, generation, or mutation identifier when one is available.</summary>
+    public string? VersionId { get; init; }
 
     /// <summary>Gets an immutable snapshot of provider metadata.</summary>
     public IReadOnlyDictionary<string, string> Metadata

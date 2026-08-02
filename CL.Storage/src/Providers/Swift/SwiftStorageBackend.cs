@@ -8,14 +8,31 @@ using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
+using CL.Storage.Registry;
 using CodeLogic.Core.Results;
 
 namespace CL.Storage.Providers.Swift;
 
 /// <summary>Root-scoped storage over the OpenStack Swift HTTP API.</summary>
-public sealed class SwiftStorageBackend : IStorageBackend
+public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataService
 {
-    private static readonly StorageCapabilities SwiftCapabilities = new(true, true, true, true, true, true);
+    private static readonly StorageCapabilities SwiftCapabilities = new(
+        StorageFeature.VirtualDirectories |
+        StorageFeature.FileCopy |
+        StorageFeature.DirectoryCopy |
+        StorageFeature.FileMove |
+        StorageFeature.DirectoryMove |
+        StorageFeature.ServerSideCopy |
+        StorageFeature.ServerSideMove |
+        StorageFeature.RangeReads |
+        StorageFeature.MetadataRead |
+        StorageFeature.MetadataWrite |
+        StorageFeature.ConditionalCreate |
+        StorageFeature.ConditionalUpdate |
+        StorageFeature.ConditionalDelete |
+        StorageFeature.AtomicReplace |
+        StorageFeature.ServerPagination,
+        new StorageLimits { MaxPageSize = 10_000 });
     private readonly HttpClient _client;
     private readonly SwiftConnectionConfig _configuration;
     private readonly SemaphoreSlim _authenticationGate = new(1, 1);
@@ -62,6 +79,7 @@ public sealed class SwiftStorageBackend : IStorageBackend
 
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var normalized = Normalize(path);
         if (normalized.IsFailure) return Result<StorageItem>.Failure(normalized.Error!);
         if (normalized.Value!.Length == 0) return Result<StorageItem>.Success(DirectoryItem(string.Empty));
@@ -96,6 +114,14 @@ public sealed class SwiftStorageBackend : IStorageBackend
         if (validation.IsFailure) return Result<StoragePage>.Failure(validation.Error!);
         var normalized = Normalize(path);
         if (normalized.IsFailure) return Result<StoragePage>.Failure(normalized.Error!);
+        if (normalized.Value!.Length > 0)
+        {
+            var directory = await GetInfoAsync(normalized.Value, cancellationToken).ConfigureAwait(false);
+            if (directory.IsFailure) return Result<StoragePage>.Failure(directory.Error!);
+            if (directory.Value!.ItemType != StorageItemType.Directory)
+                return Result<StoragePage>.Failure(StorageErrors.Conflict(
+                    "A Swift object cannot be listed as a directory."));
+        }
         try
         {
             var page = await ListProviderPageAsync(
@@ -132,8 +158,10 @@ public sealed class SwiftStorageBackend : IStorageBackend
 
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
-        var normalized = NormalizeRequired(path);
+        cancellationToken.ThrowIfCancellationRequested();
+        var normalized = Normalize(path);
         if (normalized.IsFailure) return Result.Failure(normalized.Error!);
+        if (normalized.Value!.Length == 0) return Result.Success();
         try
         {
             using var response = await SendAsync(() =>
@@ -155,6 +183,11 @@ public sealed class SwiftStorageBackend : IStorageBackend
     {
         ArgumentNullException.ThrowIfNull(source);
         options ??= new StorageUploadOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
+        if (options.Condition?.ExpectedVersionId is not null)
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported(
+                "This Swift endpoint does not expose a portable version upload condition."));
         var normalized = NormalizeRequired(path);
         if (normalized.IsFailure) return Result<StorageItem>.Failure(normalized.Error!);
         var sourceStart = source.CanSeek ? source.Position : (long?)null;
@@ -168,6 +201,8 @@ public sealed class SwiftStorageBackend : IStorageBackend
                 if (!string.IsNullOrWhiteSpace(options.ContentType))
                     request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(options.ContentType);
                 if (!options.Overwrite) request.Headers.TryAddWithoutValidation("If-None-Match", "*");
+                else if (options.Condition?.ExpectedETag is not null)
+                    request.Headers.TryAddWithoutValidation("If-Match", QuoteETag(options.Condition.ExpectedETag));
                 foreach (var (name, value) in options.Metadata)
                     request.Headers.TryAddWithoutValidation("X-Object-Meta-" + name, value);
                 return request;
@@ -192,6 +227,9 @@ public sealed class SwiftStorageBackend : IStorageBackend
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<Stream>.Failure(validation.Error!);
+        if (options.VersionId is not null)
+            return Result<Stream>.Failure(StorageErrors.Unsupported(
+                "This Swift adapter does not support version-specific downloads."));
         var normalized = NormalizeRequired(path);
         if (normalized.IsFailure) return Result<Stream>.Failure(normalized.Error!);
         HttpResponseMessage? response = null;
@@ -247,6 +285,8 @@ public sealed class SwiftStorageBackend : IStorageBackend
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
         var normalized = NormalizeRequired(path);
         if (normalized.IsFailure) return Result.Failure(normalized.Error!);
         try
@@ -257,7 +297,12 @@ public sealed class SwiftStorageBackend : IStorageBackend
                 : Result.Failure(info.Error!);
             if (info.Value!.ItemType == StorageItemType.Directory)
             {
-                var names = await ListAllNamesAsync(DirectoryPrefix(normalized.Value!), cancellationToken).ConfigureAwait(false);
+                if (options.Condition is { IsEmpty: false })
+                    return Result.Failure(StorageErrors.Unsupported(
+                        "Swift virtual directories do not have one atomic identity condition."));
+                var listed = await ListAllNamesAsync(DirectoryPrefix(normalized.Value!), cancellationToken).ConfigureAwait(false);
+                if (listed.IsFailure) return Result.Failure(listed.Error!);
+                var names = listed.Value!;
                 if (!options.Recursive && names.Any(name => name != DirectoryPrefix(normalized.Value!)))
                     return Result.Failure(StorageErrors.Conflict("The Swift directory is not empty."));
                 foreach (var name in names)
@@ -270,7 +315,19 @@ public sealed class SwiftStorageBackend : IStorageBackend
             }
             else
             {
-                return await DeleteObjectAsync(ToKey(normalized.Value!), cancellationToken).ConfigureAwait(false);
+                if (options.Condition?.ExpectedVersionId is not null)
+                    return Result.Failure(StorageErrors.Unsupported(
+                        "This Swift endpoint does not expose a portable version delete condition."));
+                if (options.Condition?.ExpectedETag is { } expectedETag &&
+                    !string.Equals(expectedETag.Trim('"'), info.Value.ETag?.Trim('"'), StringComparison.Ordinal))
+                {
+                    return Result.Failure(StorageErrors.Conflict(
+                        "The Swift object ETag no longer matches the requested delete condition."));
+                }
+                return await DeleteObjectAsync(
+                    ToKey(normalized.Value!),
+                    cancellationToken,
+                    ifMatch: options.Condition?.ExpectedETag).ConfigureAwait(false);
             }
             return Result.Success();
         }
@@ -281,29 +338,32 @@ public sealed class SwiftStorageBackend : IStorageBackend
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
         var source = NormalizeRequired(sourcePath);
         if (source.IsFailure) return Result.Failure(source.Error!);
         var destination = NormalizeRequired(destinationPath);
         if (destination.IsFailure) return Result.Failure(destination.Error!);
+        var relationship = StorageTransferPath.ValidateDistinct(source.Value!, destination.Value!);
+        if (relationship.IsFailure) return relationship;
         try
         {
             var info = await GetInfoAsync(source.Value!, cancellationToken).ConfigureAwait(false);
             if (info.IsFailure) return Result.Failure(info.Error!);
             if (info.Value!.ItemType == StorageItemType.Directory)
             {
-                var sourcePrefix = DirectoryPrefix(source.Value!);
-                var destinationPrefix = DirectoryPrefix(destination.Value!);
-                foreach (var name in await ListAllNamesAsync(sourcePrefix, cancellationToken).ConfigureAwait(false))
-                {
-                    var copied = await CopyObjectAsync(name, destinationPrefix + name[sourcePrefix.Length..], options.Overwrite, cancellationToken).ConfigureAwait(false);
-                    if (copied.IsFailure) return copied;
-                }
+                relationship = StorageTransferPath.ValidateDirectoryDestination(source.Value!, destination.Value!);
+                if (relationship.IsFailure) return relationship;
+                var relayed = await StorageTransferCoordinator.CopyAsync(
+                    this,
+                    source.Value!,
+                    this,
+                    destination.Value!,
+                    options,
+                    cancellationToken).ConfigureAwait(false);
+                return relayed.IsSuccess ? Result.Success() : Result.Failure(relayed.Error!);
             }
-            else
-            {
-                return await CopyObjectAsync(ToKey(source.Value!), ToKey(destination.Value!), options.Overwrite, cancellationToken).ConfigureAwait(false);
-            }
-            return Result.Success();
+            return await CopyObjectAsync(ToKey(source.Value!), ToKey(destination.Value!), options.Overwrite, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Copy Swift object")); }
@@ -313,7 +373,12 @@ public sealed class SwiftStorageBackend : IStorageBackend
     {
         var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
         if (copied.IsFailure) return copied;
-        return await DeleteAsync(sourcePath, new StorageDeleteOptions { Recursive = true }, cancellationToken).ConfigureAwait(false);
+        var deleted = await DeleteAsync(sourcePath, new StorageDeleteOptions { Recursive = true }, cancellationToken).ConfigureAwait(false);
+        return deleted.IsSuccess
+            ? Result.Success()
+            : Result.Failure(StorageErrors.PartialFailure(
+                "The Swift destination completed, but the source could not be deleted.",
+                $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
     }
 
     public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
@@ -329,6 +394,59 @@ public sealed class SwiftStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Check Swift health")); }
+    }
+
+    public async Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        return info.IsSuccess
+            ? Result<IReadOnlyDictionary<string, string>>.Success(info.Value!.Metadata)
+            : Result<IReadOnlyDictionary<string, string>>.Failure(info.Error!);
+    }
+
+    public async Task<Result<StorageItem>> SetMetadataAsync(
+        string path,
+        IReadOnlyDictionary<string, string> metadata,
+        StorageMetadataUpdateOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        options ??= new StorageMetadataUpdateOptions();
+        var validation = options.Validate(metadata);
+        if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
+        if (options.ExpectedVersionId is not null)
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported(
+                "This Swift endpoint does not expose a portable version condition for metadata updates."));
+        var normalized = NormalizeRequired(path);
+        if (normalized.IsFailure) return Result<StorageItem>.Failure(normalized.Error!);
+        var snapshot = StorageMetadataSnapshot.Create(metadata);
+        try
+        {
+            var info = await GetInfoAsync(normalized.Value!, cancellationToken).ConfigureAwait(false);
+            if (info.IsFailure) return Result<StorageItem>.Failure(info.Error!);
+            if (info.Value!.ItemType != StorageItemType.File)
+                return Result<StorageItem>.Failure(StorageErrors.Conflict(
+                    "Swift metadata can only be updated on an object."));
+
+            using var response = await SendAsync(() =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Post, ObjectUri(ToKey(normalized.Value!)));
+                if (options.Mode == StorageMetadataUpdateMode.Replace)
+                    request.Headers.TryAddWithoutValidation("X-Fresh-Metadata", "True");
+                if (options.ExpectedETag is not null)
+                    request.Headers.TryAddWithoutValidation("If-Match", QuoteETag(options.ExpectedETag));
+                foreach (var (name, value) in snapshot)
+                    request.Headers.TryAddWithoutValidation("X-Object-Meta-" + name, value);
+                return request;
+            }, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return Result<StorageItem>.Failure(FromStatus(response, "Update Swift metadata"));
+            return await GetInfoAsync(normalized.Value!, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Update Swift metadata")); }
     }
 
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
@@ -539,24 +657,34 @@ public sealed class SwiftStorageBackend : IStorageBackend
         return Result<SwiftPage>.Success(new SwiftPage(items, next));
     }
 
-    private async Task<List<string>> ListAllNamesAsync(string prefix, CancellationToken cancellationToken)
+    private async Task<Result<IReadOnlyList<string>>> ListAllNamesAsync(string prefix, CancellationToken cancellationToken)
     {
         var names = new List<string>();
         string? marker = null;
         do
         {
             var page = await ListProviderPageAsync(prefix, null, 1000, marker, cancellationToken).ConfigureAwait(false);
-            if (page.IsFailure) throw new HttpRequestException(page.Error!.Message);
+            if (page.IsFailure) return Result<IReadOnlyList<string>>.Failure(page.Error!);
             names.AddRange(page.Value!.Items.Where(item => item.Name is not null).Select(item => item.Name!));
             marker = page.Value.NextMarker;
         } while (!string.IsNullOrWhiteSpace(marker));
-        return names;
+        return Result<IReadOnlyList<string>>.Success(names.AsReadOnly());
     }
 
-    private async Task<Result> DeleteObjectAsync(string key, CancellationToken cancellationToken, bool ignoreMissing = false)
+    private async Task<Result> DeleteObjectAsync(
+        string key,
+        CancellationToken cancellationToken,
+        bool ignoreMissing = false,
+        string? ifMatch = null)
     {
         using var response = await SendAsync(
-            () => new HttpRequestMessage(HttpMethod.Delete, ObjectUri(key)),
+            () =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Delete, ObjectUri(key));
+                if (ifMatch is not null)
+                    request.Headers.TryAddWithoutValidation("If-Match", QuoteETag(ifMatch));
+                return request;
+            },
             cancellationToken).ConfigureAwait(false);
         if (response.IsSuccessStatusCode || ignoreMissing && response.StatusCode == HttpStatusCode.NotFound)
             return Result.Success();
@@ -611,6 +739,7 @@ public sealed class SwiftStorageBackend : IStorageBackend
     private static StorageItem ToItem(string path, HttpResponseMessage response)
     {
         response.Content.Headers.TryGetValues("Content-Type", out var contentTypes);
+        response.Headers.TryGetValues("X-Object-Version-Id", out var versionIds);
         var metadata = response.Headers
             .Where(header => header.Key.StartsWith("X-Object-Meta-", StringComparison.OrdinalIgnoreCase))
             .ToDictionary(
@@ -626,9 +755,13 @@ public sealed class SwiftStorageBackend : IStorageBackend
             LastModified = response.Content.Headers.LastModified,
             ContentType = contentTypes?.FirstOrDefault(),
             ETag = response.Headers.ETag?.Tag.Trim('"'),
+            VersionId = versionIds?.FirstOrDefault(),
             Metadata = metadata
         };
     }
+
+    private static string QuoteETag(string etag) =>
+        etag.StartsWith('"') && etag.EndsWith('"') ? etag : $"\"{etag}\"";
 
     private static StorageItem DirectoryItem(string path) => new()
     {
@@ -661,7 +794,7 @@ public sealed class SwiftStorageBackend : IStorageBackend
             };
         if (exception is TimeoutException or TaskCanceledException) return StorageErrors.Timeout($"{operation}: operation timed out.");
         if (exception is HttpRequestException) return StorageErrors.Unavailable($"{operation}: Swift service is unavailable.");
-        return StorageErrors.ProviderError($"{operation}: Swift provider failed.", exception.Message);
+        return StorageErrors.ProviderError($"{operation}: Swift provider failed.");
     }
 
     private sealed record SwiftPage(IReadOnlyList<SwiftListItem> Items, string? NextMarker);

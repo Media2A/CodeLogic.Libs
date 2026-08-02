@@ -3,11 +3,13 @@ using System.Text.Json;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
+using CL.Storage.Events;
 using CL.Storage.Models;
 using CL.Storage.Providers;
 using CL.Storage.Providers.Azure;
 using CL.Storage.Providers.Ftp;
 using CL.Storage.Providers.GoogleCloud;
+using CL.Storage.Providers.Local;
 using CL.Storage.Providers.S3;
 using CL.Storage.Providers.Sftp;
 using CL.Storage.Providers.Swift;
@@ -20,7 +22,7 @@ using CodeLogic.Framework.Libraries;
 namespace CL.Storage;
 
 /// <summary>Provider-neutral storage library for CodeLogic applications.</summary>
-public sealed class StorageLibrary : ILibrary
+public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 {
     private readonly object _stateGate = new();
     private readonly object _registryGate = new();
@@ -48,7 +50,8 @@ public sealed class StorageLibrary : ILibrary
         new AzureBlobStorageBackendFactory(),
         new GoogleCloudStorageBackendFactory(),
         new SwiftStorageBackendFactory()
-    ], null) { }
+    ], null)
+    { }
 
     internal StorageLibrary(IEnumerable<IStorageBackendFactory> factories) : this(factories, null) { }
 
@@ -376,6 +379,533 @@ public sealed class StorageLibrary : ILibrary
         }
     }
 
+    /// <summary>Attempts to return a stable service proxy without throwing for an unknown or disabled connection.</summary>
+    public bool TryGetStorage(
+        string connectionId,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out IStorageService? storage)
+    {
+        ValidateConnectionId(connectionId);
+        EnsureOperational();
+        lock (_registryGate)
+        {
+            if (!_registry.TryGetValue(connectionId, out var entry))
+            {
+                storage = null;
+                return false;
+            }
+            var effectiveId = entry.Backend.ConnectionId;
+            if (!_proxies.TryGetValue(effectiveId, out var proxy))
+            {
+                proxy = new StorageServiceProxy(this, effectiveId);
+                _proxies.Add(effectiveId, proxy);
+            }
+            storage = proxy;
+            return true;
+        }
+    }
+
+    /// <summary>Checks one connection using the configured health timeout.</summary>
+    public async Task<Result<HealthStatus>> CheckConnectionHealthAsync(
+        string connectionId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateConnectionId(connectionId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var runtime = CaptureRuntimeSnapshot();
+        using var lease = AcquireOperation(connectionId);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        try
+        {
+            var health = await lease.Backend.CheckHealthAsync(linked.Token).ConfigureAwait(false);
+            if (health.IsFailure)
+                return Result<HealthStatus>.Failure(health.Error!);
+            return Result<HealthStatus>.Success(HealthStatus.Healthy(
+                $"Storage connection '{lease.Backend.ConnectionId}' is healthy"));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            return Result<HealthStatus>.Failure(StorageErrors.Timeout(
+                $"Storage connection '{lease.Backend.ConnectionId}' timed out during health check."));
+        }
+        catch (TimeoutException)
+        {
+            return Result<HealthStatus>.Failure(StorageErrors.Timeout(
+                $"Storage connection '{lease.Backend.ConnectionId}' timed out during health check."));
+        }
+        catch (Exception)
+        {
+            return Result<HealthStatus>.Failure(StorageErrors.ProviderError(
+                $"Storage connection '{lease.Backend.ConnectionId}' failed its health check."));
+        }
+    }
+
+    /// <summary>
+    /// Copies a file or directory between mounted connections. Cross-connection transfers use a
+    /// bounded streaming relay and a unique destination staging object before final commit.
+    /// </summary>
+    public Task<Result> CopyAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        StorageTransferOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        TransferAsync(
+            sourceConnectionId,
+            sourcePath,
+            destinationConnectionId,
+            destinationPath,
+            options,
+            move: false,
+            cancellationToken);
+
+    /// <summary>
+    /// Uploads a complete local directory through the bounded, rollback-safe transfer coordinator.
+    /// Local links/reparse points are rejected rather than followed.
+    /// </summary>
+    public async Task<Result<StorageDirectoryTransferReport>> UploadDirectoryAsync(
+        string sourceDirectoryPath,
+        string destinationConnectionId,
+        string destinationPath,
+        StorageTransferOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateConnectionId(destinationConnectionId);
+        cancellationToken.ThrowIfCancellationRequested();
+        options ??= new StorageTransferOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure)
+            return Result<StorageDirectoryTransferReport>.Failure(validation.Error!);
+        if (string.IsNullOrWhiteSpace(sourceDirectoryPath))
+            return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.InvalidPath(
+                "A local source directory path is required."));
+        var normalizedDestination = StoragePath.Normalize(destinationPath);
+        if (normalizedDestination.IsFailure)
+            return Result<StorageDirectoryTransferReport>.Failure(normalizedDestination.Error!);
+
+        string localRoot;
+        try
+        {
+            localRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceDirectoryPath));
+            if (!Directory.Exists(localRoot))
+                return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.NotFound(
+                    "The local upload source directory was not found."));
+        }
+        catch (Exception error)
+        {
+            return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.FromException(
+                error,
+                "Resolve local upload directory"));
+        }
+
+        await using var source = new LocalStorageBackend(
+            ".cl-storage-directory-upload",
+            new LocalConnectionConfig { RootPath = localRoot, FollowLinks = false },
+            _storageConfig?.MaxBufferedDownloadBytes ?? LocalStorageBackend.DefaultMaxBufferedDownloadBytes);
+        BackendEntry.BackendOperationLease? destinationLease = null;
+        StorageEventPublisher? publisher = null;
+        StorageDirectoryTransferReport? report = null;
+        string? destinationId = null;
+        StorageProvider destinationProvider = default;
+        try
+        {
+            destinationLease = AcquireOperation(destinationConnectionId);
+            destinationId = destinationLease.Backend.ConnectionId;
+            destinationProvider = destinationLease.Backend.Provider;
+            var copied = await StorageTransferCoordinator.CopyAsync(
+                source,
+                string.Empty,
+                destinationLease.Backend,
+                normalizedDestination.Value!,
+                options,
+                cancellationToken).ConfigureAwait(false);
+            if (copied.IsFailure)
+                return Result<StorageDirectoryTransferReport>.Failure(copied.Error!);
+            report = new StorageDirectoryTransferReport(
+                copied.Value!.Files,
+                copied.Value.Directories,
+                copied.Value.Bytes);
+            publisher = CaptureEventPublisher();
+        }
+        finally
+        {
+            destinationLease?.Dispose();
+        }
+
+        await publisher!.PublishAsync(new StorageDirectoryUploadedEvent(
+            destinationId!,
+            destinationProvider,
+            normalizedDestination.Value!,
+            report!.Files,
+            report.Directories,
+            report.Bytes,
+            DateTimeOffset.UtcNow)).ConfigureAwait(false);
+        return Result<StorageDirectoryTransferReport>.Success(report);
+    }
+
+    /// <summary>
+    /// Downloads a complete storage directory into a caller-selected local directory with per-file
+    /// atomic replacement and rollback of changes made by a failed transfer.
+    /// </summary>
+    public async Task<Result<StorageDirectoryTransferReport>> DownloadDirectoryAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationDirectoryPath,
+        StorageTransferOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateConnectionId(sourceConnectionId);
+        cancellationToken.ThrowIfCancellationRequested();
+        options ??= new StorageTransferOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure)
+            return Result<StorageDirectoryTransferReport>.Failure(validation.Error!);
+        var normalizedSource = StoragePath.Normalize(sourcePath);
+        if (normalizedSource.IsFailure)
+            return Result<StorageDirectoryTransferReport>.Failure(normalizedSource.Error!);
+        if (string.IsNullOrWhiteSpace(destinationDirectoryPath))
+            return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.InvalidPath(
+                "A local destination directory path is required."));
+
+        string parent;
+        string localDestinationName;
+        try
+        {
+            var destination = Path.TrimEndingDirectorySeparator(Path.GetFullPath(destinationDirectoryPath));
+            if (File.Exists(destination))
+                return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.Conflict(
+                    "The local directory destination is an existing file."));
+            parent = Path.GetDirectoryName(destination) ?? string.Empty;
+            localDestinationName = Path.GetFileName(destination);
+            if (parent.Length == 0 || localDestinationName.Length == 0)
+                return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.InvalidPath(
+                    "The local destination must identify a named directory below a parent directory."));
+            if (options.CreateParents)
+                Directory.CreateDirectory(parent);
+            else if (!Directory.Exists(parent))
+                return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.NotFound(
+                    "The local destination parent directory was not found."));
+        }
+        catch (Exception error)
+        {
+            return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.FromException(
+                error,
+                "Resolve local download directory"));
+        }
+
+        await using var destinationBackend = new LocalStorageBackend(
+            ".cl-storage-directory-download",
+            new LocalConnectionConfig { RootPath = parent, FollowLinks = false },
+            _storageConfig?.MaxBufferedDownloadBytes ?? LocalStorageBackend.DefaultMaxBufferedDownloadBytes);
+        BackendEntry.BackendOperationLease? sourceLease = null;
+        StorageEventPublisher? publisher = null;
+        StorageDirectoryTransferReport? report = null;
+        string? sourceId = null;
+        StorageProvider sourceProvider = default;
+        try
+        {
+            sourceLease = AcquireOperation(sourceConnectionId);
+            sourceId = sourceLease.Backend.ConnectionId;
+            sourceProvider = sourceLease.Backend.Provider;
+            var sourceInfo = await sourceLease.Backend.GetInfoAsync(
+                normalizedSource.Value!,
+                cancellationToken).ConfigureAwait(false);
+            if (sourceInfo.IsFailure)
+                return Result<StorageDirectoryTransferReport>.Failure(sourceInfo.Error!);
+            if (sourceInfo.Value!.ItemType != StorageItemType.Directory)
+                return Result<StorageDirectoryTransferReport>.Failure(StorageErrors.Conflict(
+                    "DownloadDirectoryAsync requires a storage directory source."));
+
+            var copied = await StorageTransferCoordinator.CopyAsync(
+                sourceLease.Backend,
+                normalizedSource.Value!,
+                destinationBackend,
+                localDestinationName,
+                options,
+                cancellationToken).ConfigureAwait(false);
+            if (copied.IsFailure)
+                return Result<StorageDirectoryTransferReport>.Failure(copied.Error!);
+            report = new StorageDirectoryTransferReport(
+                copied.Value!.Files,
+                copied.Value.Directories,
+                copied.Value.Bytes);
+            publisher = CaptureEventPublisher();
+        }
+        finally
+        {
+            sourceLease?.Dispose();
+        }
+
+        await publisher!.PublishAsync(new StorageDirectoryDownloadedEvent(
+            sourceId!,
+            sourceProvider,
+            normalizedSource.Value!,
+            report!.Files,
+            report.Directories,
+            report.Bytes,
+            DateTimeOffset.UtcNow)).ConfigureAwait(false);
+        return Result<StorageDirectoryTransferReport>.Success(report);
+    }
+
+    /// <summary>
+    /// Moves a file or directory between mounted connections. The source is deleted only after the
+    /// complete destination tree has committed successfully.
+    /// </summary>
+    public Task<Result> MoveAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        StorageTransferOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        TransferAsync(
+            sourceConnectionId,
+            sourcePath,
+            destinationConnectionId,
+            destinationPath,
+            options,
+            move: true,
+            cancellationToken);
+
+    private async Task<Result> TransferAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        StorageTransferOptions? options,
+        bool move,
+        CancellationToken cancellationToken)
+    {
+        ValidateConnectionId(sourceConnectionId);
+        ValidateConnectionId(destinationConnectionId);
+        cancellationToken.ThrowIfCancellationRequested();
+        options ??= new StorageTransferOptions();
+        var optionsValidation = options.Validate();
+        if (optionsValidation.IsFailure)
+            return optionsValidation;
+
+        var normalizedSource = NormalizeTransferPath(sourcePath, "source");
+        if (normalizedSource.IsFailure)
+            return Result.Failure(normalizedSource.Error!);
+        var normalizedDestination = NormalizeTransferPath(destinationPath, "destination");
+        if (normalizedDestination.IsFailure)
+            return Result.Failure(normalizedDestination.Error!);
+
+        BackendEntry.BackendOperationLease? sourceLease = null;
+        BackendEntry.BackendOperationLease? destinationLease = null;
+        StorageEventPublisher? publisher = null;
+        StorageTransferSummary? summary = null;
+        Result result = Result.Success();
+        bool sameBackend = false;
+        string? effectiveSourceId = null;
+        string? effectiveDestinationId = null;
+        StorageProvider sourceProvider = default;
+        StorageProvider destinationProvider = default;
+        try
+        {
+            sourceLease = AcquireOperation(sourceConnectionId);
+            destinationLease = AcquireOperation(destinationConnectionId);
+            var sourceBackend = sourceLease.Backend;
+            var destinationBackend = destinationLease.Backend;
+            sameBackend = ReferenceEquals(sourceBackend, destinationBackend);
+            effectiveSourceId = sourceBackend.ConnectionId;
+            effectiveDestinationId = destinationBackend.ConnectionId;
+            sourceProvider = sourceBackend.Provider;
+            destinationProvider = destinationBackend.Provider;
+            var usedNativeOperation = false;
+
+            if (sameBackend)
+            {
+                var relationship = StorageTransferPath.ValidateDistinct(
+                    normalizedSource.Value!,
+                    normalizedDestination.Value!);
+                if (relationship.IsFailure)
+                    return relationship;
+
+                var sourceInfo = await sourceBackend.GetInfoAsync(
+                    normalizedSource.Value!,
+                    cancellationToken).ConfigureAwait(false);
+                if (sourceInfo.IsFailure)
+                    return Result.Failure(sourceInfo.Error!);
+                if (sourceInfo.Value!.ItemType == StorageItemType.Directory)
+                {
+                    relationship = StorageTransferPath.ValidateDirectoryDestination(
+                        normalizedSource.Value!,
+                        normalizedDestination.Value!);
+                    if (relationship.IsFailure)
+                        return relationship;
+                }
+
+                var requiredFeatures = (move, sourceInfo.Value.ItemType) switch
+                {
+                    (false, StorageItemType.File) => StorageFeature.FileCopy | StorageFeature.ServerSideCopy,
+                    // Directory copy implementations commonly loop over provider objects and can
+                    // leave a partial tree. The coordinator tracks and rolls back every new item.
+                    (false, StorageItemType.Directory) => StorageFeature.None,
+                    (true, StorageItemType.File) => StorageFeature.FileMove | StorageFeature.ServerSideMove,
+                    (true, StorageItemType.Directory) => StorageFeature.DirectoryMove |
+                        StorageFeature.ServerSideMove |
+                        StorageFeature.AtomicMove,
+                    _ => StorageFeature.None
+                };
+                var supportsNativeOperation = requiredFeatures != StorageFeature.None &&
+                    sourceBackend.Capabilities.Supports(requiredFeatures);
+                if (supportsNativeOperation)
+                {
+                    result = move
+                        ? await sourceBackend.MoveAsync(
+                            normalizedSource.Value!,
+                            normalizedDestination.Value!,
+                            options,
+                            cancellationToken).ConfigureAwait(false)
+                        : await sourceBackend.CopyAsync(
+                            normalizedSource.Value!,
+                            normalizedDestination.Value!,
+                            options,
+                            cancellationToken).ConfigureAwait(false);
+                    if (result.IsSuccess)
+                        publisher = CaptureEventPublisher();
+                    usedNativeOperation = true;
+                }
+            }
+
+            if (!usedNativeOperation)
+            {
+                var copied = await StorageTransferCoordinator.CopyAsync(
+                    sourceBackend,
+                    normalizedSource.Value!,
+                    destinationBackend,
+                    normalizedDestination.Value!,
+                    options,
+                    cancellationToken).ConfigureAwait(false);
+                if (copied.IsFailure)
+                    return Result.Failure(copied.Error!);
+                summary = copied.Value!;
+
+                if (move)
+                {
+                    var deleted = await sourceBackend.DeleteAsync(
+                        normalizedSource.Value!,
+                        new StorageDeleteOptions
+                        {
+                            Recursive = summary.SourceType == StorageItemType.Directory,
+                            IgnoreMissing = false
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                    if (deleted.IsFailure)
+                        return Result.Failure(StorageErrors.PartialFailure(
+                            "The destination completed, but the source could not be deleted.",
+                            $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+                }
+
+                result = Result.Success();
+                publisher = CaptureEventPublisher();
+            }
+        }
+        finally
+        {
+            destinationLease?.Dispose();
+            sourceLease?.Dispose();
+        }
+
+        return await PublishTransferResultAsync(
+            result,
+            publisher,
+            sameBackend,
+            move,
+            effectiveSourceId!,
+            sourceProvider,
+            normalizedSource.Value!,
+            effectiveDestinationId!,
+            destinationProvider,
+            normalizedDestination.Value!,
+            summary).ConfigureAwait(false);
+    }
+
+    private static Result<string> NormalizeTransferPath(string path, string role)
+    {
+        var normalized = StoragePath.Normalize(path);
+        if (normalized.IsFailure)
+            return normalized;
+        return normalized.Value!.Length == 0
+            ? Result<string>.Failure(StorageErrors.InvalidPath(
+                $"A non-root transfer {role} path is required."))
+            : normalized;
+    }
+
+    private static async Task<Result> PublishTransferResultAsync(
+        Result result,
+        StorageEventPublisher? publisher,
+        bool sameBackend,
+        bool move,
+        string sourceConnectionId,
+        StorageProvider sourceProvider,
+        string sourcePath,
+        string destinationConnectionId,
+        StorageProvider destinationProvider,
+        string destinationPath,
+        StorageTransferSummary? summary)
+    {
+        if (result.IsFailure || publisher is null)
+            return result;
+
+        if (sameBackend)
+        {
+            if (move)
+            {
+                await publisher.PublishAsync(new StorageItemMovedEvent(
+                    sourceConnectionId,
+                    sourceProvider,
+                    sourcePath,
+                    destinationPath,
+                    DateTimeOffset.UtcNow)).ConfigureAwait(false);
+            }
+            else
+            {
+                await publisher.PublishAsync(new StorageItemCopiedEvent(
+                    sourceConnectionId,
+                    sourceProvider,
+                    sourcePath,
+                    destinationPath,
+                    DateTimeOffset.UtcNow)).ConfigureAwait(false);
+            }
+        }
+        else if (move)
+        {
+            await publisher.PublishAsync(new StorageCrossConnectionMoveCompletedEvent(
+                sourceConnectionId,
+                sourceProvider,
+                sourcePath,
+                destinationConnectionId,
+                destinationProvider,
+                destinationPath,
+                summary!.Files,
+                summary.Directories,
+                summary.Bytes,
+                DateTimeOffset.UtcNow)).ConfigureAwait(false);
+        }
+        else
+        {
+            await publisher.PublishAsync(new StorageCrossConnectionCopyCompletedEvent(
+                sourceConnectionId,
+                sourceProvider,
+                sourcePath,
+                destinationConnectionId,
+                destinationProvider,
+                destinationPath,
+                summary!.Files,
+                summary.Directories,
+                summary.Bytes,
+                DateTimeOffset.UtcNow)).ConfigureAwait(false);
+        }
+        return result;
+    }
+
     /// <summary>Returns an immutable snapshot containing sanitized connection information.</summary>
     public IReadOnlyList<StorageConnectionInfo> GetConnections()
     {
@@ -690,11 +1220,10 @@ public sealed class StorageLibrary : ILibrary
             return Result<BackendEntry>.Success(result);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error)
+        catch (Exception)
         {
             return Result<BackendEntry>.Failure(StorageErrors.ProviderError(
-                $"Could not build {descriptor.Provider} storage connection '{id}'.",
-                error.Message));
+                $"Could not build {descriptor.Provider} storage connection '{id}'."));
         }
         finally
         {
@@ -764,11 +1293,10 @@ public sealed class StorageLibrary : ILibrary
             return Result<BackendEntry>.Success(result);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error)
+        catch (Exception)
         {
             return Result<BackendEntry>.Failure(StorageErrors.ProviderError(
-                $"Could not build local storage connection '{id}'.",
-                error.Message));
+                $"Could not build local storage connection '{id}'."));
         }
         finally
         {
@@ -878,24 +1406,37 @@ public sealed class StorageLibrary : ILibrary
 
     /// <summary>Registers a prebuilt custom backend for this runtime only.</summary>
     public Result RegisterBackend(string id, IStorageBackend backend, bool ownsBackend = true)
+        => RegisterBackendAsync(id, backend, ownsBackend).ConfigureAwait(false).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// Registers a prebuilt custom backend after an asynchronous health check. Ownership transfers only
+    /// when registration succeeds; replacement disposal completes before this method returns.
+    /// </summary>
+    public async Task<Result> RegisterBackendAsync(
+        string id,
+        IStorageBackend backend,
+        bool ownsBackend = true,
+        CancellationToken cancellationToken = default)
     {
         ValidateConnectionId(id);
         ArgumentNullException.ThrowIfNull(backend);
         var runtime = CaptureRuntimeSnapshot();
+        cancellationToken.ThrowIfCancellationRequested();
         if (!string.Equals(id, backend.ConnectionId, StringComparison.OrdinalIgnoreCase))
             return Result.Failure(StorageErrors.Conflict(
                 $"Backend connection ID '{backend.ConnectionId}' does not match registry ID '{id}'."));
 
-        var health = CheckRegistrationHealth(
+        var health = await CheckRegistrationHealthAsync(
             id,
             backend,
             runtime.HealthCheckTimeoutSeconds,
-            runtime.Logger);
+            runtime.Logger,
+            cancellationToken).ConfigureAwait(false);
         if (health.IsFailure)
             return health;
 
         BackendEntry? previous = null;
-        _mutationGate.Wait();
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             EnsureOperational();
@@ -917,29 +1458,34 @@ public sealed class StorageLibrary : ILibrary
             _mutationGate.Release();
         }
 
-        previous?.RetireAndDisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+        if (previous is not null)
+            await previous.RetireAndDisposeAsync().ConfigureAwait(false);
         return Result.Success();
     }
 
-    private static Result CheckRegistrationHealth(
+    private static async Task<Result> CheckRegistrationHealthAsync(
         string id,
         IStorageBackend backend,
         int timeoutSeconds,
-        ILogger logger)
+        ILogger logger,
+        CancellationToken cancellationToken)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         try
         {
-            var result = backend.CheckHealthAsync(timeout.Token)
-                .WaitAsync(TimeSpan.FromSeconds(timeoutSeconds))
-                .ConfigureAwait(false)
-                .GetAwaiter()
-                .GetResult();
+            var result = await backend.CheckHealthAsync(linked.Token)
+                .WaitAsync(TimeSpan.FromSeconds(timeoutSeconds), cancellationToken)
+                .ConfigureAwait(false);
             return result.IsSuccess
                 ? Result.Success()
                 : Result.Failure(StorageErrors.Unavailable(
                     $"Storage backend '{id}' failed its registration health check.",
                     result.Error?.Code ?? StorageErrors.ProviderErrorCode));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
         {
@@ -970,6 +1516,25 @@ public sealed class StorageLibrary : ILibrary
         OnStopAsync().ConfigureAwait(false).GetAwaiter().GetResult();
         lock (_stateGate)
             _state = LifecycleState.Disposed;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        LifecycleState state;
+        lock (_stateGate)
+            state = _state;
+        if (state == LifecycleState.Disposed)
+            return;
+        try
+        {
+            await OnStopAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_stateGate)
+                _state = LifecycleState.Disposed;
+            GC.SuppressFinalize(this);
+        }
     }
 
     internal BackendEntry.BackendOperationLease AcquireOperation(string connectionId)
@@ -1342,8 +1907,7 @@ public sealed class StorageLibrary : ILibrary
     {
         Enabled = source.Enabled,
         RootPath = source.RootPath,
-        FollowLinks = source.FollowLinks,
-        TimeoutSeconds = source.TimeoutSeconds
+        FollowLinks = source.FollowLinks
     };
 
     private void ApplyRuntimeLocalOverrides(LocalStorageConfig target)

@@ -11,6 +11,8 @@ public sealed class LocalStorageConfig : ConfigModelBase
     public override ConfigValidationResult Validate()
     {
         var errors = new List<string>();
+        if (Connections is null)
+            return ConfigValidationResult.Invalid("Connections cannot be null");
         foreach (var connection in Connections)
         {
             if (string.IsNullOrWhiteSpace(connection.Key))
@@ -34,16 +36,11 @@ public sealed class LocalConnectionConfig
     [ConfigField(Label = "Follow Links", Description = "Allow links only when their resolved target remains under the configured root.", RequiresRestart = true, Group = "Security", Order = 20)]
     public bool FollowLinks { get; set; }
 
-    [ConfigField(Label = "Timeout (s)", Min = 1, Max = 600, Group = "Advanced", Order = 30, Collapsed = true)]
-    public int TimeoutSeconds { get; set; } = 30;
-
     public ConfigValidationResult Validate()
     {
         var errors = new List<string>();
         if (Enabled && string.IsNullOrWhiteSpace(RootPath))
             errors.Add("RootPath is required for an enabled local connection");
-        if (TimeoutSeconds <= 0)
-            errors.Add("TimeoutSeconds must be greater than zero");
         return errors.Count == 0 ? ConfigValidationResult.Valid() : ConfigValidationResult.Invalid(errors);
     }
 }

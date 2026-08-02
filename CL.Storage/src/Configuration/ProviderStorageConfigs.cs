@@ -11,13 +11,14 @@ public abstract class StorageConnectionConfigBase
     [JsonIgnore]
     public abstract string MountRoot { get; }
     internal virtual IEnumerable<string> GetValidationErrors() => [];
-}
 
-/// <summary>Forward-compatible connection data used until a provider adapter supplies its typed model.</summary>
-public sealed class ProviderConnectionConfig : StorageConnectionConfigBase
-{
-    public string Root { get; set; } = string.Empty;
-    public override string MountRoot => Root;
+    public ConfigValidationResult Validate()
+    {
+        var errors = GetValidationErrors().ToArray();
+        return errors.Length == 0
+            ? ConfigValidationResult.Valid()
+            : ConfigValidationResult.Invalid(errors);
+    }
 }
 
 public abstract class ProviderStorageConfigBase : ConfigModelBase
@@ -37,11 +38,18 @@ public abstract class ProviderStorageConfigBase<TConnection> : ProviderStorageCo
     public override ConfigValidationResult Validate()
     {
         var errors = new List<string>();
+        if (Connections is null)
+            return ConfigValidationResult.Invalid("Connections cannot be null");
         foreach (var (id, connection) in Connections)
         {
             if (string.IsNullOrWhiteSpace(id))
                 errors.Add("Connection IDs cannot be blank");
-            foreach (var error in connection.GetValidationErrors())
+            if (connection is null)
+            {
+                errors.Add($"Connection '{id}' configuration is required");
+                continue;
+            }
+            foreach (var error in connection.Validate().Errors)
                 errors.Add($"Connection '{id}': {error}");
         }
         return errors.Count == 0 ? ConfigValidationResult.Valid() : ConfigValidationResult.Invalid(errors);

@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Models;
@@ -19,6 +21,8 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
         var client = value.AuthenticationMode switch
         {
             WebDavAuthenticationMode.BearerToken => new Client(value.BearerToken!, timeout, proxy: null),
+            WebDavAuthenticationMode.Windows => new Client(
+                CredentialCache.DefaultNetworkCredentials, timeout, proxy: null),
             WebDavAuthenticationMode.Basic => new Client(
                 new NetworkCredential(value.Username, value.Password), timeout, proxy: null),
             _ => new Client(new NetworkCredential(), timeout, proxy: null)
@@ -27,8 +31,20 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
         client.BasePath = NormalizeBasePath(endpoint.AbsolutePath);
         client.Port = endpoint.IsDefaultPort ? null : endpoint.Port;
         client.CustomHeaders = value.Headers.ToArray();
-        if (value.AcceptAnyCertificate)
-            client.ServerCertificateValidationCallback = (_, _, _, _) => true;
+        var pins = value.TrustedCertificateSha256
+            .Select(fingerprint => CertificateFingerprint.TryNormalizeSha256(fingerprint, out var normalized) ? normalized : null)
+            .Where(fingerprint => fingerprint is not null)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (pins.Count > 0)
+        {
+            client.ServerCertificateValidationCallback = (_, certificate, _, _) =>
+            {
+                if (certificate is null)
+                    return false;
+                var hash = Convert.ToHexString(SHA256.HashData(certificate.GetRawCertData()));
+                return pins.Contains(hash);
+            };
+        }
         return new WebDavStorageBackend(
             connectionId,
             client,
