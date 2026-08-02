@@ -70,10 +70,10 @@ var mysql = Libraries.Get<CL.MySQL2.MySQL2Library>();
 
 <div class="cl-group">Storage</div>
 <div class="lib-grid">
-  <a class="lib-card" href="libs/storages3.md">
-    <div class="lib-name">CL.StorageS3</div>
-    <div class="lib-pkg">CodeLogic.StorageS3</div>
-    <p class="lib-desc">Amazon S3 and S3-compatible object storage (MinIO, Cloudflare R2): upload, download, copy, list, presigned URLs.</p>
+  <a class="lib-card" href="libs/storage.md">
+    <div class="lib-name">CL.Storage</div>
+    <div class="lib-pkg">CodeLogic.Storage</div>
+    <p class="lib-desc">Safe mounted storage across local filesystems, S3, FTP/SFTP, WebDAV, Azure Blob, GCS, and Swift.</p>
   </a>
 </div>
 

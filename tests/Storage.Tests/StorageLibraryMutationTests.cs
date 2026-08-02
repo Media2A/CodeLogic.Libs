@@ -414,7 +414,12 @@ public sealed class StorageLibraryMutationTests
         await library.OnConfigureAsync(context);
         await context.Configuration.LoadAllAsync();
         context.Configuration.Get<LocalStorageConfig>().Connections["Default"] = new() { RootPath = defaultRoot };
-        context.Configuration.Get<S3StorageConfig>().Connections["Shared"] = new() { Root = "bucket/prefix" };
+        context.Configuration.Get<S3StorageConfig>().Connections["Shared"] = new()
+        {
+            Enabled = false,
+            Bucket = "bucket",
+            Prefix = "prefix"
+        };
         await library.OnInitializeAsync(context);
 
         var result = await library.AddOrUpdateConnectionAsync(

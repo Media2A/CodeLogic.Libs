@@ -86,17 +86,34 @@ internal sealed class TestLogger : ILogger
     public void Critical(string message, Exception? exception = null) => Errors.Add(message);
 }
 
-internal sealed class FakeStorageBackend : IStorageBackend
+internal sealed class FakeStorageBackend :
+    IStorageBackend,
+    IStorageMetadataService,
+    IStorageTagService,
+    IStorageSignedUrlService,
+    IStorageVersionService
 {
     private readonly string _connectionId;
     private readonly Func<string>? _connectionIdGetter;
     private readonly object? _nativeClient;
     private Func<CancellationToken, Task<Result>> _health;
+    private readonly Func<string, CancellationToken, Task<Result<StorageItem>>>? _getInfo;
+    private readonly Func<string, CancellationToken, Task<Result<bool>>>? _exists;
+    private readonly Func<string, StorageListOptions?, CancellationToken, Task<Result<StoragePage>>>? _list;
+    private readonly Func<string, CancellationToken, Task<Result>>? _createDirectory;
     private readonly Func<string, CancellationToken, Task<Result<StorageItem>>>? _upload;
+    private readonly Func<string, Stream, StorageUploadOptions?, CancellationToken, Task<Result<StorageItem>>>? _uploadStream;
     private readonly Func<string, CancellationToken, Task<Result<Stream>>>? _download;
     private readonly Func<string, CancellationToken, Task<Result>>? _delete;
     private readonly Func<string, string, CancellationToken, Task<Result>>? _copy;
     private readonly Func<string, string, CancellationToken, Task<Result>>? _move;
+    private readonly Func<string, CancellationToken, Task<Result<IReadOnlyDictionary<string, string>>>>? _getMetadata;
+    private readonly Func<string, IReadOnlyDictionary<string, string>, StorageMetadataUpdateOptions?, CancellationToken, Task<Result<StorageItem>>>? _setMetadata;
+    private readonly Func<string, CancellationToken, Task<Result<IReadOnlyDictionary<string, string>>>>? _getTags;
+    private readonly Func<string, IReadOnlyDictionary<string, string>, StorageTagUpdateOptions?, CancellationToken, Task<Result<StorageItem>>>? _setTags;
+    private readonly Func<string, StorageSignedUrlOptions?, CancellationToken, Task<Result<StorageSignedUrl>>>? _createSignedUrl;
+    private readonly Func<string, StorageVersionListOptions?, CancellationToken, Task<Result<StorageVersionPage>>>? _listVersions;
+    private readonly Func<string, string, CancellationToken, Task<Result>>? _deleteVersion;
     private readonly Func<ValueTask>? _dispose;
     private int _disposeCount;
     private int _sessionReleases;
@@ -113,7 +130,20 @@ internal sealed class FakeStorageBackend : IStorageBackend
         Func<string, string, CancellationToken, Task<Result>>? copy = null,
         Func<string, string, CancellationToken, Task<Result>>? move = null,
         Func<ValueTask>? dispose = null,
-        Func<string>? connectionIdGetter = null)
+        Func<string>? connectionIdGetter = null,
+        Func<string, CancellationToken, Task<Result<StorageItem>>>? getInfo = null,
+        Func<string, CancellationToken, Task<Result<bool>>>? exists = null,
+        Func<string, StorageListOptions?, CancellationToken, Task<Result<StoragePage>>>? list = null,
+        Func<string, CancellationToken, Task<Result>>? createDirectory = null,
+        Func<string, Stream, StorageUploadOptions?, CancellationToken, Task<Result<StorageItem>>>? uploadStream = null,
+        StorageCapabilities? capabilities = null,
+        Func<string, CancellationToken, Task<Result<IReadOnlyDictionary<string, string>>>>? getMetadata = null,
+        Func<string, IReadOnlyDictionary<string, string>, StorageMetadataUpdateOptions?, CancellationToken, Task<Result<StorageItem>>>? setMetadata = null,
+        Func<string, StorageSignedUrlOptions?, CancellationToken, Task<Result<StorageSignedUrl>>>? createSignedUrl = null,
+        Func<string, StorageVersionListOptions?, CancellationToken, Task<Result<StorageVersionPage>>>? listVersions = null,
+        Func<string, string, CancellationToken, Task<Result>>? deleteVersion = null,
+        Func<string, CancellationToken, Task<Result<IReadOnlyDictionary<string, string>>>>? getTags = null,
+        Func<string, IReadOnlyDictionary<string, string>, StorageTagUpdateOptions?, CancellationToken, Task<Result<StorageItem>>>? setTags = null)
     {
         _connectionId = connectionId;
         _connectionIdGetter = connectionIdGetter;
@@ -121,18 +151,31 @@ internal sealed class FakeStorageBackend : IStorageBackend
         Root = root;
         _nativeClient = nativeClient;
         _health = health ?? (_ => Task.FromResult(Result.Success()));
+        _getInfo = getInfo;
+        _exists = exists;
+        _list = list;
+        _createDirectory = createDirectory;
         _upload = upload;
+        _uploadStream = uploadStream;
         _download = download;
         _delete = delete;
         _copy = copy;
         _move = move;
+        _getMetadata = getMetadata;
+        _setMetadata = setMetadata;
+        _getTags = getTags;
+        _setTags = setTags;
+        _createSignedUrl = createSignedUrl;
+        _listVersions = listVersions;
+        _deleteVersion = deleteVersion;
         _dispose = dispose;
+        Capabilities = capabilities ?? new(true, true, true, true, true, true);
     }
 
     public string ConnectionId => _connectionIdGetter?.Invoke() ?? _connectionId;
     public StorageProvider Provider { get; }
     public string Root { get; }
-    public StorageCapabilities Capabilities { get; } = new(true, true, true, true, true, true);
+    public StorageCapabilities Capabilities { get; }
     public int DisposeCount => Volatile.Read(ref _disposeCount);
     public int SessionReleases => Volatile.Read(ref _sessionReleases);
 
@@ -140,19 +183,21 @@ internal sealed class FakeStorageBackend : IStorageBackend
         _health = health ?? throw new ArgumentNullException(nameof(health));
 
     public Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default) =>
+        _getInfo?.Invoke(path, cancellationToken) ??
         Task.FromResult(Result<StorageItem>.Failure(StorageErrors.NotFound("missing")));
 
     public Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default) =>
-        Task.FromResult(Result<bool>.Success(false));
+        _exists?.Invoke(path, cancellationToken) ?? Task.FromResult(Result<bool>.Success(false));
 
     public Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default) =>
+        _list?.Invoke(path, options, cancellationToken) ??
         Task.FromResult(Result<StoragePage>.Success(new StoragePage([], null)));
 
     public Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default) =>
-        Task.FromResult(Result.Success());
+        _createDirectory?.Invoke(path, cancellationToken) ?? Task.FromResult(Result.Success());
 
     public Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default) =>
-        UploadCoreAsync(path, cancellationToken);
+        _uploadStream?.Invoke(path, source, options, cancellationToken) ?? UploadCoreAsync(path, cancellationToken);
 
     public Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default) =>
         UploadCoreAsync(path, cancellationToken);
@@ -171,6 +216,53 @@ internal sealed class FakeStorageBackend : IStorageBackend
 
     public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
         _move?.Invoke(sourcePath, destinationPath, cancellationToken) ?? Task.FromResult(Result.Success());
+
+    public Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(string path, CancellationToken cancellationToken = default) =>
+        _getMetadata?.Invoke(path, cancellationToken) ??
+        Task.FromResult(Result<IReadOnlyDictionary<string, string>>.Failure(StorageErrors.Unsupported("metadata unsupported")));
+
+    public Task<Result<StorageItem>> SetMetadataAsync(
+        string path,
+        IReadOnlyDictionary<string, string> metadata,
+        StorageMetadataUpdateOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        _setMetadata?.Invoke(path, metadata, options, cancellationToken) ??
+        Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Unsupported("metadata unsupported")));
+
+    public Task<Result<IReadOnlyDictionary<string, string>>> GetTagsAsync(
+        string path,
+        CancellationToken cancellationToken = default) =>
+        _getTags?.Invoke(path, cancellationToken) ??
+        Task.FromResult(Result<IReadOnlyDictionary<string, string>>.Failure(StorageErrors.Unsupported("tags unsupported")));
+
+    public Task<Result<StorageItem>> SetTagsAsync(
+        string path,
+        IReadOnlyDictionary<string, string> tags,
+        StorageTagUpdateOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        _setTags?.Invoke(path, tags, options, cancellationToken) ??
+        Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Unsupported("tags unsupported")));
+
+    public Task<Result<StorageSignedUrl>> CreateSignedUrlAsync(
+        string path,
+        StorageSignedUrlOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        _createSignedUrl?.Invoke(path, options, cancellationToken) ??
+        Task.FromResult(Result<StorageSignedUrl>.Failure(StorageErrors.Unsupported("signed URLs unsupported")));
+
+    public Task<Result<StorageVersionPage>> ListVersionsAsync(
+        string path,
+        StorageVersionListOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        _listVersions?.Invoke(path, options, cancellationToken) ??
+        Task.FromResult(Result<StorageVersionPage>.Failure(StorageErrors.Unsupported("versions unsupported")));
+
+    public Task<Result> DeleteVersionAsync(
+        string path,
+        string versionId,
+        CancellationToken cancellationToken = default) =>
+        _deleteVersion?.Invoke(path, versionId, cancellationToken) ??
+        Task.FromResult(Result.Failure(StorageErrors.Unsupported("versions unsupported")));
 
     public Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default) => _health(cancellationToken);
 

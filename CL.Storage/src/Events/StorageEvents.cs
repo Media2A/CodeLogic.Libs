@@ -28,3 +28,49 @@ public sealed record StorageItemMovedEvent(
     string SourcePath,
     string DestinationPath,
     DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published after a relayed copy between two storage connections completes.</summary>
+public sealed record StorageCrossConnectionCopyCompletedEvent(
+    string SourceConnectionId,
+    StorageProvider SourceProvider,
+    string SourcePath,
+    string DestinationConnectionId,
+    StorageProvider DestinationProvider,
+    string DestinationPath,
+    long Files,
+    long Directories,
+    long Bytes,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published after a relayed move between two storage connections and source deletion complete.</summary>
+public sealed record StorageCrossConnectionMoveCompletedEvent(
+    string SourceConnectionId,
+    StorageProvider SourceProvider,
+    string SourcePath,
+    string DestinationConnectionId,
+    StorageProvider DestinationProvider,
+    string DestinationPath,
+    long Files,
+    long Directories,
+    long Bytes,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published after a local directory has been uploaded into one storage connection.</summary>
+public sealed record StorageDirectoryUploadedEvent(
+    string DestinationConnectionId,
+    StorageProvider DestinationProvider,
+    string DestinationPath,
+    long Files,
+    long Directories,
+    long Bytes,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published after one storage directory has been downloaded to a caller-selected local directory.</summary>
+public sealed record StorageDirectoryDownloadedEvent(
+    string SourceConnectionId,
+    StorageProvider SourceProvider,
+    string SourcePath,
+    long Files,
+    long Directories,
+    long Bytes,
+    DateTimeOffset Timestamp) : IEvent;

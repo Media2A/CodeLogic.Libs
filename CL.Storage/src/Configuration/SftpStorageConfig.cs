@@ -40,9 +40,6 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
     /// <summary>Trusted server host-key fingerprints, in SHA256:base64 or hexadecimal form.</summary>
     public List<string> HostKeyFingerprints { get; set; } = [];
 
-    /// <summary>Allows any SSH host key. Keep disabled for normal use.</summary>
-    public bool AcceptAnyHostKey { get; set; }
-
     public int TimeoutSeconds { get; set; } = 30;
 
     public override string MountRoot => Root;
@@ -68,9 +65,9 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
             else if (!Path.IsPathFullyQualified(PrivateKeyPath))
                 yield return "PrivateKeyPath must be an absolute path";
         }
-        if (!AcceptAnyHostKey && HostKeyFingerprints.Count == 0)
-            yield return "At least one HostKeyFingerprint is required unless AcceptAnyHostKey is enabled";
-        foreach (var fingerprint in HostKeyFingerprints)
+        if (HostKeyFingerprints is null || HostKeyFingerprints.Count == 0)
+            yield return "At least one HostKeyFingerprint is required";
+        foreach (var fingerprint in HostKeyFingerprints ?? [])
         {
             if (!CertificateFingerprint.IsValidSha256(fingerprint))
                 yield return $"Host-key fingerprint '{fingerprint}' is not a SHA-256 fingerprint";

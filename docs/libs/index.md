@@ -39,10 +39,10 @@ your application or from other libraries after `StartAsync()`.
 
 <div class="cl-group">Storage</div>
 <div class="lib-grid">
-  <a class="lib-card" href="storages3.md">
-    <div class="lib-name">CL.StorageS3</div>
-    <div class="lib-pkg">CodeLogic.StorageS3</div>
-    <p class="lib-desc">S3 and S3-compatible object storage (MinIO, R2).</p>
+  <a class="lib-card" href="storage.md">
+    <div class="lib-name">CL.Storage</div>
+    <div class="lib-pkg">CodeLogic.Storage</div>
+    <p class="lib-desc">Safe mounted local, S3, FTP/SFTP, WebDAV, Azure, GCS, and Swift storage.</p>
   </a>
 </div>
 

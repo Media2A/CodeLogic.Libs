@@ -17,7 +17,8 @@ For task-oriented guides and examples, start with the [Libraries](../libs/index.
 | CL.PostgreSQL | `CL.PostgreSQL` | `CodeLogic.PostgreSQL` |
 | CL.SQLite | `CL.SQLite` | `CodeLogic.SQLite` |
 | CL.SocialConnect | `CL.SocialConnect` | `CodeLogic.SocialConnect` |
-| CL.StorageS3 | `CL.StorageS3` | `CodeLogic.StorageS3` |
+| CL.Storage | `CL.Storage` | `CodeLogic.Storage` |
+| CL.StorageS3 (legacy) | `CL.StorageS3` | `CodeLogic.StorageS3` |
 | CL.SystemStats | `CL.SystemStats` | `CodeLogic.SystemStats` |
 | CL.TwoFactorAuth | `CL.TwoFactorAuth` | `CodeLogic.TwoFactorAuth` |
 | CL.GameNetQuery | `CL.GameNetQuery` | `CodeLogic.GameNetQuery` |

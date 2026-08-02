@@ -38,10 +38,14 @@ public sealed class S3ConnectionConfig : StorageConnectionConfigBase
     public string? SessionToken { get; set; }
 
     public bool ForcePathStyle { get; set; }
+    /// <summary>Allows a clear-text custom S3-compatible endpoint only when deliberately enabled.</summary>
+    public bool AllowInsecureHttp { get; set; }
     public bool DisablePayloadSigning { get; set; }
     public bool DisableDefaultChecksumValidation { get; set; }
     public int TimeoutSeconds { get; set; } = 30;
     public int MaxRetries { get; set; } = 3;
+    public int MultipartPartSizeBytes { get; set; } = 16 * 1024 * 1024;
+    public long MultipartThresholdBytes { get; set; } = 64L * 1024 * 1024;
 
     public override string MountRoot => Prefix;
 
@@ -55,6 +59,10 @@ public sealed class S3ConnectionConfig : StorageConnectionConfigBase
             yield return "TimeoutSeconds must be greater than zero";
         if (MaxRetries < 0)
             yield return "MaxRetries cannot be negative";
+        if (MultipartPartSizeBytes is < 5 * 1024 * 1024 or > 512 * 1024 * 1024)
+            yield return "MultipartPartSizeBytes must be between 5 MiB and 512 MiB";
+        if (MultipartThresholdBytes < MultipartPartSizeBytes)
+            yield return "MultipartThresholdBytes must be at least MultipartPartSizeBytes";
 
         var prefix = StoragePath.Normalize(Prefix ?? string.Empty);
         if (prefix.IsFailure)
@@ -67,10 +75,20 @@ public sealed class S3ConnectionConfig : StorageConnectionConfigBase
             {
                 yield return "ServiceUrl must be an absolute HTTP(S) URL";
             }
-            else if (uri.Host.EndsWith(".r2.cloudflarestorage.com", StringComparison.OrdinalIgnoreCase) &&
-                     uri.Scheme != Uri.UriSchemeHttps)
+            else
             {
-                yield return "Cloudflare R2 endpoints require HTTPS";
+                if (uri.Host.EndsWith(".r2.cloudflarestorage.com", StringComparison.OrdinalIgnoreCase) &&
+                    uri.Scheme != Uri.UriSchemeHttps)
+                {
+                    yield return "Cloudflare R2 endpoints require HTTPS";
+                }
+                else if (uri.Scheme == Uri.UriSchemeHttp && !AllowInsecureHttp)
+                {
+                    yield return "HTTP S3-compatible endpoints require AllowInsecureHttp=true";
+                }
+
+                if (!string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+                    yield return "ServiceUrl cannot contain user info, a query string, or a fragment";
             }
         }
 

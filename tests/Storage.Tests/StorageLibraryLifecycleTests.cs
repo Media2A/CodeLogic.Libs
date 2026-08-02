@@ -95,9 +95,10 @@ public sealed class StorageLibraryLifecycleTests
         {
             RootPath = directory.CreateDirectory("local")
         };
-        context.Configuration.Get<S3StorageConfig>().Connections["shared"] = new ProviderConnectionConfig
+        context.Configuration.Get<S3StorageConfig>().Connections["shared"] = new S3ConnectionConfig
         {
-            Root = "bucket/prefix"
+            Bucket = "bucket",
+            Prefix = "prefix"
         };
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => library.OnInitializeAsync(context));

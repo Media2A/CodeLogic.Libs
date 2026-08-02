@@ -14,12 +14,16 @@ public sealed class LocalStorageBackend : IStorageBackend
 {
     public const long DefaultMaxBufferedDownloadBytes = 67_108_864;
     private static readonly StorageCapabilities LocalCapabilities = new(
-        Directories: true,
-        NativeCopy: true,
-        NativeMove: true,
-        RangeReads: true,
-        Metadata: false,
-        ServerPagination: false);
+        StorageFeature.PhysicalDirectories |
+        StorageFeature.FileCopy |
+        StorageFeature.FileMove |
+        StorageFeature.DirectoryMove |
+        StorageFeature.ServerSideCopy |
+        StorageFeature.ServerSideMove |
+        StorageFeature.AtomicMove |
+        StorageFeature.AtomicReplace |
+        StorageFeature.ConditionalCreate |
+        StorageFeature.RangeReads);
 
     private readonly LocalPathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
@@ -155,12 +159,19 @@ public sealed class LocalStorageBackend : IStorageBackend
         var validation = options.Validate();
         if (validation.IsFailure)
             return Result<StorageItem>.Failure(validation.Error!);
+        if (options.Condition is { IsEmpty: false })
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported(
+                "The local provider does not support atomic ETag or version upload conditions."));
+        if (options.Metadata.Count > 0)
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported(
+                "Local storage does not persist provider user metadata."));
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure)
             return Result<StorageItem>.Failure(resolved.Error!);
         if (resolved.Value!.StoragePath.Length == 0)
             return Result<StorageItem>.Failure(StorageErrors.InvalidPath("A file path is required for upload."));
 
+        string? stagingPath = null;
         try
         {
             var parent = Path.GetDirectoryName(resolved.Value.FullPath)!;
@@ -171,19 +182,26 @@ public sealed class LocalStorageBackend : IStorageBackend
 
             if (Directory.Exists(resolved.Value.FullPath))
                 return Result<StorageItem>.Failure(StorageErrors.Conflict("The upload destination is a directory."));
+            if (!options.Overwrite && File.Exists(resolved.Value.FullPath))
+                return Result<StorageItem>.Failure(StorageErrors.Conflict("The upload destination already exists."));
 
-            var mode = options.Overwrite ? FileMode.Create : FileMode.CreateNew;
+            stagingPath = CreateStagingPath(parent, "upload");
             await using (var destination = new FileStream(
-                resolved.Value.FullPath,
-                mode,
+                stagingPath,
+                FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.None,
                 bufferSize: 81_920,
                 FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
                 await source.CopyToAsync(destination, 81_920, cancellationToken).ConfigureAwait(false);
+                await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+                destination.Flush(flushToDisk: true);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(stagingPath, resolved.Value.FullPath, options.Overwrite);
+            stagingPath = null;
             return await GetInfoAsync(resolved.Value.StoragePath, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
@@ -194,6 +212,10 @@ public sealed class LocalStorageBackend : IStorageBackend
         catch (Exception error)
         {
             return Result<StorageItem>.Failure(StorageErrors.FromException(error, "Upload file"));
+        }
+        finally
+        {
+            TryDeleteStagingFile(stagingPath);
         }
     }
 
@@ -218,6 +240,9 @@ public sealed class LocalStorageBackend : IStorageBackend
         var validation = options.Validate();
         if (validation.IsFailure)
             return Task.FromResult(Result<Stream>.Failure(validation.Error!));
+        if (options.VersionId is not null)
+            return Task.FromResult(Result<Stream>.Failure(StorageErrors.Unsupported(
+                "Local storage does not support version-specific downloads.")));
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure)
             return Task.FromResult(Result<Stream>.Failure(resolved.Error!));
@@ -306,6 +331,9 @@ public sealed class LocalStorageBackend : IStorageBackend
         var validation = options.Validate();
         if (validation.IsFailure)
             return Task.FromResult(Result.Failure(validation.Error!));
+        if (options.Condition is { IsEmpty: false })
+            return Task.FromResult(Result.Failure(StorageErrors.Unsupported(
+                "The local provider does not support atomic ETag or version delete conditions.")));
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure)
             return Task.FromResult(Result.Failure(resolved.Error!));
@@ -345,16 +373,32 @@ public sealed class LocalStorageBackend : IStorageBackend
         var endpoints = ResolveTransfer(sourcePath, destinationPath, options);
         if (endpoints.IsFailure)
             return Task.FromResult(Result.Failure(endpoints.Error!));
+        string? stagingPath = null;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             var sourceAttributes = File.GetAttributes(endpoints.Value!.Source.FullPath);
             if ((sourceAttributes & FileAttributes.Directory) != 0)
+            {
+                var relationship = StorageTransferPath.ValidateDirectoryDestination(
+                    endpoints.Value.Source.StoragePath,
+                    endpoints.Value.Destination.StoragePath,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+                if (relationship.IsFailure)
+                    return Task.FromResult(Result.Failure(relationship.Error!));
                 return Task.FromResult(Result.Failure(StorageErrors.Unsupported("Native local directory copy is not supported.")));
+            }
             if (Directory.Exists(endpoints.Value.Destination.FullPath))
                 return Task.FromResult(Result.Failure(StorageErrors.Conflict("The copy destination is a directory.")));
             EnsureTransferParent(endpoints.Value.Destination.FullPath, options.CreateParents);
-            File.Copy(endpoints.Value.Source.FullPath, endpoints.Value.Destination.FullPath, options.Overwrite);
+            if (!options.Overwrite && DestinationExists(endpoints.Value.Destination.FullPath))
+                return Task.FromResult(Result.Failure(StorageErrors.Conflict("The copy destination already exists.")));
+            var parent = Path.GetDirectoryName(endpoints.Value.Destination.FullPath)!;
+            stagingPath = CreateStagingPath(parent, "copy");
+            File.Copy(endpoints.Value.Source.FullPath, stagingPath, overwrite: false);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(stagingPath, endpoints.Value.Destination.FullPath, options.Overwrite);
+            stagingPath = null;
             return Task.FromResult(Result.Success());
         }
         catch (OperationCanceledException) { throw; }
@@ -365,6 +409,10 @@ public sealed class LocalStorageBackend : IStorageBackend
         catch (Exception error)
         {
             return Task.FromResult(Result.Failure(StorageErrors.FromException(error, "Copy item")));
+        }
+        finally
+        {
+            TryDeleteStagingFile(stagingPath);
         }
     }
 
@@ -383,6 +431,15 @@ public sealed class LocalStorageBackend : IStorageBackend
         {
             cancellationToken.ThrowIfCancellationRequested();
             var sourceAttributes = File.GetAttributes(endpoints.Value!.Source.FullPath);
+            if ((sourceAttributes & FileAttributes.Directory) != 0)
+            {
+                var relationship = StorageTransferPath.ValidateDirectoryDestination(
+                    endpoints.Value.Source.StoragePath,
+                    endpoints.Value.Destination.StoragePath,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+                if (relationship.IsFailure)
+                    return Task.FromResult(Result.Failure(relationship.Error!));
+            }
             if (!options.Overwrite && DestinationExists(endpoints.Value.Destination.FullPath))
                 return Task.FromResult(Result.Failure(StorageErrors.Conflict("The move destination already exists.")));
             EnsureTransferParent(endpoints.Value.Destination.FullPath, options.CreateParents);
@@ -526,6 +583,12 @@ public sealed class LocalStorageBackend : IStorageBackend
             return Result<TransferEndpoints>.Failure(destination.Error!);
         if (source.Value!.StoragePath.Length == 0 || destination.Value!.StoragePath.Length == 0)
             return Result<TransferEndpoints>.Failure(StorageErrors.InvalidPath("Transfer paths cannot be the configured root."));
+        var relationship = StorageTransferPath.ValidateDistinct(
+            source.Value.StoragePath,
+            destination.Value.StoragePath,
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        if (relationship.IsFailure)
+            return Result<TransferEndpoints>.Failure(relationship.Error!);
         return Result<TransferEndpoints>.Success(new TransferEndpoints(source.Value, destination.Value));
     }
 
@@ -542,6 +605,17 @@ public sealed class LocalStorageBackend : IStorageBackend
     {
         try { _ = File.GetAttributes(path); return true; }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException) { return false; }
+    }
+
+    private static string CreateStagingPath(string parent, string operation) =>
+        Path.Combine(parent, $".cl-storage-{operation}-{Guid.NewGuid():N}.tmp");
+
+    private static void TryDeleteStagingFile(string? path)
+    {
+        if (path is null)
+            return;
+        try { File.Delete(path); }
+        catch { }
     }
 
     private static string EncodeContinuationToken(int offset) =>
