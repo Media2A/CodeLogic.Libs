@@ -38,8 +38,8 @@
   href: socialconnect.md
 
 - name: Storage
-- name: CL.StorageS3
-  href: storages3.md
+- name: CL.Storage
+  href: storage.md
 
 - name: Security
 - name: CL.TwoFactorAuth
