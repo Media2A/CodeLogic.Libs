@@ -44,6 +44,12 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     private DateTimeOffset _tokenExpiresAt;
     private int _disposed;
 
+    /// <summary>Initializes a backend over an OpenStack Swift HTTP connection.</summary>
+    /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
+    /// <param name="client">HTTP client used for Swift requests.</param>
+    /// <param name="configuration">Container, authentication, and mount configuration.</param>
+    /// <param name="ownsClient">Whether disposal of this backend also disposes the HTTP client.</param>
+    /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
     public SwiftStorageBackend(
         string connectionId,
         HttpClient client,
@@ -72,11 +78,16 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         }
     }
 
+    /// <inheritdoc />
     public string ConnectionId { get; }
+    /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.OpenStackSwift;
+    /// <inheritdoc />
     public string Root { get; }
+    /// <inheritdoc />
     public StorageCapabilities Capabilities => SwiftCapabilities;
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -98,6 +109,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Swift object info")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
@@ -107,6 +119,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             : Result<bool>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageListOptions();
@@ -156,6 +169,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Swift objects")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -179,6 +193,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result.Failure(Map(error, "Create Swift directory")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -215,6 +230,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Upload Swift object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -222,6 +238,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         return await UploadAsync(path, source, options, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -262,6 +279,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         finally { response?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -282,6 +300,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         return Result<byte[]>.Success(destination.ToArray());
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
@@ -335,6 +354,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result.Failure(Map(error, "Delete Swift object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -369,6 +389,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result.Failure(Map(error, "Copy Swift object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
@@ -381,6 +402,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                 $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
     }
 
+    /// <inheritdoc />
     public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -396,6 +418,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result.Failure(Map(error, "Check Swift health")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -406,6 +429,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             : Result<IReadOnlyDictionary<string, string>>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> SetMetadataAsync(
         string path,
         IReadOnlyDictionary<string, string> metadata,
@@ -449,12 +473,14 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Update Swift metadata")); }
     }
 
+    /// <inheritdoc />
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
     {
         client = _client as TClient;
         return client is not null;
     }
 
+    /// <inheritdoc />
     public Task<Result<NativeConnectionLease<TClient>>> OpenNativeConnectionAsync<TClient>(CancellationToken cancellationToken = default) where TClient : class
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -463,6 +489,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         return Task.FromResult(Result<NativeConnectionLease<TClient>>.Success(new NativeConnectionLease<TClient>(typed, _ => ValueTask.CompletedTask)));
     }
 
+    /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)

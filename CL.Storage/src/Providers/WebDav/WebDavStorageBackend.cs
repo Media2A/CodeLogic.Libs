@@ -32,6 +32,13 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     private readonly long _maxBufferedDownloadBytes;
     private int _disposed;
 
+    /// <summary>Initializes a backend over a WebDAV client.</summary>
+    /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
+    /// <param name="client">Configured WebDAV client used for operations.</param>
+    /// <param name="root">Optional provider-neutral root label.</param>
+    /// <param name="basePath">Optional remote base path prepended to requests.</param>
+    /// <param name="ownsClient">Whether disposal of this backend also disposes the client.</param>
+    /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
     public WebDavStorageBackend(
         string connectionId,
         IClient client,
@@ -51,11 +58,16 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
 
+    /// <inheritdoc />
     public string ConnectionId { get; }
+    /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.WebDav;
+    /// <inheritdoc />
     public string Root => _paths.Root;
+    /// <inheritdoc />
     public StorageCapabilities Capabilities => WebDavCapabilities;
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -74,6 +86,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get WebDAV item info")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
@@ -83,6 +96,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             : Result<bool>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageListOptions();
@@ -103,6 +117,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List WebDAV directory")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -117,6 +132,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result.Failure(Map(error, "Create WebDAV directory")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -183,6 +199,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -190,6 +207,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         return await UploadAsync(path, source, options, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -240,6 +258,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result<Stream>.Failure(Map(error, "Download WebDAV file")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -260,6 +279,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         return Result<byte[]>.Success(destination.ToArray());
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
@@ -296,6 +316,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result.Failure(Map(error, "Delete WebDAV item")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -332,6 +353,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result.Failure(Map(error, "Copy WebDAV item")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -368,6 +390,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result.Failure(Map(error, "Move WebDAV item")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -381,6 +404,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         catch (Exception error) { return Result.Failure(Map(error, "Check WebDAV health")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -392,6 +416,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             : Result<IReadOnlyDictionary<string, string>>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public Task<Result<StorageItem>> SetMetadataAsync(
         string path,
         IReadOnlyDictionary<string, string> metadata,
@@ -408,12 +433,14 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             "This WebDAV adapter exposes discovered properties as read-only metadata; use the native client for server-specific PROPPATCH operations.")));
     }
 
+    /// <inheritdoc />
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
     {
         client = _client as TClient;
         return client is not null;
     }
 
+    /// <inheritdoc />
     public Task<Result<NativeConnectionLease<TClient>>> OpenNativeConnectionAsync<TClient>(CancellationToken cancellationToken = default) where TClient : class
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -423,6 +450,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             new NativeConnectionLease<TClient>(typed, _ => ValueTask.CompletedTask)));
     }
 
+    /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
         if (_ownsClient && Interlocked.Exchange(ref _disposed, 1) == 0) _client.Dispose();

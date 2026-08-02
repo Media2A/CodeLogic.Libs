@@ -26,6 +26,11 @@ public sealed class SftpStorageBackend : IStorageBackend
     private readonly RemotePathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
 
+    /// <summary>Initializes a backend that leases SFTP clients from a factory.</summary>
+    /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
+    /// <param name="clientFactory">Factory that creates configured SFTP clients.</param>
+    /// <param name="root">Optional remote directory mounted as the connection root.</param>
+    /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
     public SftpStorageBackend(
         string connectionId,
         Func<SftpClient> clientFactory,
@@ -41,11 +46,16 @@ public sealed class SftpStorageBackend : IStorageBackend
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
 
+    /// <inheritdoc />
     public string ConnectionId { get; }
+    /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.Sftp;
+    /// <inheritdoc />
     public string Root => _paths.Root;
+    /// <inheritdoc />
     public StorageCapabilities Capabilities => SftpCapabilities;
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -67,6 +77,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var resolved = _paths.Resolve(path);
@@ -82,6 +93,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageListOptions();
@@ -106,6 +118,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -123,6 +136,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -182,6 +196,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -189,6 +204,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         return await UploadAsync(path, source, options, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -224,6 +240,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { if (client is not null && !ownershipTransferred) client.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -244,6 +261,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         return Result<byte[]>.Success(destination.ToArray());
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
@@ -273,6 +291,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -307,6 +326,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         return upload.IsSuccess ? Result.Success() : Result.Failure(upload.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -351,6 +371,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
     {
         SftpClient? client = null;
@@ -366,12 +387,14 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
     {
         client = null;
         return false;
     }
 
+    /// <inheritdoc />
     public async Task<Result<NativeConnectionLease<TClient>>> OpenNativeConnectionAsync<TClient>(CancellationToken cancellationToken = default) where TClient : class
     {
         if (typeof(TClient) != typeof(SftpClient))
@@ -391,6 +414,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         finally { client?.Dispose(); }
     }
 
+    /// <inheritdoc />
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private async Task<SftpClient> OpenClientAsync(CancellationToken cancellationToken)

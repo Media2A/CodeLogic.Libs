@@ -7,11 +7,15 @@ namespace CL.Storage.Configuration;
 /// <summary>Common shape used by provider connection configuration.</summary>
 public abstract class StorageConnectionConfigBase
 {
+    /// <summary>Gets or sets whether this named connection is enabled.</summary>
     public bool Enabled { get; set; } = true;
+    /// <summary>Gets the provider-specific root mounted as provider-neutral path <c>/</c>.</summary>
     [JsonIgnore]
     public abstract string MountRoot { get; }
     internal virtual IEnumerable<string> GetValidationErrors() => [];
 
+    /// <summary>Validates the provider connection settings.</summary>
+    /// <returns>A configuration validation result containing every detected error.</returns>
     public ConfigValidationResult Validate()
     {
         var errors = GetValidationErrors().ToArray();
@@ -21,6 +25,7 @@ public abstract class StorageConnectionConfigBase
     }
 }
 
+/// <summary>Provides non-generic access to a provider's named connection collection.</summary>
 public abstract class ProviderStorageConfigBase : ConfigModelBase
 {
     internal abstract IEnumerable<KeyValuePair<string, StorageConnectionConfigBase>> EnumerateConnections();
@@ -30,11 +35,15 @@ public abstract class ProviderStorageConfigBase : ConfigModelBase
     internal abstract bool RemoveConnection(string connectionId);
 }
 
+/// <summary>Defines configuration for a provider with multiple independently named connections.</summary>
+/// <typeparam name="TConnection">Provider-specific connection configuration type.</typeparam>
 public abstract class ProviderStorageConfigBase<TConnection> : ProviderStorageConfigBase
     where TConnection : StorageConnectionConfigBase
 {
+    /// <summary>Gets or sets the provider connections keyed by case-insensitive connection ID.</summary>
     public Dictionary<string, TConnection> Connections { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <inheritdoc />
     public override ConfigValidationResult Validate()
     {
         var errors = new List<string>();

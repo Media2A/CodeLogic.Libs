@@ -6,6 +6,9 @@ namespace CL.Storage.Abstractions;
 /// <summary>Normalizes provider-neutral paths without allowing parent traversal.</summary>
 public static class StoragePath
 {
+    /// <summary>Converts slash variants and redundant segments into a root-relative portable path.</summary>
+    /// <param name="path">Path to normalize. Empty and root-like paths normalize to an empty string.</param>
+    /// <returns>The normalized path, or <c>storage.invalid_path</c> for NUL or parent traversal.</returns>
     public static Result<string> Normalize(string path)
     {
         if (path is null)

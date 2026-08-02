@@ -12,6 +12,7 @@ namespace CL.Storage.Providers.Local;
 /// <summary>Provides storage operations over a local path or mounted UNC root.</summary>
 public sealed class LocalStorageBackend : IStorageBackend
 {
+    /// <inheritdoc />
     public const long DefaultMaxBufferedDownloadBytes = 67_108_864;
     private static readonly StorageCapabilities LocalCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -28,6 +29,10 @@ public sealed class LocalStorageBackend : IStorageBackend
     private readonly LocalPathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
 
+    /// <summary>Initializes a sandboxed local-filesystem backend.</summary>
+    /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
+    /// <param name="configuration">Local root and link-handling configuration.</param>
+    /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
     public LocalStorageBackend(
         string connectionId,
         LocalConnectionConfig configuration,
@@ -44,11 +49,16 @@ public sealed class LocalStorageBackend : IStorageBackend
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
 
+    /// <inheritdoc />
     public string ConnectionId { get; }
+    /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.Local;
+    /// <inheritdoc />
     public string Root => _paths.Root;
+    /// <inheritdoc />
     public StorageCapabilities Capabilities => LocalCapabilities;
 
+    /// <inheritdoc />
     public Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -69,6 +79,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -91,6 +102,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -129,6 +141,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -147,6 +160,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadAsync(
         string path,
         Stream source,
@@ -219,6 +233,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadBytesAsync(
         string path,
         byte[] content,
@@ -230,6 +245,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         return await UploadAsync(path, source, options, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public Task<Result<Stream>> DownloadAsync(
         string path,
         StorageDownloadOptions? options = null,
@@ -278,6 +294,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public async Task<Result<byte[]>> DownloadBytesAsync(
         string path,
         StorageDownloadOptions? options = null,
@@ -321,6 +338,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         return Result<byte[]>.Success(destination.ToArray());
     }
 
+    /// <inheritdoc />
     public Task<Result> DeleteAsync(
         string path,
         StorageDeleteOptions? options = null,
@@ -362,6 +380,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public Task<Result> CopyAsync(
         string sourcePath,
         string destinationPath,
@@ -416,6 +435,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public Task<Result> MoveAsync(
         string sourcePath,
         string destinationPath,
@@ -466,6 +486,7 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -483,12 +504,14 @@ public sealed class LocalStorageBackend : IStorageBackend
         }
     }
 
+    /// <inheritdoc />
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
     {
         client = null;
         return false;
     }
 
+    /// <inheritdoc />
     public Task<Result<NativeConnectionLease<TClient>>> OpenNativeConnectionAsync<TClient>(CancellationToken cancellationToken = default)
         where TClient : class
     {
@@ -497,6 +520,7 @@ public sealed class LocalStorageBackend : IStorageBackend
             StorageErrors.Unsupported("The local provider does not use a native client session.")));
     }
 
+    /// <inheritdoc />
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private IEnumerable<StorageItem> EnumerateItems(ResolvedLocalPath root, bool recursive, CancellationToken cancellationToken)

@@ -52,6 +52,14 @@ public sealed class GoogleCloudStorageBackend :
     private readonly long _maxBufferedDownloadBytes;
     private int _disposed;
 
+    /// <summary>Initializes a backend over a Google Cloud Storage client and bucket.</summary>
+    /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
+    /// <param name="client">Google Cloud Storage client used for operations.</param>
+    /// <param name="bucket">Bucket mounted by this connection.</param>
+    /// <param name="prefix">Optional object prefix mounted as the connection root.</param>
+    /// <param name="uploadChunkSizeBytes">Chunk size used for resumable uploads.</param>
+    /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
+    /// <param name="ownsClient">Whether disposal of this backend also disposes the client.</param>
     public GoogleCloudStorageBackend(
         string connectionId,
         StorageClient client,
@@ -84,11 +92,16 @@ public sealed class GoogleCloudStorageBackend :
         _ownsClient = ownsClient;
     }
 
+    /// <inheritdoc />
     public string ConnectionId { get; }
+    /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.GoogleCloudStorage;
+    /// <inheritdoc />
     public string Root { get; }
+    /// <inheritdoc />
     public StorageCapabilities Capabilities => _capabilities;
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -108,6 +121,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Google Cloud object info")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
@@ -117,6 +131,7 @@ public sealed class GoogleCloudStorageBackend :
             : Result<bool>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageListOptions();
@@ -198,6 +213,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Google Cloud objects")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -220,6 +236,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Create Google Cloud directory")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -277,6 +294,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Upload Google Cloud object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -284,6 +302,7 @@ public sealed class GoogleCloudStorageBackend :
         return await UploadAsync(path, source, options, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -358,6 +377,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result<Stream>.Failure(Map(error, "Download Google Cloud object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDownloadOptions();
@@ -378,6 +398,7 @@ public sealed class GoogleCloudStorageBackend :
         return Result<byte[]>.Success(destination.ToArray());
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageDeleteOptions();
@@ -428,6 +449,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Delete Google Cloud object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -467,6 +489,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Copy Google Cloud object")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
@@ -479,6 +502,7 @@ public sealed class GoogleCloudStorageBackend :
                 $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
     }
 
+    /// <inheritdoc />
     public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
     {
         try
@@ -490,6 +514,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Check Google Cloud Storage health")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
         CancellationToken cancellationToken = default)
@@ -500,6 +525,7 @@ public sealed class GoogleCloudStorageBackend :
             : Result<IReadOnlyDictionary<string, string>>.Failure(info.Error!);
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageItem>> SetMetadataAsync(
         string path,
         IReadOnlyDictionary<string, string> metadata,
@@ -562,6 +588,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Update Google Cloud metadata")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageVersionPage>> ListVersionsAsync(
         string path,
         StorageVersionListOptions? options = null,
@@ -612,6 +639,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result<StorageVersionPage>.Failure(Map(error, "List Google Cloud object versions")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result> DeleteVersionAsync(
         string path,
         string versionId,
@@ -635,6 +663,7 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result.Failure(Map(error, "Delete Google Cloud object version")); }
     }
 
+    /// <inheritdoc />
     public async Task<Result<StorageSignedUrl>> CreateSignedUrlAsync(
         string path,
         StorageSignedUrlOptions? options = null,
@@ -671,12 +700,14 @@ public sealed class GoogleCloudStorageBackend :
         catch (Exception error) { return Result<StorageSignedUrl>.Failure(Map(error, "Create Google Cloud signed URL")); }
     }
 
+    /// <inheritdoc />
     public bool TryGetNativeClient<TClient>([NotNullWhen(true)] out TClient? client) where TClient : class
     {
         client = _client as TClient;
         return client is not null;
     }
 
+    /// <inheritdoc />
     public Task<Result<NativeConnectionLease<TClient>>> OpenNativeConnectionAsync<TClient>(CancellationToken cancellationToken = default) where TClient : class
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -685,6 +716,7 @@ public sealed class GoogleCloudStorageBackend :
         return Task.FromResult(Result<NativeConnectionLease<TClient>>.Success(new NativeConnectionLease<TClient>(typed, _ => ValueTask.CompletedTask)));
     }
 
+    /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
         if (_ownsClient && Interlocked.Exchange(ref _disposed, 1) == 0) _client.Dispose();
