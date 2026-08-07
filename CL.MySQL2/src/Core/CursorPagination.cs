@@ -95,6 +95,7 @@ internal static class CursorPagination
 internal static class CursorTokenCodec
 {
     private const int CurrentVersion = 1;
+    internal const int MaxEncodedLength = 4096;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = false
@@ -132,6 +133,8 @@ internal static class CursorTokenCodec
     {
         try
         {
+            if (token.Length > MaxEncodedLength)
+                throw Invalid($"The cursor exceeds the maximum length of {MaxEncodedLength} characters.");
             if (string.IsNullOrWhiteSpace(token))
                 throw Invalid("The cursor is empty.");
 
