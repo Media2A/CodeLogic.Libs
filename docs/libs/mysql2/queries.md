@@ -79,6 +79,31 @@ PagedResult<Order> p = page.Value!;
 // p.Items, p.PageNumber, p.PageSize, p.TotalItems, p.TotalPages, p.HasPreviousPage, p.HasNextPage
 ```
 
+For large or frequently changing result sets, use forward-only cursor paging. It performs
+keyset seeks and fetches one lookahead row, so it needs neither `OFFSET` nor `COUNT(*)`:
+
+```csharp
+Result<CursorPagedResult<Order>> first = await mysql.Query<Order>()
+    .Where(o => o.Status == "open")
+    .OrderByDescending(o => o.CreatedUtc)
+    .ToCursorPagedListAsync(pageSize: 25);
+
+Result<CursorPagedResult<Order>> next = await mysql.Query<Order>()
+    .Where(o => o.Status == "open")
+    .OrderByDescending(o => o.CreatedUtc)
+    .After(first.Value!.NextCursor)
+    .ToCursorPagedListAsync(pageSize: 25);
+```
+
+`CursorPagedResult<T>` carries `Items`, `PageSize`, `NextCursor`, and `HasNextPage`.
+Cursor queries require an explicit ordering and a mapped primary key; the primary key is
+automatically appended as a stable tie-breaker. Multiple and nullable ordering columns are
+supported. Do not combine cursor paging with `Take`/`Skip`, joins, projections, or grouping.
+
+Continuation tokens are versioned Base64URL-encoded JSON bound to the entity/table and exact
+ordering. Treat them as opaque paging state, not as secrets: they are not encrypted or signed,
+and they are not bound to the query's filters.
+
 ## Joins
 
 ### Typed joins
@@ -158,6 +183,7 @@ Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(.
 | `ToListAsync(ct)` | `Result<List<T>>` | `SELECT …` |
 | `FirstOrDefaultAsync(ct)` | `Result<T?>` | `SELECT … LIMIT 1` |
 | `ToPagedListAsync(page, pageSize, ct)` | `Result<PagedResult<T>>` | data page + `COUNT(*)` |
+| `ToCursorPagedListAsync(pageSize, ct)` | `Result<CursorPagedResult<T>>` | keyset page + one lookahead row |
 | `CountAsync(ct)` | `Result<long>` | `SELECT COUNT(*)` |
 | `MaxAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MAX(col)` |
 | `MinAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MIN(col)` |

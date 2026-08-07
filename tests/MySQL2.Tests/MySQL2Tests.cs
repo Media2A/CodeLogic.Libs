@@ -130,11 +130,12 @@ public sealed class MySQL2RuntimeFixture : IAsyncLifetime
     private async Task SeedAsync()
     {
         // Clean slate for the shared (read-only) seed tables.
-        await Exec("DROP TABLE IF EXISTS it_shipment, it_order, it_customer, it_rename");
+        await Exec("DROP TABLE IF EXISTS it_shipment, it_order, it_customer, it_cursor, it_rename");
 
         await Mysql.SyncTableAsync<Customer>(createBackup: false);
         await Mysql.SyncTableAsync<Order>(createBackup: false);
         await Mysql.SyncTableAsync<Shipment>(createBackup: false);
+        await Mysql.SyncTableAsync<CursorRow>(createBackup: false);
 
         var cust = Mysql.GetRepository<Customer>();
         var alice = (await cust.InsertAsync(new Customer { Name = "Alice", Country = "DK", IsVip = true })).Value!;
@@ -149,6 +150,14 @@ public sealed class MySQL2RuntimeFixture : IAsyncLifetime
         var ship = Mysql.GetRepository<Shipment>();
         await ship.InsertAsync(new Shipment { OrderId = Order1Id, Status = "sent" });
         await ship.InsertAsync(new Shipment { OrderId = Order3Id, Status = "pending" });
+
+        var cursor = Mysql.GetRepository<CursorRow>();
+        await cursor.InsertAsync(new CursorRow { Rank = null, Bucket = "b" });
+        await cursor.InsertAsync(new CursorRow { Rank = null, Bucket = "a" });
+        await cursor.InsertAsync(new CursorRow { Rank = 1, Bucket = "b" });
+        await cursor.InsertAsync(new CursorRow { Rank = 1, Bucket = "a" });
+        await cursor.InsertAsync(new CursorRow { Rank = 1, Bucket = "a" });
+        await cursor.InsertAsync(new CursorRow { Rank = 2, Bucket = "a" });
     }
 
     public Task Exec(string sql) =>
@@ -258,6 +267,74 @@ public sealed class MySQL2Tests
             .WhereNotIn<Customer, long>(o => o.CustomerId, c => c.Id, c => c.IsVip)
             .CountAsync()).Value;
         Assert.Equal(1, notInCount);                               // Bob's o3
+    }
+
+    [DbFact]
+    public async Task Cursor_paging_is_stable_and_validates_tokens()
+    {
+        var expected = (await Mysql.Query<CursorRow>()
+            .OrderBy(x => x.Rank)
+            .OrderByDescending(x => x.Bucket)
+            .OrderByDescending(x => x.Id)
+            .ToListAsync()).Value!;
+
+        var actual = new List<CursorRow>();
+        string? cursor = null;
+        CursorPagedResult<CursorRow>? lastPage = null;
+        do
+        {
+            var result = await Mysql.Query<CursorRow>()
+                .OrderBy(x => x.Rank)
+                .OrderByDescending(x => x.Bucket)
+                .After(cursor)
+                .ToCursorPagedListAsync(2);
+
+            Assert.True(result.IsSuccess, result.Error?.Message);
+            lastPage = result.Value!;
+            Assert.Equal(2, lastPage.PageSize);
+            actual.AddRange(lastPage.Items);
+            cursor = lastPage.NextCursor;
+        } while (lastPage.HasNextPage);
+
+        Assert.Equal(expected.Select(x => x.Id), actual.Select(x => x.Id));
+        Assert.Equal(expected.Count, actual.Select(x => x.Id).Distinct().Count());
+        Assert.Null(lastPage.NextCursor);
+
+        var first = (await Mysql.Query<CursorRow>()
+            .OrderBy(x => x.Rank)
+            .ToCursorPagedListAsync(2)).Value!;
+        Assert.True(first.HasNextPage);
+
+        var malformed = await Mysql.Query<CursorRow>()
+            .OrderBy(x => x.Rank)
+            .After("not-a-token")
+            .ToCursorPagedListAsync(2);
+        Assert.True(malformed.IsFailure);
+        Assert.Equal("mysql.invalid_cursor", malformed.Error!.Code);
+
+        var mismatched = await Mysql.Query<CursorRow>()
+            .OrderByDescending(x => x.Rank)
+            .After(first.NextCursor)
+            .ToCursorPagedListAsync(2);
+        Assert.True(mismatched.IsFailure);
+        Assert.Equal("mysql.invalid_cursor", mismatched.Error!.Code);
+
+        var unordered = await Mysql.Query<CursorRow>().ToCursorPagedListAsync(2);
+        Assert.True(unordered.IsFailure);
+        Assert.Equal("mysql.cursor_paging_invalid", unordered.Error!.Code);
+
+        var limited = await Mysql.Query<CursorRow>()
+            .OrderBy(x => x.Rank)
+            .Take(2)
+            .ToCursorPagedListAsync(2);
+        Assert.True(limited.IsFailure);
+        Assert.Equal("mysql.cursor_paging_invalid", limited.Error!.Code);
+
+        var cursorMisuse = await Mysql.Query<CursorRow>()
+            .OrderBy(x => x.Rank)
+            .After(first.NextCursor)
+            .ToListAsync();
+        Assert.True(cursorMisuse.IsFailure);
     }
 
     // ── Regression: 11+ params in one predicate (param rekey @p1 vs @p10) ─────────
@@ -553,6 +630,14 @@ public class Shipment
     [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
     [Column(Name = "order_id", DataType = DataType.BigInt, NotNull = true)] public long OrderId { get; set; }
     [Column(Name = "status", DataType = DataType.VarChar, Size = 20, NotNull = true)] public string Status { get; set; } = "";
+}
+
+[Table(Name = "it_cursor")]
+public class CursorRow
+{
+    [Column(Name = "id", DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(Name = "rank", DataType = DataType.Int)] public int? Rank { get; set; }
+    [Column(Name = "bucket", DataType = DataType.VarChar, Size = 10, NotNull = true)] public string Bucket { get; set; } = "";
 }
 
 public class OrderView

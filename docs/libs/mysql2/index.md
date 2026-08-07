@@ -109,6 +109,10 @@ await repo.UpsertWithIncrementsAsync(
 
 `PagedResult<T>` carries `Items`, `PageNumber`, `PageSize`, `TotalItems`, `TotalPages`, `HasPreviousPage`, and `HasNextPage`.
 
+For keyset paging without `OFFSET` or `COUNT(*)`, compose an explicitly ordered
+`Query<T>()`, call `ToCursorPagedListAsync(pageSize)`, and pass the returned
+`NextCursor` to `.After(cursor)` for the next page. See [Queries](queries.md#ordering--paging).
+
 ## Entry points
 
 Everything flows through three methods on the library, plus a raw-SQL escape hatch.
