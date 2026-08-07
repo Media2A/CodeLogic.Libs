@@ -181,7 +181,7 @@ Result<CursorPagedResult<Order>> next = await mysql.Query<Order>()
     .ToCursorPagedListAsync(pageSize: 25);
 ```
 
-Cursor ordering supports multiple ASC/DESC and nullable columns. A mapped primary key is appended automatically as a stable tie-breaker. Continuation tokens are versioned Base64URL JSON bound to the entity/table and exact ordering; they are opaque paging state, but they are not signed or encrypted.
+Cursor ordering supports multiple ASC/DESC and nullable columns. A mapped primary key is appended automatically as a stable tie-breaker. Continuation tokens are versioned Base64URL JSON bound to the entity/table and exact ordering; they are opaque paging state, but they are not signed or encrypted. Encoded tokens longer than 4,096 characters are rejected before decoding.
 
 ### Joins, projections, grouping, and aggregates
 

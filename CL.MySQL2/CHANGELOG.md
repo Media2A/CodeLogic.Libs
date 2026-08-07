@@ -13,6 +13,11 @@ NuGet package version of `CodeLogic.MySQL2`.
 - Versioned Base64URL continuation tokens, stable primary-key tie-breaking,
   compound ASC/DESC ordering, and MySQL-compatible nullable ordering.
 
+### Fixed
+
+- Reject cursor tokens longer than 4,096 encoded characters before Base64 decoding
+  or JSON deserialization, bounding work performed on untrusted paging input.
+
 ### Documentation
 
 - Expanded the package README into a complete capability overview covering entity

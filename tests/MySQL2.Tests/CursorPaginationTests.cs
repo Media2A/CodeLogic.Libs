@@ -38,6 +38,19 @@ public sealed class CursorPaginationUnitTests
     }
 
     [Fact]
+    public void Token_rejects_oversized_input_before_decoding()
+    {
+        var orders = Orders((nameof(CursorUnitRow.Rank), false), (nameof(CursorUnitRow.Id), false));
+        var oversized = new string('A', CursorTokenCodec.MaxEncodedLength + 1);
+
+        var error = Assert.Throws<CursorPagingException>(() =>
+            CursorTokenCodec.Decode<CursorUnitRow>(oversized, orders));
+
+        Assert.Equal("mysql.invalid_cursor", error.ErrorCode);
+        Assert.Contains(CursorTokenCodec.MaxEncodedLength.ToString(), error.Message);
+    }
+
+    [Fact]
     public void Effective_order_appends_primary_key_with_final_direction()
     {
         var explicitOrders = Orders((nameof(CursorUnitRow.Rank), true));

@@ -102,7 +102,8 @@ supported. Do not combine cursor paging with `Take`/`Skip`, joins, projections, 
 
 Continuation tokens are versioned Base64URL-encoded JSON bound to the entity/table and exact
 ordering. Treat them as opaque paging state, not as secrets: they are not encrypted or signed,
-and they are not bound to the query's filters.
+and they are not bound to the query's filters. Tokens longer than 4,096 encoded characters are
+rejected before Base64 decoding or JSON deserialization.
 
 ## Joins
 
