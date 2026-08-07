@@ -4,6 +4,21 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## 2026-08-07
+
+### Added
+
+- Forward-only keyset pagination on entity queries through `.After(cursor)` and
+  `ToCursorPagedListAsync(pageSize)`, returning `CursorPagedResult<T>`.
+- Versioned Base64URL continuation tokens, stable primary-key tie-breaking,
+  compound ASC/DESC ordering, and MySQL-compatible nullable ordering.
+
+### Documentation
+
+- Expanded the package README into a complete capability overview covering entity
+  mapping, repositories, querying and paging, schema sync, migrations, lifecycle,
+  transactions, caching, resilience, observability, configuration, and API boundaries.
+
 ## 2026-06-20
 
 ### Fixed

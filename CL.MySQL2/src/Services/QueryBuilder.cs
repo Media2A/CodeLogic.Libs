@@ -31,6 +31,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     // with the left-table alias (the pre-translated SQL above is alias-less).
     private readonly List<Expression<Func<T, bool>>> _wherePredicates = [];
     private readonly List<string> _orderBys = [];
+    private readonly List<CursorOrder> _cursorOrders = [];
     private readonly List<string> _joins = [];
     private readonly List<string> _groupBys = [];
     private int? _limit;
@@ -44,6 +45,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     private bool _hasSubqueryWhere;
     // When false (default), reads on a [SoftDelete] entity append `<col> IS NULL`.
     private bool _includeDeleted;
+    private string? _afterCursor;
 
     // ── Constructors ──────────────────────────────────────────────────────────
 
@@ -209,6 +211,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         var col = MySqlExpressionVisitor.TranslateSelector(keySelector);
         _orderBys.Add($"`{col}` ASC");
+        _cursorOrders.Add(new CursorOrder(EntityMetadata<T>.RequireColumn(col), Descending: false));
         return this;
     }
 
@@ -216,6 +219,18 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         var col = MySqlExpressionVisitor.TranslateSelector(keySelector);
         _orderBys.Add($"`{col}` DESC");
+        _cursorOrders.Add(new CursorOrder(EntityMetadata<T>.RequireColumn(col), Descending: true));
+        return this;
+    }
+
+    /// <summary>
+    /// Continues a cursor-paged query after <paramref name="cursor"/>. The cursor must have
+    /// been returned by <see cref="ToCursorPagedListAsync"/> for the same entity and ordering.
+    /// A null cursor selects the first page.
+    /// </summary>
+    public QueryBuilder<T> After(string? cursor)
+    {
+        _afterCursor = cursor;
         return this;
     }
 
@@ -226,6 +241,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     public QueryBuilder<T> Join(string table, string condition, JoinType type = JoinType.Inner)
     {
+        EnsureCursorNotSet(nameof(Join));
         var keyword = type switch
         {
             JoinType.Left  => "LEFT JOIN",
@@ -269,6 +285,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         JoinType type = JoinType.Inner)
         where TRight : class, new()
     {
+        EnsureCursorNotSet(nameof(Join));
         if (_orderBys.Count > 0 || _limit.HasValue || _offset.HasValue)
             throw new InvalidOperationException(
                 "Apply OrderBy / Take / Skip after .Join, on the returned JoinedQuery — " +
@@ -314,6 +331,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// </summary>
     public ProjectedQuery<T, TResult> Select<TResult>(Expression<Func<T, TResult>> selector)
     {
+        EnsureCursorNotSet(nameof(Select));
         var compiled = ProjectionCompiler.Compile(selector);
 
         var tableName = GetTableName();
@@ -338,6 +356,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// </summary>
     public GroupedQuery<TKey, T> GroupBy<TKey>(Expression<Func<T, TKey>> keySelector)
     {
+        EnsureCursorNotSet(nameof(GroupBy));
         var (whereClause, parms) = BuildWhereSql();
         return new GroupedQuery<TKey, T>(
             _connectionManager, _logger, _connectionId, _transactionScope,
@@ -407,6 +426,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet(nameof(ToListAsync));
             var (sql, parms) = BuildSelectSql();
             var tableName = GetTableName();
 
@@ -496,6 +516,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet(nameof(FirstOrDefaultAsync));
             Limit(1);
             var (sql, parms) = BuildSelectSql();
             var tableName = GetTableName();
@@ -567,6 +588,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet(nameof(ToPagedListAsync));
             var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
@@ -626,10 +648,109 @@ public sealed class QueryBuilder<T> where T : class, new()
         });
     }
 
+    /// <summary>
+    /// Executes a forward-only keyset page. At least one explicit ordering is required;
+    /// the mapped primary key is appended automatically when it is not already present.
+    /// </summary>
+    public async Task<Result<CursorPagedResult<T>>> ToCursorPagedListAsync(
+        int pageSize,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (pageSize <= 0 || pageSize == int.MaxValue)
+                throw new CursorPagingException("Cursor page size must be between 1 and Int32.MaxValue - 1.");
+            if (_limit.HasValue || _offset.HasValue)
+                throw new CursorPagingException(
+                    "Take/Limit and Skip/Offset cannot be combined with ToCursorPagedListAsync; pass the size to the terminal.");
+            if (_joins.Count > 0 || _groupBys.Count > 0)
+                throw new CursorPagingException(
+                    "Cursor paging is supported only for plain entity queries, not raw joins or grouped queries.");
+
+            var orders = CursorPagination.GetEffectiveOrder<T>(_cursorOrders);
+            var (whereClause, parms) = BuildWhereSql();
+
+            if (_afterCursor is not null)
+            {
+                var values = CursorTokenCodec.Decode<T>(_afterCursor, orders);
+                var (seekSql, seekParms) = CursorPagination.BuildSeekPredicate(orders, values);
+                whereClause = AppendWherePredicate(whereClause, seekSql);
+                foreach (var pair in seekParms)
+                    parms.Add(pair.Key, pair.Value);
+            }
+
+            var orderSql = string.Join(", ", orders.Select(RenderOrder));
+            var sql = $"SELECT * FROM `{GetTableName()}`{whereClause} ORDER BY {orderSql} LIMIT {pageSize + 1}";
+            var tableName = GetTableName();
+
+            if (ShouldCache)
+            {
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                return await QueryCache.GetOrSetAsync(
+                    cacheKey, tableName,
+                    () => ExecuteCursorPage(sql, parms, orders, pageSize, ct),
+                    _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+            }
+
+            return await ExecuteCursorPage(sql, parms, orders, pageSize, ct).ConfigureAwait(false);
+        }
+        catch (CursorPagingException ex)
+        {
+            _logger?.Warning($"[MySQL2] QueryBuilder.ToCursorPagedListAsync rejected the query: {ex.Message}");
+            return Result<CursorPagedResult<T>>.Failure(Error.FromException(ex, ex.ErrorCode));
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[MySQL2] QueryBuilder.ToCursorPagedListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
+            return Result<CursorPagedResult<T>>.Failure(Error.FromException(ex, "mysql.query_failed"));
+        }
+    }
+
+    private async Task<Result<CursorPagedResult<T>>> ExecuteCursorPage(
+        string sql,
+        Dictionary<string, object?> parms,
+        IReadOnlyList<CursorOrder> orders,
+        int pageSize,
+        CancellationToken ct)
+    {
+        LogQuery(sql);
+        var sw = Stopwatch.StartNew();
+
+        var items = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+            var entities = new List<T>(pageSize + 1);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                entities.Add(map(reader));
+            return entities;
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count);
+
+        var hasNextPage = items.Count > pageSize;
+        if (hasNextPage)
+            items.RemoveAt(pageSize);
+
+        var nextCursor = hasNextPage && items.Count > 0
+            ? CursorTokenCodec.Encode(items[^1], orders)
+            : null;
+
+        return Result<CursorPagedResult<T>>.Success(new CursorPagedResult<T>
+        {
+            Items = items,
+            PageSize = pageSize,
+            NextCursor = nextCursor
+        });
+    }
+
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
         {
+            EnsureCursorNotSet(nameof(CountAsync));
             var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
@@ -709,6 +830,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet(nameof(AverageAsync));
             var col = MySqlExpressionVisitor.TranslateSelector(selector);
             var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
@@ -735,6 +857,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet(nameof(DeleteAsync));
             var tableName = GetTableName();
             // Hard delete — bypass the soft-delete read filter so it targets all matching rows.
             var (whereClause, parms) = BuildWhereSql(applySoftDelete: false);
@@ -778,6 +901,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet(nameof(UpdateAsync));
             if (setExpression.Body is not MemberInitExpression mi)
                 throw new ArgumentException(
                     "UpdateAsync setter must be a member-init expression like x => new T { Prop = value }.",
@@ -863,6 +987,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet(nameof(UpdateAsync));
             foreach (var key in updates.Keys) EnsureValidColumn(key);
             var tableName = GetTableName();
             // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
@@ -939,6 +1064,21 @@ public sealed class QueryBuilder<T> where T : class, new()
         return ($" WHERE {string.Join(" AND ", clauses)}", allParms);
     }
 
+    private static string AppendWherePredicate(string whereClause, string predicate) =>
+        string.IsNullOrEmpty(whereClause)
+            ? $" WHERE {predicate}"
+            : $"{whereClause} AND {predicate}";
+
+    private static string RenderOrder(CursorOrder order) =>
+        $"`{order.Column.ColumnName}` {(order.Descending ? "DESC" : "ASC")}";
+
+    private void EnsureCursorNotSet(string operation)
+    {
+        if (_afterCursor is not null)
+            throw new InvalidOperationException(
+                $"After(cursor) can only be consumed by ToCursorPagedListAsync; '{operation}' is not a cursor terminal.");
+    }
+
     private async Task<TResult> ExecuteAsync<TResult>(Func<MySqlConnection, Task<TResult>> action)
     {
         if (_transactionScope is not null)
@@ -964,6 +1104,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
+            EnsureCursorNotSet($"{func} aggregate");
             var col = MySqlExpressionVisitor.TranslateSelector(selector);
             var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();

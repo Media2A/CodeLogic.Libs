@@ -28,6 +28,28 @@ public sealed class PagedResult<T>
     public bool HasNextPage => PageNumber < TotalPages;
 }
 
+/// <summary>
+/// Represents one forward-only page from a cursor-paged query.
+/// </summary>
+/// <typeparam name="T">The entity type.</typeparam>
+public sealed class CursorPagedResult<T>
+{
+    /// <summary>The items returned for this page.</summary>
+    public List<T> Items { get; init; } = [];
+
+    /// <summary>The requested maximum number of items for the page.</summary>
+    public int PageSize { get; init; }
+
+    /// <summary>
+    /// The opaque cursor to pass to <c>After</c> for the next page, or <see langword="null"/>
+    /// when this is the final page.
+    /// </summary>
+    public string? NextCursor { get; init; }
+
+    /// <summary>True when another page is available.</summary>
+    public bool HasNextPage => NextCursor is not null;
+}
+
 /// <summary>SQL JOIN types.</summary>
 public enum JoinType
 {
