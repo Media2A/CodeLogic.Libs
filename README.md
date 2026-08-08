@@ -23,6 +23,7 @@
 |---------|---------|-------------|
 | [CodeLogic.Common](CL.Common/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Common?label=)](https://www.nuget.org/packages/CodeLogic.Common) | Utility toolkit — encryption, hashing, ID/password generation, JSON, cron, imaging, networking |
 | [CodeLogic.MySQL2](CL.MySQL2/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.MySQL2?label=)](https://www.nuget.org/packages/CodeLogic.MySQL2) | MySQL / MariaDB / Percona — typed LINQ → SQL, result cache, schema-sync modes, migrations |
+| [CodeLogic.MSSQL](CL.MSSQL/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.MSSQL?label=)](https://www.nuget.org/packages/CodeLogic.MSSQL) | SQL Server 2019+ / Azure SQL — typed LINQ → SQL, caching, schema sync, migrations |
 | [CodeLogic.PostgreSQL](CL.PostgreSQL/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.PostgreSQL?label=)](https://www.nuget.org/packages/CodeLogic.PostgreSQL) | PostgreSQL — multi-database, repository + query builder, table sync, backups |
 | [CodeLogic.SQLite](CL.SQLite/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SQLite?label=)](https://www.nuget.org/packages/CodeLogic.SQLite) | SQLite — connection pool, WAL, repository + query builder, migration ledger |
 | [CodeLogic.Mail](CL.Mail/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Mail?label=)](https://www.nuget.org/packages/CodeLogic.Mail) | SMTP send, IMAP read + IDLE, and a lightweight template engine |

@@ -11,6 +11,11 @@ your application or from other libraries after `StartAsync()`.
     <div class="lib-pkg">CodeLogic.MySQL2</div>
     <p class="lib-desc">MySQL / MariaDB / Percona — typed LINQ → SQL, result cache, schema-sync modes, migrations.</p>
   </a>
+  <a class="lib-card" href="mssql/index.md">
+    <div class="lib-name">CL.MSSQL</div>
+    <div class="lib-pkg">CodeLogic.MSSQL</div>
+    <p class="lib-desc">SQL Server 2019+ / Azure SQL — typed LINQ, result cache, schema sync, migrations.</p>
+  </a>
   <a class="lib-card" href="postgresql/index.md">
     <div class="lib-name">CL.PostgreSQL</div>
     <div class="lib-pkg">CodeLogic.PostgreSQL</div>
