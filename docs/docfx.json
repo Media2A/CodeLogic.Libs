@@ -8,6 +8,7 @@
             "CL.GitHelper/CL.GitHelper.csproj",
             "CL.Mail/CL.Mail.csproj",
             "CL.MySQL2/CL.MySQL2.csproj",
+            "CL.MSSQL/CL.MSSQL.csproj",
             "CL.NetUtils/CL.NetUtils.csproj",
             "CL.PostgreSQL/CL.PostgreSQL.csproj",
             "CL.SQLite/CL.SQLite.csproj",

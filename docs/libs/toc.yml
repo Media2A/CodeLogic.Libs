@@ -12,6 +12,18 @@
       href: mysql2/schema-migrations.md
     - name: Performance & Caching
       href: mysql2/performance.md
+- name: CL.MSSQL
+  items:
+    - name: Overview
+      href: mssql/index.md
+    - name: Query Builder
+      href: mssql/queries.md
+    - name: Schema & Migrations
+      href: mssql/schema-migrations.md
+    - name: Performance & Caching
+      href: mssql/performance.md
+    - name: Capability Parity
+      href: mssql/parity.md
 - name: CL.PostgreSQL
   items:
     - name: Overview

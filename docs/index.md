@@ -42,6 +42,11 @@ var mysql = Libraries.Get<CL.MySQL2.MySQL2Library>();
     <div class="lib-pkg">CodeLogic.MySQL2</div>
     <p class="lib-desc">MySQL / MariaDB / Percona with typed LINQ → SQL, a working result cache, schema sync modes, and migrations.</p>
   </a>
+  <a class="lib-card" href="libs/mssql/index.md">
+    <div class="lib-name">CL.MSSQL</div>
+    <div class="lib-pkg">CodeLogic.MSSQL</div>
+    <p class="lib-desc">SQL Server 2019+ and Azure SQL with typed LINQ, caching, schema synchronization, and migrations.</p>
+  </a>
   <a class="lib-card" href="libs/postgresql/index.md">
     <div class="lib-name">CL.PostgreSQL</div>
     <div class="lib-pkg">CodeLogic.PostgreSQL</div>

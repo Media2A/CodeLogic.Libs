@@ -1,0 +1,24 @@
+# CL.MSSQL capability parity
+
+`CL.MSSQL` preserves the workflow and fluent-service shape of `CL.MySQL2`, while exposing SQL Server-native configuration, provider types, mappings, and SQL semantics.
+
+| Capability | CL.MSSQL implementation |
+|---|---|
+| CRUD and identity keys | Repositories with `OUTPUT INSERTED` |
+| Batch insert and update | Dynamically capped below SQL Server's 2,100-parameter limit |
+| Upsert and incrementing upsert | Serializable `UPDLOCK`/`HOLDLOCK` source-table algorithm; no `MERGE` |
+| LINQ predicates and functions | SQL Server `bit`, `LIKE`, `DATEPART`, `CONVERT`, `DATEADD`/`DATEDIFF_BIG`, `COALESCE`, and `CONCAT` SQL |
+| Joins, subqueries, projections, grouping | Typed and raw joins, projection pushdown, aggregates, and compiled materializers |
+| Offset and cursor paging | `TOP` or `OFFSET … FETCH`, stable PK tie-breaking, and null-safe cursor equality |
+| Transactions and raw SQL | `SqlConnection`, `SqlCommand`, and `SqlTransaction` |
+| Soft delete and retention | Automatic filters and repeated `DELETE TOP (@batch)` |
+| Cache and invalidation | In-process/custom stores, smart pools, table versions, and events |
+| Schema synchronization | `sys.*` catalogs; schemas, identities, defaults, checks, keys, indexes with `INCLUDE`, FKs, collations, and comments |
+| Schema modes and CRC | Production, Developer, and Migration reconciliation with schema state in `[dbo].[__schema_state]` |
+| Migrations and rollback | Ordered/checksummed migrations in `[dbo].[__migrations]` using `SYSUTCDATETIME()` |
+| Cross-node lock | Dedicated session using `sys.sp_getapplock` |
+| Schema backup and restore | Catalog-generated DDL for library-managed objects; advanced external objects are excluded |
+| Resilience and observability | Deadlock, lock-timeout, and Azure transient retries plus best-effort cached ShowPlan XML via `sys.dm_exec_query_plan` |
+| Health and named connections | Health events/checks and multiple connection IDs |
+
+SQL Server differences remain visible for unique-null behavior, affected-row counts, collations, identity allocation, and ambiguous matches across multiple unique keys. Snapshot fidelity excludes triggers, temporal history, partitioning, replication, and other externally managed objects.
