@@ -55,7 +55,7 @@ download limit, and health-check settings. Providers register these sections:
 | `storage.local` | `LocalConnectionConfig` | `RootPath`, `FollowLinks` |
 | `storage.s3` | `S3ConnectionConfig` | `Bucket`, `Prefix`, `Region`, endpoint/auth, multipart bounds |
 | `storage.ftp` | `FtpConnectionConfig` | host/root/auth, encryption/data mode, certificate pins |
-| `storage.sftp` | `SftpConnectionConfig` | host/root/auth, private key, mandatory host-key pins |
+| `storage.sftp` | `SftpConnectionConfig` | host/root/auth, private key, host-key pins or explicit auto-accept |
 | `storage.webdav` | `WebDavConnectionConfig` | endpoint/root/auth, headers, certificate pins |
 | `storage.azure` | `AzureBlobConnectionConfig` | container URI/prefix and credential mode |
 | `storage.gcs` | `GoogleCloudConnectionConfig` | bucket/prefix, project/credential, upload chunk size |
@@ -71,7 +71,8 @@ when the connections use different providers.
 - WebDAV custom headers cannot replace authorization/host/framing headers or contain line breaks.
 - FTPS and WebDAV validate the certificate chain by default. Optional SHA-256 pins can deliberately
   trust a specific leaf certificate.
-- SFTP requires at least one SHA-256 host-key fingerprint; there is no trust-any mode.
+- SFTP requires at least one SHA-256 host-key fingerprint by default. Set `AutoAcceptHostKey` to
+  `true` only for a trusted environment when connecting without a pinned host key is necessary.
 - Upload metadata/header values reject control characters and provider-specific size overflows.
 
 ## Operations

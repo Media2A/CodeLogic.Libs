@@ -236,7 +236,7 @@ public sealed class StorageConfigurationTests
     }
 
     [Fact]
-    public void Sftp_requires_a_pinned_sha256_host_key()
+    public void Sftp_requires_a_pinned_sha256_host_key_unless_auto_accept_is_enabled()
     {
         var withoutPin = new SftpConnectionConfig
         {
@@ -251,9 +251,17 @@ public sealed class StorageConfigurationTests
             Password = "password",
             HostKeyFingerprints = [new string('A', 64)]
         };
+        var withAutoAccept = new SftpConnectionConfig
+        {
+            Host = "sftp.example.test",
+            Username = "user",
+            Password = "password",
+            AutoAcceptHostKey = true
+        };
 
         Assert.False(withoutPin.Validate().IsValid);
         Assert.True(withPin.Validate().IsValid);
+        Assert.True(withAutoAccept.Validate().IsValid);
     }
 
     [Fact]

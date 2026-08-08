@@ -24,6 +24,8 @@
 
 ### Safety
 
+- Added an explicit, default-off `AutoAcceptHostKey` SFTP connection option for trusted
+  environments where a server host-key fingerprint cannot be configured.
 - Accept SSH.NET's canonical unpadded Base64 SHA-256 host-key fingerprints while continuing to
   reject malformed, noncanonical, or non-SHA-256 values before SFTP trust decisions.
 - Centralized path normalization and source/destination relationship checks; equal transfers and

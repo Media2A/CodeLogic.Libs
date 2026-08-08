@@ -71,8 +71,10 @@ bounded health probes. Example `config.storage.s3.json`:
 ```
 
 Clear-text custom S3 or WebDAV endpoints require `AllowInsecureHttp = true`. SFTP requires at
-least one SHA-256 host-key fingerprint. FTPS and WebDAV use normal certificate validation by
-default and optionally accept configured SHA-256 certificate pins; there is no accept-any switch.
+least one SHA-256 host-key fingerprint unless `AutoAcceptHostKey = true` is explicitly enabled.
+That option trusts any SSH host key and is best limited to trusted development environments. FTPS
+and WebDAV use normal certificate validation by default and optionally accept configured SHA-256
+certificate pins; there is no accept-any switch.
 
 ## Common API
 

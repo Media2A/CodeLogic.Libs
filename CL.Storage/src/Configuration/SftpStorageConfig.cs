@@ -50,6 +50,13 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
     [ConfigField(Label = "Private key passphrase", Secret = true, InputType = ConfigInputType.Password, Group = "Credentials", Order = 23)]
     public string? PrivateKeyPassphrase { get; set; }
 
+    /// <summary>
+    /// Gets or sets whether to trust any SSH server host key. This disables host-key verification and
+    /// should only be used for trusted development environments or servers whose key cannot be pinned.
+    /// </summary>
+    [ConfigField(Label = "Auto-accept host key", Description = "Trust any SSH server host key. This disables host-key verification.", Group = "Connection", Order = 13)]
+    public bool AutoAcceptHostKey { get; set; }
+
     /// <summary>Trusted server host-key fingerprints, in SHA256:base64 or hexadecimal form.</summary>
     public List<string> HostKeyFingerprints { get; set; } = [];
 
@@ -80,7 +87,7 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
             else if (!Path.IsPathFullyQualified(PrivateKeyPath))
                 yield return "PrivateKeyPath must be an absolute path";
         }
-        if (HostKeyFingerprints is null || HostKeyFingerprints.Count == 0)
+        if (!AutoAcceptHostKey && (HostKeyFingerprints is null || HostKeyFingerprints.Count == 0))
             yield return "At least one HostKeyFingerprint is required";
         foreach (var fingerprint in HostKeyFingerprints ?? [])
         {
