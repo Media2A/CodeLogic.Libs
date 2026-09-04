@@ -19,7 +19,7 @@
     <PackageReference Include="Azure.Storage.Blobs" Version="12.29.1" />
     <PackageReference Include="FluentFTP" Version="54.2.0" />
     <PackageReference Include="Google.Cloud.Storage.V1" Version="4.15.0" />
-    <PackageReference Include="SSH.NET" Version="2025.1.0" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <PackageReference Include="WebDAVClient" Version="2.7.0" />
   </ItemGroup>
   <ItemGroup>
