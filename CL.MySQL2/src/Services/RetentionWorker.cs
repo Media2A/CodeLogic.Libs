@@ -13,7 +13,7 @@ namespace CL.MySQL2.Services;
 /// <para>
 /// The entry list is <b>live</b>: entities registered after the worker was constructed
 /// (the normal case — schema sync usually runs after <c>CodeLogic.StartAsync()</c>) are
-/// picked up by <see cref="TryRegister"/>, and the library starts the loop the first time
+/// picked up by <see cref="TryRegister(Type, string)"/>, and the library starts the loop the first time
 /// a <c>[RetainDays]</c> entity appears. <see cref="Start"/> is idempotent.
 /// </para>
 /// <para>
@@ -29,7 +29,9 @@ public sealed class RetentionWorker : IAsyncDisposable
     private readonly ConnectionManager _connectionManager;
     private readonly ILogger? _logger;
     // Live set, safe to mutate while the loop reads it: the loop enumerates a snapshot.
-    private readonly ConcurrentDictionary<Type, RetainDaysAttribute> _entries = new();
+    // Keyed by (entity, connection): the same entity can be synced against more than one
+    // named connection, and each must be purged on the connection it was registered with.
+    private readonly ConcurrentDictionary<(Type Type, string ConnectionId), RetainDaysAttribute> _entries = new();
     private readonly string _connectionId;
     private CancellationTokenSource? _cts;
     private Task? _loop;
@@ -48,14 +50,17 @@ public sealed class RetentionWorker : IAsyncDisposable
         _connectionManager = connectionManager;
         _logger = logger;
         _connectionId = connectionId;
-        foreach (var t in registeredEntities) TryRegister(t);
+        foreach (var t in registeredEntities) TryRegister(t, connectionId);
     }
 
     /// <summary>Whether any registered entity has a retention policy to run.</summary>
     public bool HasWork => !_entries.IsEmpty;
 
     /// <summary>The entity types currently covered by a retention policy.</summary>
-    public IReadOnlyCollection<Type> Entities => _entries.Keys.ToArray();
+    public IReadOnlyCollection<Type> Entities => _entries.Keys.Select(k => k.Type).Distinct().ToArray();
+
+    /// <summary>The (entity, connection) pairs currently covered by a retention policy.</summary>
+    public IReadOnlyCollection<(Type Type, string ConnectionId)> Registrations => _entries.Keys.ToArray();
 
     /// <summary>
     /// Adds <paramref name="entityType"/> to the live entry list if it carries
@@ -63,12 +68,19 @@ public sealed class RetentionWorker : IAsyncDisposable
     /// and was not already registered), which is the caller's cue to <see cref="Start"/>.
     /// Safe to call while the background loop is running.
     /// </summary>
-    public bool TryRegister(Type entityType)
+    public bool TryRegister(Type entityType) => TryRegister(entityType, _connectionId);
+
+    /// <summary>
+    /// As <see cref="TryRegister(Type)"/>, but records the connection the entity was
+    /// registered against so the purge runs against that database rather than the default.
+    /// </summary>
+    public bool TryRegister(Type entityType, string connectionId)
     {
         ArgumentNullException.ThrowIfNull(entityType);
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
         var attr = entityType.GetCustomAttribute<RetainDaysAttribute>();
         if (attr is null) return false;
-        return _entries.TryAdd(entityType, attr);
+        return _entries.TryAdd((entityType, connectionId), attr);
     }
 
     /// <summary>
@@ -80,8 +92,8 @@ public sealed class RetentionWorker : IAsyncDisposable
     public async Task<int> RunOnceAsync(CancellationToken ct = default)
     {
         var removed = 0;
-        foreach (var (entityType, attr) in _entries.ToArray())
-            removed += await PurgeEntityAsync(entityType, attr, ct).ConfigureAwait(false);
+        foreach (var (key, attr) in _entries.ToArray())
+            removed += await PurgeEntityAsync(key.Type, attr, key.ConnectionId, ct).ConfigureAwait(false);
         return removed;
     }
 
@@ -112,17 +124,17 @@ public sealed class RetentionWorker : IAsyncDisposable
         while (!ct.IsCancellationRequested)
         {
             // Snapshot per pass: entities registered mid-pass are picked up on the next one.
-            foreach (var (entityType, attr) in _entries.ToArray())
+            foreach (var (key, attr) in _entries.ToArray())
             {
                 if (ct.IsCancellationRequested) return;
                 try
                 {
-                    await PurgeEntityAsync(entityType, attr, ct).ConfigureAwait(false);
+                    await PurgeEntityAsync(key.Type, attr, key.ConnectionId, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { return; }
                 catch (Exception ex)
                 {
-                    _logger?.Warning($"[MySQL2] Retention purge failed for {entityType.Name}: {ex.Message}");
+                    _logger?.Warning($"[MySQL2] Retention purge failed for {key.Type.Name} on connection '{key.ConnectionId}': {ex.Message}");
                 }
             }
 
@@ -131,7 +143,8 @@ public sealed class RetentionWorker : IAsyncDisposable
         }
     }
 
-    private async Task<int> PurgeEntityAsync(Type entityType, RetainDaysAttribute attr, CancellationToken ct)
+    private async Task<int> PurgeEntityAsync(
+        Type entityType, RetainDaysAttribute attr, string connectionId, CancellationToken ct)
     {
         // Resolve column name via reflection — EntityMetadata<T> isn't reachable without
         // a type parameter, so we do the minimum lookup ourselves.
@@ -154,11 +167,11 @@ public sealed class RetentionWorker : IAsyncDisposable
             var affected = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
             {
                 await using var cmd = conn.CreateCommand();
-                _connectionManager.ApplyCommandTimeout(cmd, _connectionId);
+                _connectionManager.ApplyCommandTimeout(cmd, connectionId);
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@cutoff", cutoff);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, _connectionId, ct).ConfigureAwait(false);
+            }, connectionId, ct).ConfigureAwait(false);
 
             totalDeleted += affected;
 

@@ -10,7 +10,7 @@ namespace CL.PostgreSQL.Services;
 /// <see cref="RetainDaysAttribute"/>. Runs once per 24 hours; on first start it runs
 /// after a short delay so library startup isn't blocked by a potentially long delete.
 /// <para>
-/// The entry list is <b>live</b>: <see cref="Register"/> may add an entity at any time,
+/// The entry list is <b>live</b>: <see cref="Register(Type, string)"/> may add an entity at any time,
 /// including while the loop is running, and the library calls it from
 /// <c>SyncTableAsync</c> / <c>SyncSchemaAsync</c>. That matters because every documented
 /// flow registers entities <i>after</i> <c>CodeLogic.StartAsync()</c> — a snapshot taken
@@ -31,7 +31,7 @@ public sealed class RetentionWorker : IAsyncDisposable
 
     // Live entry list. Guarded by _entriesLock for mutation; readers take a snapshot, so
     // the loop can never observe a torn list while a new entity is being registered.
-    private readonly List<(Type EntityType, RetainDaysAttribute Attr)> _entries = [];
+    private readonly List<(Type EntityType, string ConnectionId, RetainDaysAttribute Attr)> _entries = [];
     private readonly Lock _entriesLock = new();
 
     private readonly string _connectionId;
@@ -51,7 +51,7 @@ public sealed class RetentionWorker : IAsyncDisposable
         _connectionManager = connectionManager;
         _logger = logger;
         _connectionId = connectionId;
-        foreach (var t in registeredEntities) Register(t);
+        foreach (var t in registeredEntities) Register(t, connectionId);
     }
 
     /// <summary>
@@ -59,20 +59,34 @@ public sealed class RetentionWorker : IAsyncDisposable
     /// <see cref="RetainDaysAttribute"/> and was not already registered — i.e. when there
     /// is now work that was not there before. Safe to call while the loop is running.
     /// </summary>
-    public bool Register(Type entityType)
+    public bool Register(Type entityType) => Register(entityType, _connectionId);
+
+    /// <summary>
+    /// As <see cref="Register(Type)"/>, but records the connection the entity was
+    /// registered against so the purge runs against that database rather than the
+    /// default. An entity synced to two connections is two entries.
+    /// </summary>
+    public bool Register(Type entityType, string connectionId)
     {
         ArgumentNullException.ThrowIfNull(entityType);
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
         var attr = entityType.GetCustomAttribute<RetainDaysAttribute>();
         if (attr is null) return false;
 
         lock (_entriesLock)
         {
-            if (_entries.Any(e => e.EntityType == entityType)) return false;
-            _entries.Add((entityType, attr));
+            if (_entries.Any(e => e.EntityType == entityType && e.ConnectionId == connectionId)) return false;
+            _entries.Add((entityType, connectionId, attr));
         }
 
-        _logger?.Debug($"[PostgreSQL] Retention registered for {entityType.Name} ({attr.Days} day(s)).");
+        _logger?.Debug($"[PostgreSQL] Retention registered for {entityType.Name} on '{connectionId}' ({attr.Days} day(s)).");
         return true;
+    }
+
+    /// <summary>The (entity, connection) pairs currently covered by a retention policy.</summary>
+    public IReadOnlyCollection<(Type Type, string ConnectionId)> Registrations
+    {
+        get { lock (_entriesLock) return [.. _entries.Select(e => (e.EntityType, e.ConnectionId))]; }
     }
 
     /// <summary>Whether any registered entity has a retention policy to run.</summary>
@@ -82,7 +96,7 @@ public sealed class RetentionWorker : IAsyncDisposable
     }
 
     /// <summary>Point-in-time copy of the entry list, safe to iterate without the lock.</summary>
-    private List<(Type EntityType, RetainDaysAttribute Attr)> Snapshot()
+    private List<(Type EntityType, string ConnectionId, RetainDaysAttribute Attr)> Snapshot()
     {
         lock (_entriesLock) return [.. _entries];
     }
@@ -96,8 +110,8 @@ public sealed class RetentionWorker : IAsyncDisposable
     public async Task<int> RunOnceAsync(CancellationToken ct = default)
     {
         var removed = 0;
-        foreach (var (entityType, attr) in Snapshot())
-            removed += await PurgeEntityAsync(entityType, attr, ct).ConfigureAwait(false);
+        foreach (var (entityType, connectionId, attr) in Snapshot())
+            removed += await PurgeEntityAsync(entityType, attr, connectionId, ct).ConfigureAwait(false);
         return removed;
     }
 
@@ -131,15 +145,15 @@ public sealed class RetentionWorker : IAsyncDisposable
         while (!ct.IsCancellationRequested)
         {
             // Snapshot per pass: an entity registered mid-pass is picked up on the next one.
-            foreach (var (entityType, attr) in Snapshot())
+            foreach (var (entityType, connectionId, attr) in Snapshot())
             {
                 try
                 {
-                    await PurgeEntityAsync(entityType, attr, ct).ConfigureAwait(false);
+                    await PurgeEntityAsync(entityType, attr, connectionId, ct).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    _logger?.Warning($"[PostgreSQL] Retention purge failed for {entityType.Name}: {ex.Message}");
+                    _logger?.Warning($"[PostgreSQL] Retention purge failed for {entityType.Name} on connection '{connectionId}': {ex.Message}");
                 }
             }
 
@@ -148,7 +162,8 @@ public sealed class RetentionWorker : IAsyncDisposable
         }
     }
 
-    private async Task<int> PurgeEntityAsync(Type entityType, RetainDaysAttribute attr, CancellationToken ct)
+    private async Task<int> PurgeEntityAsync(
+        Type entityType, RetainDaysAttribute attr, string connectionId, CancellationToken ct)
     {
         // Resolve column name via reflection — EntityMetadata<T> isn't reachable without
         // a type parameter, so we do the minimum lookup ourselves.
@@ -156,7 +171,7 @@ public sealed class RetentionWorker : IAsyncDisposable
         var tableName = !string.IsNullOrEmpty(tableAttr?.Name) ? tableAttr.Name! : entityType.Name;
         var schemaName = !string.IsNullOrEmpty(tableAttr?.Schema)
             ? tableAttr.Schema!
-            : PostgreSqlRuntimeOptions.DefaultSchemaFor(_connectionId);
+            : PostgreSqlRuntimeOptions.DefaultSchemaFor(connectionId);
 
         var prop = entityType.GetProperty(attr.TimestampColumn,
                        BindingFlags.Public | BindingFlags.Instance)
@@ -181,11 +196,11 @@ public sealed class RetentionWorker : IAsyncDisposable
                 $"ORDER BY {PostgreSqlDialect.Quote(colName)} LIMIT {attr.BatchSize} FOR UPDATE SKIP LOCKED)";
             var affected = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand(_connectionId);
+                await using var cmd = conn.CreateCommand(connectionId);
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@cutoff", cutoff);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, _connectionId, ct).ConfigureAwait(false);
+            }, connectionId, ct).ConfigureAwait(false);
 
             totalDeleted += affected;
 

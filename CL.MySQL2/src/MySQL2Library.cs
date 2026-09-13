@@ -50,7 +50,7 @@ public sealed class MySQL2Library : ILibrary
     // than on every poll. Null until the first check.
     private bool? _lastHealthy;
     private RetentionWorker? _retentionWorker;
-    private readonly HashSet<Type> _registeredEntities = new();
+    private readonly HashSet<(Type Type, string ConnectionId)> _registeredEntities = new();
 
     // ── Phase 1: Configure ────────────────────────────────────────────────────
 
@@ -217,7 +217,9 @@ public sealed class MySQL2Library : ILibrary
         // entry list is therefore live: RegisterEntity feeds it later arrivals and starts the
         // loop the first time a [RetainDays] entity shows up. Start() is idempotent.
         _retentionWorker = new RetentionWorker(
-            _connectionManager, context.Logger, _registeredEntities);
+            _connectionManager, context.Logger, []);
+        foreach (var (type, connectionId) in _registeredEntities)
+            _retentionWorker.TryRegister(type, connectionId);
         if (_retentionWorker.HasWork) _retentionWorker.Start();
 
         context.Logger.Info(_strings?.LibraryStarted ?? "MySQL2 library started");
@@ -582,7 +584,7 @@ public sealed class MySQL2Library : ILibrary
         bool createBackup = true,
         string connectionId = "Default") where T : class
     {
-        RegisterEntity(typeof(T));
+        RegisterEntity(typeof(T), connectionId);
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
     }
 
@@ -593,12 +595,12 @@ public sealed class MySQL2Library : ILibrary
     /// <c>CodeLogic.StartAsync()</c> is the normal case, so the worker cannot snapshot its
     /// entry list at construction time.
     /// </summary>
-    private void RegisterEntity(Type entityType)
+    private void RegisterEntity(Type entityType, string connectionId)
     {
-        _registeredEntities.Add(entityType);
+        _registeredEntities.Add((entityType, connectionId));
         var worker = _retentionWorker;
         if (worker is null) return;            // pre-start: OnStartAsync picks it up
-        if (worker.TryRegister(entityType)) worker.Start();
+        if (worker.TryRegister(entityType, connectionId)) worker.Start();
     }
 
     /// <summary>
@@ -634,7 +636,7 @@ public sealed class MySQL2Library : ILibrary
     {
         var types = entities as IReadOnlyList<Type> ?? entities.ToList();
         foreach (var t in types)
-            RegisterEntity(t);
+            RegisterEntity(t, connectionId);
         return TableSync.SyncTablesAsync(types, createBackup, connectionId, ct);
     }
 

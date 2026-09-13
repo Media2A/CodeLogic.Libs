@@ -50,7 +50,7 @@ public sealed class MSSQLLibrary : ILibrary
     // than on every poll. Null until the first check.
     private bool? _lastHealthy;
     private RetentionWorker? _retentionWorker;
-    private readonly HashSet<Type> _registeredEntities = new();
+    private readonly HashSet<(Type Type, string ConnectionId)> _registeredEntities = new();
 
     // ── Phase 1: Configure ────────────────────────────────────────────────────
 
@@ -211,8 +211,10 @@ public sealed class MSSQLLibrary : ILibrary
         lock (_registeredEntities)
         {
             _retentionWorker = new RetentionWorker(
-                _connectionManager, context.Logger, _registeredEntities);
+                _connectionManager, context.Logger, []);
         }
+        foreach (var (type, connectionId) in _registeredEntities)
+            _retentionWorker.TryRegister(type, connectionId);
         if (_retentionWorker.HasWork) _retentionWorker.Start();
 
         context.Logger.Info(_strings?.LibraryStarted ?? "SQL Server library started");
@@ -584,7 +586,7 @@ public sealed class MSSQLLibrary : ILibrary
         bool createBackup = true,
         string connectionId = "Default") where T : class
     {
-        RegisterEntity(typeof(T));
+        RegisterEntity(typeof(T), connectionId);
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
     }
 
@@ -612,7 +614,7 @@ public sealed class MSSQLLibrary : ILibrary
         CancellationToken ct = default)
     {
         var types = entities as IReadOnlyList<Type> ?? entities.ToList();
-        foreach (var t in types) RegisterEntity(t);
+        foreach (var t in types) RegisterEntity(t, connectionId);
         return TableSync.SyncTablesAsync(types, createBackup, connectionId, ct);
     }
 
@@ -623,12 +625,12 @@ public sealed class MSSQLLibrary : ILibrary
     /// <c>CodeLogic.StartAsync()</c> is the normal case, so the worker cannot snapshot its
     /// entry list at construction time.
     /// </summary>
-    private void RegisterEntity(Type entityType)
+    private void RegisterEntity(Type entityType, string connectionId)
     {
-        lock (_registeredEntities) _registeredEntities.Add(entityType);
+        lock (_registeredEntities) _registeredEntities.Add((entityType, connectionId));
         var worker = _retentionWorker;
         if (worker is null) return;            // pre-start: OnStartAsync picks it up
-        if (worker.TryRegister(entityType)) worker.Start();
+        if (worker.TryRegister(entityType, connectionId)) worker.Start();
     }
 
     /// <summary>
