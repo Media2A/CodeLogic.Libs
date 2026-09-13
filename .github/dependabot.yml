@@ -1,0 +1,45 @@
+version: 2
+
+# Dependency updates arrive as pull requests, which run the full suite (including the
+# MySQL, PostgreSQL and SQL Server container jobs) before anyone looks at them.
+#
+# Grouping matters here: fourteen libraries share most of their dependencies, so an
+# ungrouped config would open a dozen near-identical PRs every week.
+updates:
+  - package-ecosystem: nuget
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    groups:
+      # Database drivers change behaviour, not just version numbers. Kept in their own
+      # group so a driver bump is never buried in a batch of tooling updates.
+      db-providers:
+        patterns:
+          - "MySqlConnector"
+          - "Npgsql*"
+          - "Microsoft.Data.SqlClient*"
+          - "Microsoft.Data.Sqlite*"
+      test-tooling:
+        patterns:
+          - "xunit*"
+          - "Microsoft.NET.Test.Sdk"
+          - "coverlet*"
+      other:
+        patterns: ["*"]
+        exclude-patterns:
+          - "MySqlConnector"
+          - "Npgsql*"
+          - "Microsoft.Data.SqlClient*"
+          - "Microsoft.Data.Sqlite*"
+          - "xunit*"
+          - "Microsoft.NET.Test.Sdk"
+          - "coverlet*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: ["dependencies"]

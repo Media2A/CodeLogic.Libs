@@ -1,0 +1,70 @@
+name: Dependabot auto-merge
+
+# Merges a Dependabot pull request once the full suite is green — which, because the
+# promote workflow watches main, means the update publishes to nuget.org on its own.
+#
+# Deliberately NOT auto-merged:
+#   - major version bumps
+#   - the database providers (MySqlConnector, Npgsql, SqlClient, Sqlite)
+#
+# A driver's patch release can change SQL generation, type mapping or connection
+# behaviour in ways a passing suite will not necessarily notice — this repository spent
+# a long day on exactly that class of bug. Those land as PRs for a human to read.
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch update metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide
+        id: decide
+        run: |
+          set -euo pipefail
+          type='${{ steps.meta.outputs.update-type }}'
+          names='${{ steps.meta.outputs.dependency-names }}'
+
+          if [ "$type" = "version-update:semver-major" ]; then
+            echo "::notice::major update - leaving for review"
+            echo "merge=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$names" in
+            *MySqlConnector*|*Npgsql*|*SqlClient*|*Sqlite*)
+              echo "::notice::database provider update - leaving for review"
+              echo "merge=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "merge=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # --auto waits for the required checks rather than merging immediately, so the
+      # suite still gates the merge even though no human looked at it.
+      - name: Enable auto-merge
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --squash "${{ github.event.pull_request.html_url }}"
+
+      - name: Explain why it was left alone
+        if: steps.decide.outputs.merge == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.html_url }}" --body \
+            "Not auto-merged: this is either a major version bump or a database provider update. Both can change behaviour in ways a green suite will not catch, so this one wants a human. Merge it normally and the promote workflow will publish it."

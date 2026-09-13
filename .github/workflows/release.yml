@@ -20,7 +20,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Publishing to nuget.org cannot be undone - a version can be delisted but never
+  # replaced or reused. Nothing is packed until the full suite is green.
+  verify:
+    uses: ./.github/workflows/ci-tests.yml
+
   release:
+    needs: [verify]
     runs-on: ubuntu-latest
 
     steps:
@@ -169,6 +175,36 @@ jobs:
           ### Package versions
           $($versionLines | ForEach-Object { "- $_" } | Out-String)
           "@ | Set-Content 'artifacts/release-notes.md'
+
+      # Release 4.8.86 shipped five of fourteen packages and then died on the sixth:
+      # CL.MySQL2 had grown release notes past nuget.org's 35 000 character cap and was
+      # rejected with a 400 mid-loop. The five already up could not be withdrawn.
+      # Validate every package BEFORE pushing any of them.
+      - name: Pre-flight packages
+        if: steps.changes.outputs.has_changes == 'True'
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          count=0
+          for pkg in artifacts/*.nupkg; do
+            count=$((count + 1))
+            nuspec=$(unzip -p "$pkg" '*.nuspec' | tr -d '\n')
+            notes=$(printf '%s' "$nuspec" | sed -n 's|.*<releaseNotes>\(.*\)</releaseNotes>.*|\1|p' | wc -c)
+            if [ "$notes" -gt 35000 ]; then
+              echo "::error::$(basename "$pkg"): releaseNotes is $notes chars, nuget.org caps at 35000"
+              fail=1
+            fi
+            if ! printf '%s' "$nuspec" | grep -q '<id>'; then
+              echo "::error::$(basename "$pkg"): nuspec has no <id>"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::refusing to publish - a partial push cannot be undone"
+            exit 1
+          fi
+          echo "pre-flight OK: $count package(s)"
 
       - name: Push to NuGet.org
         if: steps.changes.outputs.has_changes == 'True'
