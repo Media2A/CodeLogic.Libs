@@ -55,6 +55,77 @@ jobs:
           done
           exit $fail
 
+  # MySQL2 and PostgreSQL have large live suites that self-skip without a reachable
+  # server. Before these jobs existed only their offline subset ran in CI, so the
+  # majority of each suite was never exercised on a push. Mirrors mssql-integration.
+  mysql2-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: cl_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      CL_MYSQL2_TEST_HOST: 127.0.0.1
+      CL_MYSQL2_TEST_PORT: '3306'
+      CL_MYSQL2_TEST_DB: cl_test
+      CL_MYSQL2_TEST_USER: root
+      CL_MYSQL2_TEST_PASS: ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run MySQL2 tests
+        run: dotnet test tests/MySQL2.Tests/MySQL2.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
+  postgresql-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: cl_test_pw
+          POSTGRES_DB: cl_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      CL_PG_TEST_HOST: 127.0.0.1
+      CL_PG_TEST_PORT: '5432'
+      CL_PG_TEST_DB: cl_test
+      CL_PG_TEST_USER: postgres
+      CL_PG_TEST_PASS: cl_test_pw
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run PostgreSQL tests
+        run: dotnet test tests/PostgreSQL.Tests/PostgreSQL.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
   mssql-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
