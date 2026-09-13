@@ -1,6 +1,7 @@
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
 using MySqlConnector;
+using CL.MySQL2.Core;
 
 namespace CL.MySQL2.Services;
 
@@ -179,14 +180,14 @@ public sealed class BackupManager
             var file = backupFile ?? GetLatestBackupFile(tableName);
             if (file is null || !File.Exists(file))
                 return Result<bool>.Failure(Error.Internal(
-                    "mysql.restore_not_found", $"No schema backup found for `{tableName}`."));
+                    "mysql.restore_not_found", $"No schema backup found for {MySqlDialect.Quote(tableName)}."));
 
             var content = await File.ReadAllTextAsync(file, ct).ConfigureAwait(false);
             // Keep only the CREATE TABLE statement (strip leading comment lines and trailing ';').
             var createIdx = content.IndexOf("CREATE TABLE", StringComparison.OrdinalIgnoreCase);
             if (createIdx < 0)
                 return Result<bool>.Failure(Error.Internal(
-                    "mysql.restore_invalid", $"Backup file for `{tableName}` has no CREATE TABLE statement."));
+                    "mysql.restore_invalid", $"Backup file for {MySqlDialect.Quote(tableName)} has no CREATE TABLE statement."));
             var createSql = content[createIdx..].TrimEnd().TrimEnd(';');
 
             _logger?.Warning($"[MySQL2] Restoring schema for `{tableName}` from {file} (table will be dropped and recreated).");
@@ -195,7 +196,7 @@ public sealed class BackupManager
             {
                 await using (var drop = conn.CreateCommand())
                 {
-                    drop.CommandText = $"DROP TABLE IF EXISTS `{tableName}`";
+                    drop.CommandText = $"DROP TABLE IF EXISTS {MySqlDialect.Quote(tableName)}";
                     await drop.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
                 await using (var create = conn.CreateCommand())
@@ -227,7 +228,7 @@ public sealed class BackupManager
         CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SHOW CREATE TABLE `{tableName}`";
+        cmd.CommandText = $"SHOW CREATE TABLE {MySqlDialect.Quote(tableName)}";
         await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (await reader.ReadAsync(ct).ConfigureAwait(false))
             return reader.GetString(1);

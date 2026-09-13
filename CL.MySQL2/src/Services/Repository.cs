@@ -61,9 +61,9 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
-            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var columnList = string.Join(", ", insertCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)}"));
             var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
-            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}); SELECT LAST_INSERT_ID();";
+            var sql = $"INSERT INTO {MySqlDialect.Quote(table)} ({columnList}) VALUES ({paramList}); SELECT LAST_INSERT_ID();";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -74,7 +74,7 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType) ?? DBNull.Value);
+                    cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -111,7 +111,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
-            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var columnList = string.Join(", ", insertCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)}"));
 
             var inserted = 0;
             var sw = Stopwatch.StartNew();
@@ -135,12 +135,12 @@ public sealed class Repository<T> where T : class, new()
                         {
                             var paramName = $"@p_{i}_{j}";
                             tupleParts[j] = paramName;
-                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!), insertCols[j].EffectiveStorageType) ?? DBNull.Value);
+                            cmd.Parameters.Add(TypeConverter.CreateParameter(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!), insertCols[j].EffectiveStorageType), insertCols[j].Attribute, insertCols[j].Property.PropertyType));
                         }
                         valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
                     }
 
-                    cmd.CommandText = $"INSERT INTO `{table}` ({columnList}) VALUES {string.Join(", ", valueTuples)};";
+                    cmd.CommandText = $"INSERT INTO {MySqlDialect.Quote(table)} ({columnList}) VALUES {string.Join(", ", valueTuples)};";
                     LogQuery(cmd.CommandText);
                     await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                     inserted += count;
@@ -173,13 +173,13 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
-            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var columnList = string.Join(", ", insertCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)}"));
             var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
             // Use the VALUES(col) function for the conflict update — portable across MySQL
             // (all versions) and MariaDB. The newer `... AS new` row-alias form is MySQL
             // 8.0.19+ only and is rejected by MariaDB.
-            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = VALUES(`{c.ColumnName}`)"));
-            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) ON DUPLICATE KEY UPDATE {updateList}; SELECT LAST_INSERT_ID();";
+            var updateList = string.Join(", ", insertCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)} = VALUES({MySqlDialect.Quote(c.ColumnName)})"));
+            var sql = $"INSERT INTO {MySqlDialect.Quote(table)} ({columnList}) VALUES ({paramList}) ON DUPLICATE KEY UPDATE {updateList}; SELECT LAST_INSERT_ID();";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -190,7 +190,7 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType) ?? DBNull.Value);
+                    cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -235,9 +235,9 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
-            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var columnList = string.Join(", ", insertCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)}"));
             // VALUES(col) conflict update — portable across MySQL and MariaDB (see UpsertAsync).
-            var updateList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}` = VALUES(`{c.ColumnName}`)"));
+            var updateList = string.Join(", ", insertCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)} = VALUES({MySqlDialect.Quote(c.ColumnName)})"));
 
             var affected = 0;
             var sw = Stopwatch.StartNew();
@@ -261,12 +261,12 @@ public sealed class Repository<T> where T : class, new()
                         {
                             var paramName = $"@p_{i}_{j}";
                             tupleParts[j] = paramName;
-                            cmd.Parameters.AddWithValue(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!), insertCols[j].EffectiveStorageType) ?? DBNull.Value);
+                            cmd.Parameters.Add(TypeConverter.CreateParameter(paramName, TypeConverter.ToDbValue(insertCols[j].Get(entity!), insertCols[j].EffectiveStorageType), insertCols[j].Attribute, insertCols[j].Property.PropertyType));
                         }
                         valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
                     }
 
-                    cmd.CommandText = $"INSERT INTO `{table}` ({columnList}) VALUES {string.Join(", ", valueTuples)} ON DUPLICATE KEY UPDATE {updateList};";
+                    cmd.CommandText = $"INSERT INTO {MySqlDialect.Quote(table)} ({columnList}) VALUES {string.Join(", ", valueTuples)} ON DUPLICATE KEY UPDATE {updateList};";
                     LogQuery(cmd.CommandText);
                     affected += await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
@@ -343,16 +343,16 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var insertCols = EntityMetadata<T>.Columns.Where(c => !c.IsAutoIncrement).ToArray();
-            var columnList = string.Join(", ", insertCols.Select(c => $"`{c.ColumnName}`"));
+            var columnList = string.Join(", ", insertCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)}"));
             var paramList  = string.Join(", ", insertCols.Select(c => $"@{c.ColumnName}"));
 
             // VALUES(col) refers to the would-be-inserted value; a bare `col` on the LHS/RHS is
             // the existing row. Portable across MySQL and MariaDB (the `AS new` row-alias form is
             // MySQL 8.0.19+ only). No ambiguity without the alias, so no table qualification needed.
             var updateClauses = incrementCols
-                .Select(c => $"`{c.ColumnName}` = `{c.ColumnName}` + VALUES(`{c.ColumnName}`)")
-                .Concat(setCols.Select(c => $"`{c.ColumnName}` = VALUES(`{c.ColumnName}`)"));
-            var sql = $"INSERT INTO `{table}` ({columnList}) VALUES ({paramList}) ON DUPLICATE KEY UPDATE {string.Join(", ", updateClauses)};";
+                .Select(c => $"{MySqlDialect.Quote(c.ColumnName)} = {MySqlDialect.Quote(c.ColumnName)} + VALUES({MySqlDialect.Quote(c.ColumnName)})")
+                .Concat(setCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)} = VALUES({MySqlDialect.Quote(c.ColumnName)})"));
+            var sql = $"INSERT INTO {MySqlDialect.Quote(table)} ({columnList}) VALUES ({paramList}) ON DUPLICATE KEY UPDATE {string.Join(", ", updateClauses)};";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -363,7 +363,7 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(insertSeed), col.EffectiveStorageType) ?? DBNull.Value);
+                    cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(insertSeed), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -403,7 +403,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
-            var sql = $"SELECT * FROM `{table}` WHERE `{pk.ColumnName}` = @id{SoftAnd()} LIMIT 1";
+            var sql = $"SELECT * FROM {MySqlDialect.Quote(table)} WHERE {MySqlDialect.Quote(pk.ColumnName)} = @id{SoftAnd()} LIMIT 1";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -413,7 +413,7 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
@@ -438,7 +438,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var col = EntityMetadata<T>.RequireColumn(column);
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT * FROM `{table}` WHERE `{col.ColumnName}` = @val{SoftAnd()}";
+            var sql = $"SELECT * FROM {MySqlDialect.Quote(table)} WHERE {MySqlDialect.Quote(col.ColumnName)} = @val{SoftAnd()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -448,7 +448,7 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@val", TypeConverter.ToDbValue(value, col.EffectiveStorageType) ?? DBNull.Value);
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@val", TypeConverter.ToDbValue(value, col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 var items = new List<T>();
@@ -473,7 +473,7 @@ public sealed class Repository<T> where T : class, new()
         try
         {
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT * FROM `{table}`{SoftWhere()}";
+            var sql = $"SELECT * FROM {MySqlDialect.Quote(table)}{SoftWhere()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -518,11 +518,11 @@ public sealed class Repository<T> where T : class, new()
             var table = EntityMetadata<T>.TableName;
             var offset = (page - 1) * pageSize;
             var orderClause = orderCol is not null
-                ? $" ORDER BY `{orderCol}` {(descending ? "DESC" : "ASC")}"
+                ? $" ORDER BY {MySqlDialect.Quote(orderCol)} {(descending ? "DESC" : "ASC")}"
                 : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM `{table}`{SoftWhere()}";
-            var dataSql = $"SELECT * FROM `{table}`{SoftWhere()}{orderClause} LIMIT {pageSize} OFFSET {offset}";
+            var countSql = $"SELECT COUNT(*) FROM {MySqlDialect.Quote(table)}{SoftWhere()}";
+            var dataSql = $"SELECT * FROM {MySqlDialect.Quote(table)}{SoftWhere()}{orderClause} LIMIT {pageSize} OFFSET {offset}";
 
             LogQuery(dataSql);
             var sw = Stopwatch.StartNew();
@@ -568,7 +568,7 @@ public sealed class Repository<T> where T : class, new()
         try
         {
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT COUNT(*) FROM `{table}`";
+            var sql = $"SELECT COUNT(*) FROM {MySqlDialect.Quote(table)}";
             LogQuery(sql);
 
             var count = await ExecuteAsync(async conn =>
@@ -596,8 +596,8 @@ public sealed class Repository<T> where T : class, new()
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
             var setCols = EntityMetadata<T>.Columns.Where(c => c != pk).ToArray();
-            var setClauses = string.Join(", ", setCols.Select(c => $"`{c.ColumnName}` = @{c.ColumnName}"));
-            var sql = $"UPDATE `{table}` SET {setClauses} WHERE `{pk.ColumnName}` = @__pk";
+            var setClauses = string.Join(", ", setCols.Select(c => $"{MySqlDialect.Quote(c.ColumnName)} = @{c.ColumnName}"));
+            var sql = $"UPDATE {MySqlDialect.Quote(table)} SET {setClauses} WHERE {MySqlDialect.Quote(pk.ColumnName)} = @__pk";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -608,8 +608,8 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in setCols)
-                    cmd.Parameters.AddWithValue($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@__pk", TypeConverter.ToDbValue(pk.Get(entity), pk.EffectiveStorageType) ?? DBNull.Value);
+                    cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@__pk", TypeConverter.ToDbValue(pk.Get(entity), pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -648,7 +648,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
-            var sql = $"DELETE FROM `{table}` WHERE `{pk.ColumnName}` = @id";
+            var sql = $"DELETE FROM {MySqlDialect.Quote(table)} WHERE {MySqlDialect.Quote(pk.ColumnName)} = @id";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -656,7 +656,7 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -676,8 +676,8 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
-            var sql = $"UPDATE `{table}` SET `{soft.ColumnName}` = @now " +
-                      $"WHERE `{pk.ColumnName}` = @id AND `{soft.ColumnName}` IS NULL";
+            var sql = $"UPDATE {MySqlDialect.Quote(table)} SET {MySqlDialect.Quote(soft.ColumnName)} = @now " +
+                      $"WHERE {MySqlDialect.Quote(pk.ColumnName)} = @id AND {MySqlDialect.Quote(soft.ColumnName)} IS NULL";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -685,8 +685,8 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@now", DateTime.UtcNow);
-                cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@now", DateTime.UtcNow, soft.Attribute, soft.Property.PropertyType));
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -702,10 +702,10 @@ public sealed class Repository<T> where T : class, new()
 
     // Soft-delete read-filter fragments — empty when the entity has no [SoftDelete].
     private static string SoftAnd()
-        => EntityMetadata<T>.SoftDeleteColumn is { } c ? $" AND `{c.ColumnName}` IS NULL" : string.Empty;
+        => EntityMetadata<T>.SoftDeleteColumn is { } c ? $" AND {MySqlDialect.Quote(c.ColumnName)} IS NULL" : string.Empty;
 
     private static string SoftWhere()
-        => EntityMetadata<T>.SoftDeleteColumn is { } c ? $" WHERE `{c.ColumnName}` IS NULL" : string.Empty;
+        => EntityMetadata<T>.SoftDeleteColumn is { } c ? $" WHERE {MySqlDialect.Quote(c.ColumnName)} IS NULL" : string.Empty;
 
     /// <summary>
     /// Atomically adjusts a numeric column by <paramref name="delta"/>. Negative for decrement.
@@ -721,7 +721,8 @@ public sealed class Repository<T> where T : class, new()
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
             var colName = MySqlExpressionVisitor.TranslateSelector(propertySelector);
-            var sql = $"UPDATE `{table}` SET `{colName}` = `{colName}` + @delta WHERE `{pk.ColumnName}` = @id";
+            var deltaCol = EntityMetadata<T>.RequireColumn(colName);
+            var sql = $"UPDATE {MySqlDialect.Quote(table)} SET {MySqlDialect.Quote(colName)} = {MySqlDialect.Quote(colName)} + @delta WHERE {MySqlDialect.Quote(pk.ColumnName)} = @id";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -729,8 +730,8 @@ public sealed class Repository<T> where T : class, new()
                 await using var cmd = conn.CreateCommand();
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@delta", delta);
-                cmd.Parameters.AddWithValue("@id", id);
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@delta", TypeConverter.ToDbValue(delta, deltaCol.EffectiveStorageType), deltaCol.Attribute, deltaCol.Property.PropertyType));
+                cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
@@ -771,7 +772,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var (whereClause, parameters) = MySqlExpressionVisitor.Translate(predicate);
-            var sql = $"SELECT * FROM `{table}` WHERE {whereClause}{SoftAnd()}";
+            var sql = $"SELECT * FROM {MySqlDialect.Quote(table)} WHERE {whereClause}{SoftAnd()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();

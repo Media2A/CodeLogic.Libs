@@ -296,7 +296,7 @@ internal sealed class MySqlExpressionVisitor : ExpressionVisitor
     {
         var col = GetColumnName(member);
         var alias = ResolveAlias(owner);
-        return string.IsNullOrEmpty(alias) ? $"`{col}`" : $"`{alias}`.`{col}`";
+        return string.IsNullOrEmpty(alias) ? $"{MySqlDialect.Quote(col)}" : $"{MySqlDialect.Quote(alias)}.{MySqlDialect.Quote(col)}";
     }
 
     private string ResolveAlias(Expression? owner)

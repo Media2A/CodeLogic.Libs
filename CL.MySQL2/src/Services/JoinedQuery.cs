@@ -217,7 +217,7 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
     // ── SQL assembly ──────────────────────────────────────────────────────────
 
     private string FromAndJoin() =>
-        $"`{_leftTable}` AS `{LeftAlias}` {_joinKeyword} `{_rightTable}` AS `{RightAlias}` ON {_onClause}";
+        $"{MySqlDialect.Quote(_leftTable)} AS {MySqlDialect.Quote(LeftAlias)} {_joinKeyword} {MySqlDialect.Quote(_rightTable)} AS {MySqlDialect.Quote(RightAlias)} ON {_onClause}";
 
     private (string Sql, Dictionary<string, object?> Params) BuildSelectSql()
     {

@@ -55,7 +55,7 @@ internal static class ProjectionCompiler
         Expression projectionBody,
         List<(string Sql, string Alias, Type CLRType)> columns)
     {
-        var selectList = string.Join(", ", columns.Select(c => $"{c.Sql} AS `{c.Alias}`"));
+        var selectList = string.Join(", ", columns.Select(c => $"{c.Sql} AS {MySqlDialect.Quote(c.Alias)}"));
         var materializer = BuildMaterializer<TResult>(projectionBody, columns);
 
         return new Compiled<T, TResult>
@@ -104,7 +104,7 @@ internal static class ProjectionCompiler
 
         // Build SELECT list with safe aliases.
         var selectList = string.Join(", ",
-            columns.Select(c => $"{c.Sql} AS `{c.Alias}`"));
+            columns.Select(c => $"{c.Sql} AS {MySqlDialect.Quote(c.Alias)}"));
 
         // Materializer: resolves alias → ordinal on first row, then reads by index.
         var materializer = BuildMaterializer<TResult>(projection.Body, columns);
@@ -149,7 +149,7 @@ internal static class ProjectionCompiler
                 var clrType = (prop as PropertyInfo)?.PropertyType
                               ?? (prop as FieldInfo)?.FieldType
                               ?? typeof(object);
-                return ($"`{colName}`", clrType);
+                return ($"{MySqlDialect.Quote(colName)}", clrType);
             }
 
             case UnaryExpression u when u.NodeType is ExpressionType.Convert or ExpressionType.ConvertChecked:

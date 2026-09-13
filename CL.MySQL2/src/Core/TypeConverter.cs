@@ -20,6 +20,8 @@ internal static class TypeConverter
         if (storageType != StorageType.Default)
             return GetStorageTypeDdl(column, storageType, clrType);
 
+        column = ResolveColumn(column, clrType);
+
         return column.DataType switch
         {
             DataType.TinyInt    => column.Unsigned ? "TINYINT UNSIGNED" : "TINYINT",
@@ -166,6 +168,120 @@ internal static class TypeConverter
         if (type.IsEnum)                 return new ColumnAttribute { DataType = DataType.Int };
 
         return new ColumnAttribute { DataType = DataType.Text };
+    }
+
+    /// <summary>
+    /// Builds a <see cref="MySqlParameter"/> with an explicit <see cref="MySqlDbType"/> derived
+    /// from the column's declared (or inferred) type, instead of letting the connector guess
+    /// from the CLR value. An inferred type can differ from the column's actual type — binding
+    /// a string to an integer key, for example — which forces a server-side conversion and
+    /// prevents the index on that column from being used.
+    /// </summary>
+    public static MySqlParameter CreateParameter(
+        string name, object? value, ColumnAttribute? column = null, Type? clrType = null)
+    {
+        var parameter = new MySqlParameter(name, value ?? DBNull.Value);
+        if (column is null) return parameter;
+
+        if (column.StorageType != StorageType.Default)
+        {
+            parameter.MySqlDbType = column.StorageType switch
+            {
+                StorageType.Binary     => MySqlDbType.Binary,
+                StorageType.VarBinary  => MySqlDbType.VarBinary,
+                StorageType.TinyBlob   => MySqlDbType.TinyBlob,
+                StorageType.Blob       => MySqlDbType.Blob,
+                StorageType.MediumBlob => MySqlDbType.MediumBlob,
+                StorageType.LongBlob   => MySqlDbType.LongBlob,
+                _                      => parameter.MySqlDbType
+            };
+            if (column.Size > 0) parameter.Size = column.Size;
+            return parameter;
+        }
+
+        var resolved = ResolveColumn(column, clrType ?? value?.GetType());
+        if (resolved.DataType == DataType.Unspecified) return parameter;
+
+        parameter.MySqlDbType = ToMySqlDbType(resolved.DataType);
+        if (resolved.Size > 0) parameter.Size = resolved.Size;
+        if (resolved.DataType == DataType.Decimal)
+        {
+            parameter.Precision = checked((byte)resolved.Precision);
+            parameter.Scale = checked((byte)resolved.Scale);
+        }
+        return parameter;
+    }
+
+    private static MySqlDbType ToMySqlDbType(DataType type) => type switch
+    {
+        DataType.TinyInt    => MySqlDbType.Byte,
+        DataType.SmallInt   => MySqlDbType.Int16,
+        DataType.MediumInt  => MySqlDbType.Int24,
+        DataType.Int        => MySqlDbType.Int32,
+        DataType.BigInt     => MySqlDbType.Int64,
+        DataType.Decimal    => MySqlDbType.NewDecimal,
+        DataType.Float      => MySqlDbType.Float,
+        DataType.Double     => MySqlDbType.Double,
+        DataType.Bit        => MySqlDbType.Bit,
+
+        DataType.Char       => MySqlDbType.String,
+        DataType.VarChar    => MySqlDbType.VarChar,
+        DataType.TinyText   => MySqlDbType.TinyText,
+        DataType.Text       => MySqlDbType.Text,
+        DataType.MediumText => MySqlDbType.MediumText,
+        DataType.LongText   => MySqlDbType.LongText,
+        DataType.Enum       => MySqlDbType.Enum,
+        DataType.Set        => MySqlDbType.Set,
+
+        DataType.Binary     => MySqlDbType.Binary,
+        DataType.VarBinary  => MySqlDbType.VarBinary,
+        DataType.TinyBlob   => MySqlDbType.TinyBlob,
+        DataType.Blob       => MySqlDbType.Blob,
+        DataType.MediumBlob => MySqlDbType.MediumBlob,
+        DataType.LongBlob   => MySqlDbType.LongBlob,
+
+        DataType.Date       => MySqlDbType.Date,
+        DataType.Time       => MySqlDbType.Time,
+        DataType.DateTime   => MySqlDbType.DateTime,
+        DataType.Timestamp  => MySqlDbType.Timestamp,
+        DataType.Year       => MySqlDbType.Year,
+
+        DataType.Json       => MySqlDbType.JSON,
+        DataType.Geometry   => MySqlDbType.Geometry,
+        _                   => MySqlDbType.VarChar
+    };
+
+    /// <summary>
+    /// Resolves a column whose <see cref="ColumnAttribute.DataType"/> is
+    /// <see cref="DataType.Unspecified"/> against its CLR property type, filling in the
+    /// inferred data type plus any size/unsigned facets the declaration left at their
+    /// defaults. A column that declares its type explicitly is returned unchanged.
+    /// </summary>
+    public static ColumnAttribute ResolveColumn(ColumnAttribute column, Type? clrType)
+    {
+        if (column.DataType != DataType.Unspecified || clrType is null) return column;
+
+        var inferred = InferColumn(clrType);
+        return new ColumnAttribute
+        {
+            Name       = column.Name,
+            DataType   = inferred.DataType,
+            Size       = column.Size > 0 ? column.Size : inferred.Size,
+            Precision  = column.Precision,
+            Scale      = column.Scale,
+            Unsigned   = column.Unsigned || inferred.Unsigned,
+            Primary    = column.Primary,
+            AutoIncrement = column.AutoIncrement,
+            NotNull    = column.NotNull,
+            Unique     = column.Unique,
+            Index      = column.Index,
+            DefaultValue = column.DefaultValue,
+            Comment    = column.Comment,
+            Charset    = column.Charset,
+            StorageType = column.StorageType,
+            OnUpdateCurrentTimestamp = column.OnUpdateCurrentTimestamp,
+            PreviousName = column.PreviousName
+        };
     }
 
     /// <summary>

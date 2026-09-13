@@ -115,7 +115,7 @@ internal static class JoinTranslator
     {
         expr = Unwrap(expr);
         if (expr is MemberExpression m && m.Expression is ParameterExpression)
-            return $"`{alias}`.`{GetColumnName(m.Member)}`";
+            return $"{MySqlDialect.Quote(alias)}.{MySqlDialect.Quote(GetColumnName(m.Member))}";
         throw new NotSupportedException(
             $"Join key/column must be a direct member access on a source parameter, got: {expr.NodeType} ({expr}).");
     }
@@ -126,7 +126,7 @@ internal static class JoinTranslator
         expr = Unwrap(expr);
         if (expr is MemberExpression m && m.Expression is ParameterExpression pe
             && aliasMap.TryGetValue(pe, out var alias))
-            return $"`{alias}`.`{GetColumnName(m.Member)}`";
+            return $"{MySqlDialect.Quote(alias)}.{MySqlDialect.Quote(GetColumnName(m.Member))}";
         throw new NotSupportedException(
             $"Join column must be a direct member access on a join source, got: {expr.NodeType} ({expr}).");
     }

@@ -93,7 +93,7 @@ internal static class SqlExpressionTranslator
                 var clrType = (m.Member as PropertyInfo)?.PropertyType
                               ?? (m.Member as FieldInfo)?.FieldType
                               ?? typeof(object);
-                return ($"`{colName}`", clrType);
+                return ($"{MySqlDialect.Quote(colName)}", clrType);
             }
 
             // Captured closure member — evaluate to a literal. Primitives only for column

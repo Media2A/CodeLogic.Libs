@@ -133,7 +133,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         };
         var (cond, parms) = MySqlExpressionVisitor.TranslateMulti(predicate, map);
         var keyword = negate ? "NOT EXISTS" : "EXISTS";
-        AppendSubqueryWhere($"{keyword} (SELECT 1 FROM `{innerTable}` WHERE {cond})", parms);
+        AppendSubqueryWhere($"{keyword} (SELECT 1 FROM {MySqlDialect.Quote(innerTable)} WHERE {cond})", parms);
         return this;
     }
 
@@ -185,7 +185,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
         var keyword = negate ? "NOT IN" : "IN";
         AppendSubqueryWhere(
-            $"`{outerCol}` {keyword} (SELECT `{innerCol}` FROM `{innerTable}`{whereSql})", parms);
+            $"{MySqlDialect.Quote(outerCol)} {keyword} (SELECT {MySqlDialect.Quote(innerCol)} FROM {MySqlDialect.Quote(innerTable)}{whereSql})", parms);
         return this;
     }
 
@@ -210,7 +210,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     public QueryBuilder<T> OrderBy<TKey>(Expression<Func<T, TKey>> keySelector)
     {
         var col = MySqlExpressionVisitor.TranslateSelector(keySelector);
-        _orderBys.Add($"`{col}` ASC");
+        _orderBys.Add($"{MySqlDialect.Quote(col)} ASC");
         _cursorOrders.Add(new CursorOrder(EntityMetadata<T>.RequireColumn(col), Descending: false));
         return this;
     }
@@ -218,7 +218,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     public QueryBuilder<T> OrderByDescending<TKey>(Expression<Func<T, TKey>> keySelector)
     {
         var col = MySqlExpressionVisitor.TranslateSelector(keySelector);
-        _orderBys.Add($"`{col}` DESC");
+        _orderBys.Add($"{MySqlDialect.Quote(col)} DESC");
         _cursorOrders.Add(new CursorOrder(EntityMetadata<T>.RequireColumn(col), Descending: true));
         return this;
     }
@@ -249,7 +249,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             JoinType.Cross => "CROSS JOIN",
             _              => "INNER JOIN"
         };
-        _joins.Add($"{keyword} `{table}` ON {condition}");
+        _joins.Add($"{keyword} {MySqlDialect.QuoteMultipart(table)} ON {condition}");
         return this;
     }
 
@@ -342,7 +342,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         var limitSql = _limit.HasValue ? $" LIMIT {_limit.Value}" : string.Empty;
         var offsetSql = _offset.HasValue ? $" OFFSET {_offset.Value}" : string.Empty;
 
-        var sql = $"SELECT {compiled.SelectList} FROM `{tableName}`{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+        var sql = $"SELECT {compiled.SelectList} FROM {MySqlDialect.Quote(tableName)}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
 
         return new ProjectedQuery<T, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
@@ -594,7 +594,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
             var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM `{tblName}`{joinSql}{whereClause}{groupBySql}";
+            var countSql = $"SELECT COUNT(*) FROM {MySqlDialect.Quote(tblName)}{joinSql}{whereClause}{groupBySql}";
             var dataSql = BuildSelectSql(page, pageSize).Sql;
 
             if (ShouldCache)
@@ -680,7 +680,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             }
 
             var orderSql = string.Join(", ", orders.Select(RenderOrder));
-            var sql = $"SELECT * FROM `{GetTableName()}`{whereClause} ORDER BY {orderSql} LIMIT {pageSize + 1}";
+            var sql = $"SELECT * FROM {MySqlDialect.Quote(GetTableName())}{whereClause} ORDER BY {orderSql} LIMIT {pageSize + 1}";
             var tableName = GetTableName();
 
             if (ShouldCache)
@@ -754,7 +754,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
-            var sql = $"SELECT COUNT(*) FROM `{tblName}`{joinSql}{whereClause}";
+            var sql = $"SELECT COUNT(*) FROM {MySqlDialect.Quote(tblName)}{joinSql}{whereClause}";
 
             if (ShouldSmartCache)
             {
@@ -834,7 +834,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var col = MySqlExpressionVisitor.TranslateSelector(selector);
             var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
-            var sql = $"SELECT AVG(`{col}`) FROM `{tableName}`{whereClause}";
+            var sql = $"SELECT AVG({MySqlDialect.Quote(col)}) FROM {MySqlDialect.Quote(tableName)}{whereClause}";
 
             LogQuery(sql);
             var value = await ExecuteAsync(async conn =>
@@ -861,7 +861,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var tableName = GetTableName();
             // Hard delete — bypass the soft-delete read filter so it targets all matching rows.
             var (whereClause, parms) = BuildWhereSql(applySoftDelete: false);
-            var sql = $"DELETE FROM `{tableName}`{whereClause}";
+            var sql = $"DELETE FROM {MySqlDialect.Quote(tableName)}{whereClause}";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -922,6 +922,9 @@ public sealed class QueryBuilder<T> where T : class, new()
                 var colMeta = EntityMetadata<T>.TryResolve(ma.Member.Name)
                               ?? throw new ArgumentException(
                                   $"Property '{ma.Member.Name}' is not mapped on '{typeof(T).Name}'.");
+                if (colMeta.IsAutoIncrement)
+                    throw new ArgumentException(
+                        $"Property '{ma.Member.Name}' is database-generated and cannot be updated.");
                 var colName = colMeta.ColumnName;
 
                 // If the value only depends on captured state (closure), bind as a parameter.
@@ -930,21 +933,21 @@ public sealed class QueryBuilder<T> where T : class, new()
                 if (ReferencesRowParameter(ma.Expression, rowParam))
                 {
                     var (sql, _) = SqlExpressionTranslator.Translate(ma.Expression, rowParam, null, null);
-                    sets.Add($"`{colName}` = {sql}");
+                    sets.Add($"{MySqlDialect.Quote(colName)} = {sql}");
                 }
                 else
                 {
                     var paramName = $"@upd_{idx++}";
                     var value = ClosureEvaluator.Evaluate(ma.Expression);
                     allParms[paramName] = TypeConverter.ToDbValue(value, colMeta.EffectiveStorageType);
-                    sets.Add($"`{colName}` = {paramName}");
+                    sets.Add($"{MySqlDialect.Quote(colName)} = {paramName}");
                 }
             }
 
             if (sets.Count == 0)
                 return Result<int>.Success(0);
 
-            var sql_full = $"UPDATE `{tableName}` SET {string.Join(", ", sets)}{whereClause}";
+            var sql_full = $"UPDATE {MySqlDialect.Quote(tableName)} SET {string.Join(", ", sets)}{whereClause}";
             LogQuery(sql_full);
 
             var affected = await ExecuteAsync(async conn =>
@@ -988,19 +991,28 @@ public sealed class QueryBuilder<T> where T : class, new()
         try
         {
             EnsureCursorNotSet(nameof(UpdateAsync));
-            foreach (var key in updates.Keys) EnsureValidColumn(key);
+            foreach (var key in updates.Keys)
+            {
+                EnsureValidColumn(key);
+                var column = EntityMetadata<T>.RequireColumn(key);
+                if (column.IsAutoIncrement)
+                    throw new ArgumentException(
+                        $"Column '{key}' is database-generated and cannot be updated.", nameof(updates));
+            }
             var tableName = GetTableName();
             // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
             var (whereClause, whereParms) = BuildWhereSql(applySoftDelete: false);
-            var setClauses = string.Join(", ", updates.Keys.Select(k => $"`{k}` = @upd_{k}"));
-            var sql = $"UPDATE `{tableName}` SET {setClauses}{whereClause}";
+            // Parameters are named by ordinal, never by the caller's key, so a key that is a
+            // valid column name but not a valid parameter name cannot corrupt the statement.
+            var mappedUpdates = updates.Select((pair, index) =>
+                (Pair: pair, Column: EntityMetadata<T>.RequireColumn(pair.Key), Parameter: $"@upd_{index}")).ToArray();
+            var setClauses = string.Join(", ", mappedUpdates.Select(item =>
+                $"{MySqlDialect.Quote(item.Column.ColumnName)} = {item.Parameter}"));
+            var sql = $"UPDATE {MySqlDialect.Quote(tableName)} SET {setClauses}{whereClause}";
 
             var allParms = new Dictionary<string, object?>(whereParms);
-            foreach (var kv in updates)
-            {
-                var meta = EntityMetadata<T>.RequireColumn(kv.Key);
-                allParms[$"@upd_{kv.Key}"] = TypeConverter.ToDbValue(kv.Value, meta.EffectiveStorageType);
-            }
+            foreach (var item in mappedUpdates)
+                allParms[item.Parameter] = TypeConverter.ToDbValue(item.Pair.Value, item.Column.EffectiveStorageType);
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -1038,7 +1050,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         var limitSql = effectiveLimit.HasValue ? $" LIMIT {effectiveLimit.Value}" : string.Empty;
         var offsetSql = effectiveOffset.HasValue ? $" OFFSET {effectiveOffset.Value}" : string.Empty;
 
-        var sql = $"SELECT {selectCols} FROM `{tableName}`{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+        var sql = $"SELECT {selectCols} FROM {MySqlDialect.Quote(tableName)}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
         return (sql, parms);
     }
 
@@ -1058,7 +1070,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         // Writers (UpdateAsync/DeleteAsync) pass applySoftDelete:false so they can still target
         // or restore soft-deleted rows.
         if (applySoftDelete && !_includeDeleted && EntityMetadata<T>.SoftDeleteColumn is { } sd)
-            clauses.Add($"`{sd.ColumnName}` IS NULL");
+            clauses.Add($"{MySqlDialect.Quote(sd.ColumnName)} IS NULL");
 
         if (clauses.Count == 0) return (string.Empty, allParms);
         return ($" WHERE {string.Join(" AND ", clauses)}", allParms);
@@ -1070,7 +1082,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             : $"{whereClause} AND {predicate}";
 
     private static string RenderOrder(CursorOrder order) =>
-        $"`{order.Column.ColumnName}` {(order.Descending ? "DESC" : "ASC")}";
+        $"{MySqlDialect.Quote(order.Column.ColumnName)} {(order.Descending ? "DESC" : "ASC")}";
 
     private void EnsureCursorNotSet(string operation)
     {
@@ -1108,7 +1120,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var col = MySqlExpressionVisitor.TranslateSelector(selector);
             var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
-            var sql = $"SELECT {func}(`{col}`) FROM `{tableName}`{whereClause}";
+            var sql = $"SELECT {func}({MySqlDialect.Quote(col)}) FROM {MySqlDialect.Quote(tableName)}{whereClause}";
 
             LogQuery(sql);
             var value = await ExecuteAsync(async conn =>

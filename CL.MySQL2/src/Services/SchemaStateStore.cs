@@ -1,4 +1,5 @@
 using CodeLogic.Core.Logging;
+using CL.MySQL2.Core;
 
 namespace CL.MySQL2.Services;
 
@@ -44,7 +45,7 @@ public sealed class SchemaStateStore
         try
         {
             var sql = $@"
-                CREATE TABLE IF NOT EXISTS `{StateTable}` (
+                CREATE TABLE IF NOT EXISTS {MySqlDialect.Quote(StateTable)} (
                     `TableName`     VARCHAR(255) NOT NULL,
                     `SchemaCrc`     VARCHAR(64)  NOT NULL,
                     `Status`        VARCHAR(20)  NOT NULL,
@@ -87,7 +88,7 @@ public sealed class SchemaStateStore
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
                     SELECT `TableName`, `SchemaCrc`, `Status`, `SyncMode`, `AppVersion`, `UpdatedAt`, `UpdatedByNode`
-                    FROM `{StateTable}` WHERE `TableName` = @tbl";
+                    FROM {MySqlDialect.Quote(StateTable)} WHERE `TableName` = @tbl";
                 cmd.Parameters.AddWithValue("@tbl", tableName);
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -128,7 +129,7 @@ public sealed class SchemaStateStore
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
-                    INSERT INTO `{StateTable}`
+                    INSERT INTO {MySqlDialect.Quote(StateTable)}
                         (`TableName`, `SchemaCrc`, `Status`, `SyncMode`, `AppVersion`, `ModelInfo`, `UpdatedAt`, `UpdatedByNode`)
                     VALUES (@tbl, @crc, @status, @mode, @appver, @model, UTC_TIMESTAMP(), @node)
                     ON DUPLICATE KEY UPDATE
@@ -169,7 +170,7 @@ public sealed class SchemaStateStore
             await _connectionManager.ExecuteWithConnectionAsync(async conn =>
             {
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandText = $"DELETE FROM `{StateTable}` WHERE `TableName` = @tbl";
+                cmd.CommandText = $"DELETE FROM {MySqlDialect.Quote(StateTable)} WHERE `TableName` = @tbl";
                 cmd.Parameters.AddWithValue("@tbl", tableName);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 return true;
@@ -195,7 +196,7 @@ public sealed class SchemaStateStore
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
                     SELECT `TableName`, `SchemaCrc`, `Status`, `SyncMode`, `AppVersion`, `UpdatedAt`, `UpdatedByNode`
-                    FROM `{StateTable}` ORDER BY `TableName` ASC";
+                    FROM {MySqlDialect.Quote(StateTable)} ORDER BY `TableName` ASC";
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 var records = new List<SchemaStateRecord>();

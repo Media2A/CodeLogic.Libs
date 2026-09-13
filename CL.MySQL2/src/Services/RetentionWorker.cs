@@ -100,7 +100,7 @@ public sealed class RetentionWorker : IAsyncDisposable
 
         while (!ct.IsCancellationRequested)
         {
-            var sql = $"DELETE FROM `{tableName}` WHERE `{colName}` < @cutoff LIMIT {attr.BatchSize}";
+            var sql = $"DELETE FROM {MySqlDialect.Quote(tableName)} WHERE {MySqlDialect.Quote(colName)} < @cutoff LIMIT {attr.BatchSize}";
             var affected = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
             {
                 await using var cmd = conn.CreateCommand();
