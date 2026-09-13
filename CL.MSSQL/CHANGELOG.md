@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A migration registered twice ran twice.** `Register` and `RegisterFrom` both appended
+  unconditionally, so pairing `RegisterMigrationsFrom(assembly)` with an explicit
+  `RegisterMigration(...)` held two copies, and both passed the apply filter. Registration
+  now deduplicates by migration id.
+- **`HealthChangedEvent` was declared but never raised.** It is now published on a health
+  state transition.
+
+### Fixed
+
 - **The schema-state sentinel was keyed on the bare table name**, so two entities with the
   same table name in different schemas shared one row and masked each other's CRC. The key
   is now `schema.table`; `SchemaStateStore` resolves an unqualified name against `dbo`, so

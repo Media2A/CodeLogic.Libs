@@ -5,6 +5,19 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ## 2026-09-13
 
+### Fixed (found while completing PostgreSQL coverage)
+
+- **A migration registered twice ran twice.** `Register` and `RegisterFrom` both appended
+  unconditionally, so the documented pairing of `RegisterMigrationsFrom(assembly)` with an
+  explicit `RegisterMigration(...)` held two copies of the same migration — and because the
+  apply pass filters candidates against a snapshot of applied ids taken before it starts,
+  both copies passed the filter. A non-idempotent body (an INSERT, a backfill, an ALTER
+  without IF NOT EXISTS) would be applied twice. Registration now deduplicates by
+  migration id.
+- **`HealthChangedEvent` was declared but never raised**, so anything subscribing to it
+  waited forever. It is now published when the aggregate health state transitions — not on
+  every poll — and a failing subscriber cannot turn a healthy library unhealthy.
+
 ### Fixed (SQL functions)
 
 - **`SqlFn.Round(value, digits)` generated invalid SQL.** PostgreSQL's two-argument

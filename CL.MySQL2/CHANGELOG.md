@@ -6,6 +6,15 @@ NuGet package version of `CodeLogic.MySQL2`.
 
 ## 2026-09-13
 
+### Fixed
+
+- **A migration registered twice ran twice.** `Register` and `RegisterFrom` both appended
+  unconditionally, so pairing `RegisterMigrationsFrom(assembly)` with an explicit
+  `RegisterMigration(...)` held two copies, and both passed the apply filter. Registration
+  now deduplicates by migration id.
+- **`HealthChangedEvent` was declared but never raised.** It is now published on a health
+  state transition.
+
 ### Added
 
 - `RetentionWorker.RunOnceAsync()` — the retention pass was only reachable from a

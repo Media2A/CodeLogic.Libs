@@ -45,6 +45,10 @@ public sealed class MSSQLLibrary : ILibrary
     private MigrationRunner? _migrationRunner;
     private MSSQLStrings? _strings;
     private bool _isEnabled;
+
+    // Last aggregate health reported, so HealthChangedEvent fires on a transition rather
+    // than on every poll. Null until the first check.
+    private bool? _lastHealthy;
     private RetentionWorker? _retentionWorker;
     private readonly HashSet<Type> _registeredEntities = new();
 
@@ -224,6 +228,29 @@ public sealed class MSSQLLibrary : ILibrary
     // ── Health check ──────────────────────────────────────────────────────────
 
     /// <inheritdoc/>
+
+    /// <summary>
+    /// Publishes <see cref="Events.HealthChangedEvent"/> when the aggregate health state
+    /// differs from the last one reported. Fire-and-forget: a subscriber must never be able
+    /// to fail a health check.
+    /// </summary>
+    private async Task ReportHealthAsync(bool healthy, string message)
+    {
+        if (_lastHealthy == healthy) return;
+        _lastHealthy = healthy;
+        if (_context?.Events is null) return;
+        try
+        {
+            await _context.Events.PublishAsync(
+                new Events.HealthChangedEvent("Default", healthy, message, DateTime.UtcNow))
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // A broken subscriber must not turn a healthy library into an unhealthy one.
+        }
+    }
+
     public async Task<HealthStatus> HealthCheckAsync()
     {
         if (!_isEnabled)
@@ -266,6 +293,7 @@ public sealed class MSSQLLibrary : ILibrary
 
             if (failedConnections.Count == 0)
             {
+                await ReportHealthAsync(true, "all connections operational").ConfigureAwait(false);
                 return new HealthStatus
                 {
                     Status = HealthStatusLevel.Healthy,
@@ -276,6 +304,7 @@ public sealed class MSSQLLibrary : ILibrary
 
             if (failedConnections.Count < connectionIds.Count)
             {
+                await ReportHealthAsync(false, $"failed connections: {string.Join(", ", failedConnections)}").ConfigureAwait(false);
                 return new HealthStatus
                 {
                     Status = HealthStatusLevel.Degraded,
@@ -286,6 +315,7 @@ public sealed class MSSQLLibrary : ILibrary
                 };
             }
 
+            await ReportHealthAsync(false, $"failed connections: {string.Join(", ", failedConnections)}").ConfigureAwait(false);
             return new HealthStatus
             {
                 Status = HealthStatusLevel.Unhealthy,
