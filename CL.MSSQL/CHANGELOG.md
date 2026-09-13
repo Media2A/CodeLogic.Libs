@@ -10,6 +10,37 @@
 - Documented `SqlFn` and the transaction-scoped `GetRepository<T>(tx)` / `Query<T>(tx)`
   accessors in the queries guide, and added the missing soft-delete and retention sections to
   the schema guide — the index page had linked to them all along.
+- Corrected more comments carried over from the MySQL port: `[Column(PreviousName = ...)]`
+  renames via `EXEC sys.sp_rename`, not `CHANGE COLUMN`; the LIKE escaper escapes `%`, `_`
+  and `[`, not a backslash; column references are bracket-quoted, not backtick-quoted; and
+  `UpsertAsync` does not use any `AS new` alias syntax — it stages the row in a table
+  variable and matches it with `UPDLOCK`/`HOLDLOCK` under a `SERIALIZABLE` transaction.
+- **Raw SQL cannot join a `TransactionScope`.** The queries guide showed `ExecuteSqlAsync`
+  calls inside an open scope being committed by `tx.CommitAsync()`; they in fact open their
+  own connection and run outside the transaction. The example is replaced with an explicit
+  warning and the supported alternatives.
+- Flagged the configuration settings that are declared but not yet read by the library, so
+  they are no longer documented as working knobs: `QueryTimeoutMs`, `MaxInClauseValues`
+  (no cap is applied to generated `IN (...)` lists), `PreparedStatementCacheSize`,
+  `N1DetectorThreshold`, `DefaultStringSize`, `CacheEnabledOverride`, `DefaultTtlSeconds`
+  and `PublishEvents` — plus `MaxBatchInsertSize`, which `GetRepository<T>()` does not pass
+  to the repository it builds.
+- Marked the N+1 detector as not wired up. The setting, the event and
+  `QueryObservability.RecordN1` all exist, but nothing counts repeats or publishes the
+  event, so `N1QueryDetectedEvent` never fires today.
+- Fixed the `MinPoolSize` default in the configuration table: it is `0`, not `1`.
+- Fixed the imperative-migration example, which would not compile — the `Migration` base
+  supplies `Version` and `Description` from its `(appVersion, order, description)`
+  constructor and neither is virtual.
+- Corrected the retention description: each pass loops until a batch deletes fewer rows than
+  `BatchSize`, not until it deletes zero; and the background worker only starts if an entity
+  carrying `[RetainDays]` is already registered when the library starts, so a purge for an
+  entity synced later must be driven through `RetentionWorker.RunOnceAsync()`.
+- Clarified that table-version invalidation is skipped for tables with live `SmartCachePool`
+  entries, that `QueryCache.Enabled` / `TimeQuantizeSeconds` are internal rather than part of
+  the public facade, and that `MaxMemoryMb` is advisory (eviction is by entry count).
+- Noted that composition-time guard errors (unsupported expressions, `.Join` after
+  `.OrderBy`, `WhereExists` on the outer table) throw rather than returning a `Result`.
 
 ### Added
 

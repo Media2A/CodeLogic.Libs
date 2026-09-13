@@ -81,7 +81,7 @@ public sealed class SyncResult
 
     /// <summary>
     /// True when the table was skipped via the <c>__schema_state</c> CRC fast-path
-    /// (the model is unchanged), so no <c>information_schema</c> diffing or DDL ran.
+    /// (the model is unchanged), so no <c>pg_catalog</c> diffing or DDL ran.
     /// </summary>
     public bool Skipped { get; init; }
 

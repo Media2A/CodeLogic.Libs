@@ -30,7 +30,8 @@ public sealed class CacheConfiguration : ConfigModelBase
     public int MaxMemoryMb { get; set; } = 256;
 
     /// <summary>
-    /// Default TTL used when <c>WithCache()</c> is called without arguments.
+    /// Intended default cache lifetime. Not currently applied — <c>WithCache</c> has no
+    /// parameterless overload, so every caching query supplies its own <see cref="System.TimeSpan"/>.
     /// </summary>
     [ConfigField(Label = "Default TTL (seconds)", Min = 1,
         Description = "Default cache lifetime when .WithCache() has no TTL argument.",
@@ -48,7 +49,10 @@ public sealed class CacheConfiguration : ConfigModelBase
         Group = "Behavior", Order = 21)]
     public int TimeQuantizeSeconds { get; set; } = 60;
 
-    /// <summary>Whether the cache publishes hit/miss events on the event bus.</summary>
+    /// <summary>
+    /// Intended switch for publishing cache hit/miss events. Not currently applied —
+    /// <c>CacheHitEvent</c> / <c>CacheMissEvent</c> are published whenever an event bus is bound.
+    /// </summary>
     [ConfigField(Label = "Publish Cache Events",
         Description = "Emit CacheHitEvent / CacheMissEvent for observability.",
         Group = "Observability", Order = 30)]

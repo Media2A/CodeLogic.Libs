@@ -81,7 +81,7 @@ you want something the CLR type does not imply, such as `Jsonb` for a `string`.
 | `SqlQueryAsync<T>()` / `SqlScalarAsync<T>()` / `ExecuteSqlAsync()` | Parameterised raw SQL. |
 | `BeginTransactionAsync()` | An `await using` scope that rolls back unless committed. |
 | `Migrations` | The migration runner: `MigrateAsync`, `RollbackAsync`, `GetPendingAsync`. |
-| `RegisterDatabase(id, config)` | Add a connection at runtime. |
+| `ConnectionManager.RegisterConfiguration(config, id)` | Add a connection at runtime. |
 | `HealthCheckAsync()` | Per-connection health for the framework's health endpoint. |
 | `GetCacheStats()` / `GetCachePoolStats()` | Cache counters. |
 
@@ -111,14 +111,14 @@ var rows = await pg.Query<User>("Reporting").Where(u => u.Email != null).ToListA
 Register one at runtime instead of in config:
 
 ```csharp
-pg.RegisterDatabase("Tenant42", new PostgreSqlDatabaseConfig
+pg.ConnectionManager.RegisterConfiguration(new PostgreSqlDatabaseConfig
 {
     Host = "tenant42.db.internal",
     Database = "tenant42",
     Username = "app",
     Password = secret,
     SslMode = PostgreSqlSslMode.VerifyFull,
-});
+}, "Tenant42");
 ```
 
 ## Configuration
@@ -153,19 +153,19 @@ pg.RegisterDatabase("Tenant42", new PostgreSqlDatabaseConfig
 | `database` / `username` / `password` | `""` | Connection credentials. |
 | `sslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, `VerifyFull`. |
 | `sslCertificatePath` / `sslKeyPath` / `sslRootCertificatePath` | `null` | Client certificate, its key, and the CA bundle for `VerifyCA` / `VerifyFull`. |
-| `defaultSchema` | `public` | Applied as `search_path`, and the schema an entity targets when `[Table]` declares none. |
+| `defaultSchema` | `public` | Applied as the connection's `search_path`. It does not move entities: a `[Table]` without a `Schema` is always mapped to the literal `public` schema. |
 | `applicationName` | `null` | Reported to the server; visible in `pg_stat_activity`. |
 | `minPoolSize` / `maxPoolSize` | `1` / `100` | Connection-pool bounds. |
 | `connectionLifetime` | `300` | Seconds a pooled connection may sit idle before being closed. |
 | `connectionTimeout` / `commandTimeout` | `30` / `30` | Seconds to wait opening a connection / running a command. |
 | `syncMode` | `production` | See [Schema & Migrations](schema-migrations.md). |
-| `maxBatchInsertSize` | `500` | Rows per batched insert, capped further by the parameter limit. |
-| `maxInClauseValues` | `1000` | Largest generated `IN` list before it is chunked. |
+| `maxBatchInsertSize` | `500` | Intended rows per batched insert. Not currently read — the repository's own 500-row default applies, capped further by the parameter limit. |
+| `maxInClauseValues` | `1000` | Advisory only. Generated `IN` lists are not chunked; every value is emitted in one list. |
 | `slowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
-| `captureExplainOnSlowQuery` | `true` | Attach `EXPLAIN (FORMAT JSON)` to slow-query events. |
-| `n1DetectorThreshold` | `0` | Warn when one query template repeats this often in a request scope. 0 disables. |
-| `transientRetryCount` / `transientRetryBaseDelayMs` | `3` / `50` | Retry policy for serialization failures and deadlocks. |
-| `defaultStringSize` | `255` | `varchar` length for a `string` column with no explicit `Size`. |
+| `captureExplainOnSlowQuery` | `true` | Reserved. `EXPLAIN` capture is not implemented; `SlowQueryEvent.ExplainJson` is always null. |
+| `n1DetectorThreshold` | `0` | Reserved. The N+1 detector is not implemented; the setting has no effect. |
+| `transientRetryCount` / `transientRetryBaseDelayMs` | `3` / `50` | Retry policy for SQLSTATE `40001`, `40P01` and `55P03`. |
+| `defaultStringSize` | `255` | Reserved. Type inference uses a hard-coded 255; changing this has no effect. |
 
 ### TLS
 
@@ -217,7 +217,7 @@ Events published on the framework bus (`CL.PostgreSQL.Events`):
 | `DatabaseConnectedEvent` / `DatabaseDisconnectedEvent` | A connection opens or closes. |
 | `TableSyncedEvent` | A table is created or altered; carries the schema, table and statements. |
 | `QueryExecutedEvent` | After every query — SQL, elapsed ms, row count, cache-hit flag. |
-| `SlowQueryEvent` | A query crosses `slowQueryThresholdMs`; carries the JSON plan. |
+| `SlowQueryEvent` | A query crosses `slowQueryThresholdMs`. (`ExplainJson` is reserved and always null.) |
 | `CacheHitEvent` / `CacheMissEvent` | A cached read is served or falls through. |
-| `N1QueryDetectedEvent` | One query template repeats past the detector threshold. |
+| `N1QueryDetectedEvent` | Declared for future use — the detector is not implemented, so this is never published. |
 | `HealthChangedEvent` | Health state transitions. |

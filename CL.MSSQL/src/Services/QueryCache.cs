@@ -31,8 +31,8 @@ public static class QueryCache
     private static readonly ConcurrentDictionary<string, Lazy<Task<object?>>> _inflight =
         new(StringComparer.Ordinal);
 
-    /// <summary>How far from <c>UtcNow</c> a DateTime parameter must be to qualify for
-    /// quantization. 30 days covers typical "last N days" windows without catching
+    /// <summary>How close to <c>UtcNow</c> a DateTime parameter must be to qualify for
+    /// quantization. 365 days covers typical "last N days" windows without catching
     /// far-future / far-past absolute dates.</summary>
     private static readonly TimeSpan QuantizeRelevance = TimeSpan.FromDays(365);
 

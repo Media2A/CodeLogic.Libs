@@ -206,7 +206,7 @@ internal sealed class SchemaAnalyzer
     /// Computes a stable CRC32 (8-char lowercase hex) of the entity's desired schema,
     /// derived from <see cref="GenerateCreateTable"/>. Used by the <c>__schema_state</c>
     /// sentinel: when the stored CRC matches this value the table is skipped without any
-    /// <c>information_schema</c> diffing. The CRC is order-independent and ignores cosmetic
+    /// <c>pg_catalog</c> diffing. The CRC is order-independent and ignores cosmetic
     /// differences (the <c>IF NOT EXISTS</c> noise and whitespace).
     /// </summary>
     public string ComputeSchemaCrc(Type entityType) =>
@@ -499,7 +499,7 @@ internal sealed class SchemaAnalyzer
         return sb.ToString();
     }
 
-    // ── INFORMATION_SCHEMA queries ────────────────────────────────────────────
+    // ── pg_catalog queries ────────────────────────────────────────────────────
 
     private static async Task<Dictionary<string, ColumnInfo>> GetExistingColumnsAsync(
         NpgsqlConnection connection,
@@ -512,7 +512,7 @@ internal sealed class SchemaAnalyzer
         await using var cmd = connection.CreateCommand();
         // format_type gives the canonical type text ("character varying(255)") that
         // BuildExpectedTypeString is written to match, so the comparison is like-for-like
-        // instead of comparing a DDL spelling against information_schema's data_type.
+        // instead of comparing a DDL spelling against a catalog type name.
         cmd.CommandText = """
             SELECT a.attname,
                    pg_catalog.format_type(a.atttypid, a.atttypmod),
@@ -619,7 +619,7 @@ internal sealed class SchemaAnalyzer
     }
 
     /// <summary>
-    /// Builds the statements that reproduce MySQL's <c>ON UPDATE CURRENT_TIMESTAMP</c>.
+    /// Builds the statements behind <see cref="Models.ColumnAttribute.OnUpdateCurrentTimestamp"/>.
     /// PostgreSQL has no such column clause, so a <c>BEFORE UPDATE</c> row trigger assigns
     /// the column instead. The trigger function is per column so that two touch columns on
     /// one table do not collide, and every statement is idempotent.
@@ -793,15 +793,11 @@ internal sealed class SchemaAnalyzer
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Thorough column-diff check. Returns true if the existing DB column differs from
-    /// the model in any meaningful way (type/size, nullability, auto-increment, default,
-    /// on-update-timestamp, charset, comment).
-    /// </summary>
-    /// <summary>
-    /// Decides whether a live column differs from the model in a way that needs DDL.
+    /// Decides whether a live column differs from the model in a way that needs DDL —
+    /// type/size, nullability, identity-ness, default, collation or comment.
     /// <para>
     /// Every facet is compared in a canonical form rather than by raw string equality.
-    /// That matters more here than in the MySQL analyzer: PostgreSQL reports types through
+    /// That matters here because PostgreSQL reports types through
     /// <c>format_type</c> ("character varying(255)", "timestamp with time zone") while the
     /// model generates its own spelling, and defaults come back with a type cast attached.
     /// Comparing those literally would report a difference on nearly every column of every

@@ -21,7 +21,7 @@ public enum SchemaSyncStatus
 /// <summary>
 /// Owns the <c>__schema_state</c> sentinel table: one row per model holding a CRC of the model's
 /// desired schema plus reconciliation status and audit metadata. The CRC lets schema sync skip a
-/// table entirely (no <c>information_schema</c> diffing) when nothing has changed.
+/// table entirely (no <c>pg_catalog</c> diffing) when nothing has changed.
 /// </summary>
 public sealed class SchemaStateStore
 {

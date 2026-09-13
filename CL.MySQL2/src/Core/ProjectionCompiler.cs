@@ -133,9 +133,10 @@ internal static class ProjectionCompiler
 
     /// <summary>
     /// Translate a single column-level expression into a MySQL SQL fragment and carry
-    /// the CLR type so the materializer knows how to convert. Only covers the shapes the
-    /// SELECT visitor currently understands — the wider aggregation visitor (task #4)
-    /// will extend this with SqlFn and aggregates.
+    /// the CLR type so the materializer knows how to convert. Only covers the shapes an
+    /// ungrouped SELECT understands: plain column access (through Convert nodes). Grouped
+    /// projections go through <see cref="SqlExpressionTranslator"/> instead, which is what
+    /// handles <c>SqlFn</c> and the aggregate calls.
     /// </summary>
     private static (string Sql, Type CLRType) TranslateColumnExpression(Expression expr)
     {

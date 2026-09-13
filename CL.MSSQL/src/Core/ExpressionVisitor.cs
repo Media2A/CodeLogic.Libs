@@ -330,7 +330,7 @@ internal sealed class SqlServerExpressionVisitor : ExpressionVisitor
     }
 
     /// <summary>
-    /// Builds a backtick-quoted column reference, qualified by the alias mapped to
+    /// Builds a bracket-quoted column reference, qualified by the alias mapped to
     /// <paramref name="owner"/> when a multi-source alias map is in play, or by the single
     /// <c>_tableAlias</c> otherwise. With no alias the column is left unqualified — exactly
     /// the single-table behaviour that predates joins.
@@ -367,8 +367,9 @@ internal sealed class SqlServerExpressionVisitor : ExpressionVisitor
     private static object? GetValue(Expression expression) => ClosureEvaluator.Evaluate(expression);
 
     /// <summary>
-    /// Escapes LIKE special characters (%, _, \) in a user-supplied value so it is treated
-    /// as a literal, not as a wildcard pattern. Non-string values pass through unchanged.
+    /// Escapes T-SQL LIKE special characters (<c>%</c>, <c>_</c>, <c>[</c>) in a user-supplied
+    /// value so it is treated as a literal, not as a wildcard pattern. Non-string values pass
+    /// through unchanged.
     /// </summary>
     private static object? EscapeLikeValue(object? value)
     {

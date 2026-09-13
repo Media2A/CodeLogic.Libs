@@ -30,7 +30,7 @@ mssql.Query<Order>()
     .Where(o => o.CreatedUtc >= DateTime.UtcNow.AddDays(-30));
 ```
 
-Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`, capped at `MaxInClauseValues`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
+Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`; an empty collection becomes `1 = 0`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
 
 ## Subquery filters — `EXISTS` / `IN`
 
@@ -284,25 +284,13 @@ await mssql.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
 await tx.CommitAsync();      // without this, disposal rolls back
 ```
 
-Raw SQL inside the same scope:
-
-```csharp
-await using TransactionScope tx = await mssql.BeginTransactionAsync();
-try
-{
-    await mssql.ExecuteSqlAsync("UPDATE accounts SET balance = balance - @amt WHERE id = @from",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@from"] = 1L });
-    await mssql.ExecuteSqlAsync("UPDATE accounts SET balance = balance + @amt WHERE id = @to",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@to"] = 2L });
-
-    await tx.CommitAsync();
-}
-catch
-{
-    await tx.RollbackAsync();   // or just let the scope dispose
-    throw;
-}
-```
+> **Raw SQL cannot join a transaction scope.** `SqlQueryAsync` / `ExecuteSqlAsync` /
+> `SqlScalarAsync` take a `connectionId`, not a `TransactionScope`, and always open their own
+> connection — so calling them while a scope is open runs them *outside* that transaction
+> (and they may block on the locks it holds). Keep transactional work on the repository and
+> the query builder, both of which accept the scope. A raw statement that must be
+> transactional belongs in an `IMigration`, whose `IMigrationContext` exposes the runner's
+> `Connection` and `Transaction` directly.
 
 > Statements inside an explicit transaction scope are **never** transient-retried — the whole transaction is the caller's to retry. The result cache and smart-cache pools are also disabled inside a transaction. See [Performance & Caching](performance.md).
 

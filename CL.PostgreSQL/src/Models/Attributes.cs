@@ -96,13 +96,20 @@ public sealed class ColumnAttribute : Attribute
     /// <summary>Default value expression (e.g., "0", "'active'", "CURRENT_TIMESTAMP").</summary>
     public string? DefaultValue { get; set; }
 
-    /// <summary>Column-level character set override (for string types). Optional.</summary>
+    /// <summary>
+    /// Column-level <c>COLLATE</c> override for text columns (for example
+    /// <c>"en_US.utf8"</c>). Despite the name this is a collation, not a character set —
+    /// PostgreSQL character encoding is a database-wide property. Optional.
+    /// </summary>
     public string? Charset { get; set; }
 
     /// <summary>Column comment. Optional.</summary>
     public string? Comment { get; set; }
 
-    /// <summary>Whether this column is UNSIGNED (for numeric types).</summary>
+    /// <summary>
+    /// Carried for cross-library model compatibility only. PostgreSQL has no unsigned
+    /// integer types, so this flag never changes the generated DDL or the bound parameter.
+    /// </summary>
     public bool Unsigned { get; set; } = false;
 
     /// <summary>
@@ -241,7 +248,7 @@ public sealed class RetainDaysAttribute : Attribute
 
     /// <summary>
     /// The property name on the entity that holds the timestamp to compare
-    /// (e.g. <c>nameof(FooRecord.CreatedUtc)</c>). Must map to a DATETIME column.
+    /// (e.g. <c>nameof(FooRecord.CreatedUtc)</c>). Must map to a timestamp column.
     /// </summary>
     public string TimestampColumn { get; }
 
@@ -262,14 +269,15 @@ public sealed class RetainDaysAttribute : Attribute
 
 /// <summary>
 /// Marks an entity for <b>soft deletes</b>. <see cref="CL.PostgreSQL.Services.Repository{T}.DeleteAsync(object, System.Threading.CancellationToken)"/>
-/// sets the named timestamp column to the current UTC time instead of issuing a physical DELETE, and
-/// reads through <c>mysql.Query&lt;T&gt;()</c> and the repository getters automatically exclude
+/// sets the named timestamp column to the client's current UTC time (bound as a parameter, not a
+/// server-side <c>now()</c>) instead of issuing a physical DELETE, and
+/// reads through <c>pg.Query&lt;T&gt;()</c> and the repository getters automatically exclude
 /// rows where that column is set (<c>WHERE col IS NULL</c>). Opt back in to deleted rows with
 /// <c>.IncludeDeleted()</c> on a query, or purge for real with
 /// <see cref="CL.PostgreSQL.Services.Repository{T}.HardDeleteAsync(object, System.Threading.CancellationToken)"/>.
 /// <para>
 /// The referenced property must be a nullable <see cref="System.DateTime"/> mapped to a
-/// NULL-able <c>DATETIME</c> column. Auto soft-delete filtering applies to single-table
+/// NULL-able <c>timestamptz</c> column. Auto soft-delete filtering applies to single-table
 /// queries and repository reads — not to joins, subqueries, or bulk
 /// <c>UpdateAsync</c>/<c>DeleteAsync</c> on the query builder.
 /// </para>

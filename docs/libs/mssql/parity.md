@@ -10,7 +10,7 @@
 | LINQ predicates and functions | SQL Server `bit`, `LIKE`, `DATEPART`, `CONVERT`, `DATEADD`/`DATEDIFF_BIG`, `COALESCE`, and `CONCAT` SQL |
 | Joins, subqueries, projections, grouping | Typed and raw joins, projection pushdown, aggregates, and compiled materializers |
 | Offset and cursor paging | `TOP` or `OFFSET … FETCH`, stable PK tie-breaking, and null-safe cursor equality |
-| Transactions and raw SQL | `SqlConnection`, `SqlCommand`, and `SqlTransaction` |
+| Transactions and raw SQL | `SqlConnection`, `SqlCommand`, and `SqlTransaction`; repositories and the query builder enlist in a `TransactionScope`, raw SQL does not |
 | Soft delete and retention | Automatic filters and repeated `DELETE TOP (@batch)` |
 | Cache and invalidation | In-process/custom stores, smart pools, table versions, and events |
 | Schema synchronization | `sys.*` catalogs; schemas, identities, defaults, checks, keys, indexes with `INCLUDE`, FKs, collations, and comments |

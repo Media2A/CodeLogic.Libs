@@ -10,9 +10,11 @@ namespace CL.PostgreSQL.Services;
 /// <see cref="RetainDaysAttribute"/>. Runs once per 24 hours; on first start it runs
 /// after a short delay so library startup isn't blocked by a potentially long delete.
 /// <para>
-/// Each purge pass runs <c>DELETE FROM {table} WHERE {col} &lt; NOW() - INTERVAL N DAY LIMIT batchSize</c>
-/// repeatedly until a pass deletes zero rows. That keeps individual transactions small
-/// (friendly to InnoDB's undo log) while still converging on empty.
+/// PostgreSQL has no <c>LIMIT</c> on <c>DELETE</c>, so each pass deletes a batch selected by
+/// <c>ctid</c> — <c>DELETE … WHERE ctid IN (SELECT ctid … ORDER BY {col} LIMIT batchSize
+/// FOR UPDATE SKIP LOCKED)</c> — and repeats until a batch comes back short. That keeps each
+/// transaction small, which is easier on autovacuum and on concurrent writers, while still
+/// converging on empty.
 /// </para>
 /// </summary>
 public sealed class RetentionWorker : IAsyncDisposable

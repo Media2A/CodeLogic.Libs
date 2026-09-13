@@ -322,8 +322,8 @@ public sealed class Repository<T> where T : class, new()
     /// Inserts <paramref name="insertSeed"/> if no UNIQUE/PRIMARY-KEY conflict occurs;
     /// otherwise applies increment / set semantics to the listed properties on conflict.
     /// Properties NOT listed in either array are insert-only — present in the
-    /// <c>VALUES</c> clause but absent from <c>ON DUPLICATE KEY UPDATE</c> (so they don't
-    /// change on conflict — useful for <c>created_utc</c> style columns). Property names
+    /// <c>VALUES</c> clause but absent from the <c>ON CONFLICT … DO UPDATE SET</c> list (so
+    /// they don't change on conflict — useful for <c>created_utc</c> style columns). Property names
     /// resolve through <see cref="EntityMetadata{T}"/> so callers can use
     /// <c>nameof(...)</c> for compile-time-safe column references.
     /// </summary>
@@ -335,8 +335,8 @@ public sealed class Repository<T> where T : class, new()
     /// <c>col = EXCLUDED.col</c> on conflict. Defaults to empty.</param>
     /// <param name="conflictTarget">Unique key to arbitrate on; see <see cref="UpsertAsync"/>.</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>Rows affected (PostgreSQL: 1 = insert, 2 = update with changes, 0 = update with
-    /// no change).</returns>
+    /// <returns>Rows affected. PostgreSQL counts an <c>ON CONFLICT … DO UPDATE</c> row once,
+    /// so this is 1 whether the row was inserted or updated.</returns>
     /// <exception cref="ArgumentException">
     /// A name in <paramref name="incrementProperties"/> or <paramref name="setProperties"/>
     /// does not resolve to a property on <typeparamref name="T"/>, refers to an

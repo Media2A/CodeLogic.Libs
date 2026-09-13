@@ -83,7 +83,7 @@ var all = await mssql.Query<Account>().IncludeDeleted().ToListAsync();   // over
 
 `[RetainDays(days, timestampColumn)]` opts an entity into a background `RetentionWorker` that
 deletes rows older than `days` in bounded `DELETE TOP (@batch)` passes (`BatchSize` default
-5000) until drained.
+5000), looping until one pass deletes fewer rows than `BatchSize`.
 
 ```csharp
 [Table(Name = "audit_log", Schema = "dbo")]
@@ -95,20 +95,29 @@ public class AuditLog
 }
 ```
 
-The worker runs on a timer once the library starts. `RetentionWorker.RunOnceAsync()` performs
-a single purge pass synchronously and returns the number of rows deleted — useful for a
-maintenance command, or for a test that should not wait out the timer.
+The worker is created during the library's start phase, waits 5 minutes, then runs every 24
+hours. It only starts if, **at that moment**, at least one entity registered through
+`SyncTableAsync<T>` / `SyncSchemaAsync` already carries `[RetainDays]` — entities you sync
+after `CodeLogic.StartAsync()` has returned are not picked up by that background loop.
+
+The library keeps its worker instance private, so for an operator-triggered or test purge
+construct one yourself and call `RunOnceAsync()`, which purges every entity you hand it and
+returns the number of rows deleted:
+
+```csharp
+var worker = new RetentionWorker(mssql.ConnectionManager, logger, [typeof(AuditLog)]);
+int removed = await worker.RunOnceAsync();
+```
 
 ## Imperative migrations
 
 Implement `IMigration` or derive from `Migration`, register instances, then inspect or execute the ordered plan.
 
 ```csharp
-public sealed class SeedRoles : Migration
+// The Migration base takes (appVersion, order, description); Version and Description are
+// supplied by that constructor and are not virtual.
+public sealed class SeedRoles() : Migration("1.0.0", 1, "Seed roles")
 {
-    public override MigrationVersion Version => new("1.0.0", 1);
-    public override string Description => "Seed roles";
-
     public override Task UpAsync(IMigrationContext db, CancellationToken ct) =>
         db.ExecuteAsync("INSERT INTO [app].[roles] ([name]) VALUES (N'admin')", ct: ct);
 
@@ -116,11 +125,16 @@ public sealed class SeedRoles : Migration
         db.ExecuteAsync("DELETE FROM [app].[roles] WHERE [name]=N'admin'", ct: ct);
 }
 
-mssql.RegisterMigration(new SeedRoles());
-var pending = await mssql.GetPendingMigrationsAsync();
-await mssql.MigrateAsync();
+mssql.RegisterMigration(new SeedRoles());              // or RegisterMigrationsFrom(assembly)
+var pending = await mssql.GetPendingMigrationsAsync();  // IReadOnlyList<MigrationPlanItem>
+await mssql.MigrateAsync();                             // caller-driven; never auto-run on start
 await mssql.RollbackAsync(new MigrationVersion("1.0.0", 0));
 ```
+
+`DownAsync` is optional: the `Migration` base throws `NotSupportedException` unless you
+override it, so a rollback that reaches an irreversible migration fails rather than skipping it.
+SQL Server commits DDL implicitly, so a migration that mixes `ALTER` with data changes is not
+atomic — keep `UpAsync` idempotent and split heavy DDL from heavy backfill.
 
 Migration IDs, descriptions, checksums, and application times are stored in `[dbo].[__migrations]` with `SYSUTCDATETIME()`.
 

@@ -14,7 +14,7 @@ Two complementary mechanisms keep a database in step with the code:
 | Property | Default | Purpose |
 |---|---|---|
 | `Name` | class name | Table name. |
-| `Schema` | `public` | PostgreSQL schema. Every statement is qualified with it. |
+| `Schema` | `public` | PostgreSQL schema. Every statement is qualified with it. The fallback is the literal `public`, not the connection's `defaultSchema`. |
 | `Comment` | — | Emitted as `COMMENT ON TABLE`. |
 | `Collation` | — | Column collation applied to text columns. |
 | `Unlogged` | `false` | Faster writes, not crash-safe, not replicated. |
@@ -58,7 +58,7 @@ With no explicit `DataType` the CLR type decides, and it picks a native PostgreS
 | `DateOnly` / `TimeOnly` / `TimeSpan` | `date` / `time` / `interval` |
 | `byte[]` | `bytea` |
 | `IPAddress` | `inet` |
-| `T[]` | the matching array type |
+| `short[]`, `int[]`, `long[]`, `string[]`, `decimal[]`, `Guid[]`, `bool[]` | the matching array type (any other array falls back to `text`) |
 | enum | `integer` |
 
 ### Other attributes
@@ -162,7 +162,9 @@ pg.RegisterMigrationsFrom(typeof(Program).Assembly);
 
 var pending = await pg.GetPendingMigrationsAsync();
 var result = await pg.Migrations.MigrateAsync();
-await pg.Migrations.RollbackAsync(toVersion: "1.3.0");
+
+// Rollback takes a MigrationVersion, and removes everything strictly newer than it.
+await pg.Migrations.RollbackAsync(new MigrationVersion("1.3.0", 0));
 ```
 
 Migrations are ordered by `(appVersion, order)`, run inside a transaction, and recorded in a
@@ -173,8 +175,10 @@ them re-ran everything.
 
 The runner takes the same advisory lock as declarative sync, so only one node migrates.
 
-`IMigrationContext` gives you `ExecuteAsync`, `QueryAsync<T>`, `ScalarAsync<T>`,
-`TableExistsAsync` and the analyzer, all on the migration's transaction.
+`IMigrationContext` gives you `ExecuteAsync`, `QueryAsync<T>`, `ScalarAsync<T>` and
+`SyncTableAsync<T>` (a bridge into declarative sync), plus the raw `Connection` and
+`Transaction` — everything but the DDL inside `SyncTableAsync` runs on the migration's
+transaction, since PostgreSQL commits DDL immediately.
 
 ## Soft delete & retention
 
@@ -190,13 +194,22 @@ public sealed class User
 Reads filter `"deleted_utc" IS NULL`; `DeleteAsync` stamps it instead of removing the row.
 `IncludeDeleted()` opts a query out, and `HardDeleteAsync` really deletes.
 
-`[RetainDays(90, nameof(CreatedUtc))]` starts a background worker that prunes rows past the
-window in batches. Because PostgreSQL has no `DELETE … LIMIT`, each batch selects rows by
+`[RetainDays(90, nameof(CreatedUtc))]` is picked up by a background worker that prunes rows
+past the window in batches.
+
+> **Ordering matters.** The worker is built during `CodeLogic.StartAsync()` from the entity
+> types registered so far, and that list is snapshotted at construction. Entities are
+> registered by `SyncTableAsync` / `SyncSchemaAsync`, so a model synced *after*
+> `StartAsync()` — the order shown in every quick-start on these pages — is never seen by
+> the worker and its retention policy never runs. Either sync your entities between
+> `CodeLogic.ConfigureAsync()` and `CodeLogic.StartAsync()`, or drive purges yourself with
+> `RetentionWorker.RunOnceAsync()`. Because PostgreSQL has no `DELETE … LIMIT`, each batch selects rows by
 `ctid` with `FOR UPDATE SKIP LOCKED`, so concurrent passes do not block one another.
 
-The worker runs on a timer once the library starts. `RetentionWorker.RunOnceAsync()` performs
-a single purge pass synchronously and returns the number of rows deleted — useful for a
-maintenance command, or for a test that should not wait out the timer.
+The worker runs on a timer once the library starts: a first pass five minutes after startup,
+then once every 24 hours. `RetentionWorker.RunOnceAsync()` performs a single purge pass
+synchronously and returns the number of rows deleted — useful for a maintenance command, or
+for a test that should not wait out the timer.
 
 ## Backups & restore
 
@@ -204,7 +217,7 @@ maintenance command, or for a test that should not wait out the timer.
 await pg.BackupManager.BackupTableSchemaAsync("users", "public");
 await pg.BackupManager.BackupDatabaseSchemaAsync();
 await pg.BackupManager.CleanupOldBackupsAsync(olderThanDays: 30);
-await pg.RestoreTableSchemaAsync("users", "public");
+await pg.RestoreSchemaAsync("users", "public");   // BackupManager.RestoreTableSchemaAsync + clears __schema_state
 ```
 
 PostgreSQL has no `SHOW CREATE TABLE`, so the DDL is reconstructed from the catalogs —

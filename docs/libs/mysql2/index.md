@@ -16,7 +16,7 @@ This overview covers loading, the entry points, and configuration. The deep mate
 
 - **[Query Builder](queries.md)** — `Where` / subquery filters / ordering / paging / typed and raw joins / projections / `GroupBy` aggregates / terminals / bulk update & delete / raw SQL / transactions.
 - **[Schema & Migrations](schema-migrations.md)** — entity attributes, `SyncMode` & `SchemaSyncLevel`, `SyncTableAsync` / `SyncSchemaAsync`, the CRC sentinel, soft delete, retention, imperative migrations, backups & restore.
-- **[Performance & Caching](performance.md)** — the result cache, time quantization, table-version invalidation, `SmartCachePool`, multi-node coordination, transient retry, the N+1 detector, slow-query / `EXPLAIN`, compiled materializers, projection pushdown.
+- **[Performance & Caching](performance.md)** — the result cache, time quantization, table-version invalidation, `SmartCachePool`, multi-node coordination, transient retry, slow-query reporting, compiled materializers, projection pushdown.
 
 ## Install & load
 
@@ -38,10 +38,10 @@ Set your connection in `config.mysql.json` (auto-generated on first run) before 
 
 ## Define an entity
 
-A mapped class is a plain C# type decorated with attributes from `CL.MySQL2.Attributes`. The full attribute set is documented on the [Schema & Migrations](schema-migrations.md) page.
+A mapped class is a plain C# type decorated with attributes from `CL.MySQL2.Models`. The full attribute set is documented on the [Schema & Migrations](schema-migrations.md) page.
 
 ```csharp
-using CL.MySQL2.Attributes;
+using CL.MySQL2.Models;
 
 [Table(Name = "users")]
 public class User
@@ -71,7 +71,7 @@ var repo = mysql.GetRepository<User>();
 
 // Create
 Result<User> created = await repo.InsertAsync(new User { Email = "ada@example.com", DisplayName = "Ada" });
-Result<int>  many    = await repo.InsertManyAsync(batch);   // chunked at MaxBatchInsertSize (default 500)
+Result<int>  many    = await repo.InsertManyAsync(batch);   // chunked at 500 rows per INSERT
 
 // Read
 Result<User?>       byId   = await repo.GetByIdAsync(1L);
@@ -143,23 +143,23 @@ Two files are written on first run.
 | `MinPoolSize` / `MaxPoolSize` | `1` / `100` | Pool bounds. |
 | `ConnectionLifetime` | `300` | Seconds before a pooled connection is recycled. |
 | `ConnectionTimeout` / `CommandTimeout` | `30` / `30` | Seconds. |
-| `EnableSsl` | `false` | TLS to the server; `SslCertificatePath`, `AllowPublicKeyRetrieval` related. |
-| `CharacterSet` / `Collation` | `utf8mb4` / `utf8mb4_unicode_ci` | Session defaults. |
+| `EnableSsl` | `false` | Sets `SslMode=Required`. `AllowPublicKeyRetrieval` is applied too; `SslCertificatePath` is not. |
+| `CharacterSet` / `Collation` | `utf8mb4` / `utf8mb4_unicode_ci` | `CharacterSet` goes into the connection string; `Collation` is informational only. |
 | `SyncMode` | `Production` | `Developer` · `Production` · `Migration`. See [Schema & Migrations](schema-migrations.md). |
 | `SchemaSyncLevel` | `Safe` | Low-level cap: `None` · `Safe` · `Additive` · `Full`. |
 | `AllowDestructiveSync` | `false` | Legacy flag honoured under `SyncMode` mapping. |
-| `BackupDirectory` | `null` | Where schema backups are written. |
+| `BackupDirectory` | `null` | Not applied — backups always go to `DataDirectory/backups`. |
 | `SlowQueryThresholdMs` | `1000` | Threshold for `SlowQueryEvent`. |
-| `CaptureExplainOnSlowQuery` | `true` | Attach `EXPLAIN` JSON to slow-query events. |
-| `QueryTimeoutMs` | `30000` | Per-query timeout. |
-| `MaxBatchInsertSize` | `500` | Insert/upsert chunk size. |
-| `MaxInClauseValues` | `1000` | `IN (...)` value cap. |
-| `PreparedStatementCacheSize` | `256` | Per-connection prepared-statement cache. |
+| `CaptureExplainOnSlowQuery` | `true` | Not applied — no `EXPLAIN` is run; `SlowQueryEvent.ExplainJson` is always null. |
+| `QueryTimeoutMs` | `30000` | Not applied — `CommandTimeout` governs command timeouts. |
+| `MaxBatchInsertSize` | `500` | Not applied — insert/upsert chunking is fixed at 500 rows. |
+| `MaxInClauseValues` | `1000` | Not applied — generated `IN (...)` lists are uncapped. |
+| `PreparedStatementCacheSize` | `256` | Not applied — not written into the connection string. |
 | `TransientRetryCount` | `3` | Deadlock/lock-wait retries (0 disables). |
 | `TransientRetryBaseDelayMs` | `50` | Base backoff; exponential + jitter. |
-| `N1DetectorThreshold` | `0` | Repeats before an N+1 is flagged (0 = off). |
-| `CacheEnabledOverride` | `null` | Per-database cache on/off override. |
-| `DefaultStringSize` | `255` | `VarChar` size when `Size` is unset. |
+| `N1DetectorThreshold` | `0` | Not applied — the N+1 detector is not wired up. |
+| `CacheEnabledOverride` | `null` | Not applied — only the global cache switch is honoured. |
+| `DefaultStringSize` | `255` | Not applied — inferred string columns are always `VARCHAR(255)`. |
 
 `config.mysql.cache.json` (section `mysql.cache`) controls the result cache.
 
@@ -167,10 +167,10 @@ Two files are written on first run.
 |---------|---------|-------|
 | `Enabled` | `true` | Global cache switch. |
 | `MaxEntries` | `10000` | Entry ceiling. |
-| `MaxMemoryMb` | `256` | Approximate memory budget. |
-| `DefaultTtlSeconds` | `60` | Default TTL when none is given. |
+| `MaxMemoryMb` | `256` | Advisory only — eviction is by entry count, not memory. |
+| `DefaultTtlSeconds` | `60` | Not applied — `WithCache` always takes an explicit `TimeSpan`. |
 | `TimeQuantizeSeconds` | `60` | Quantization bucket for DateTime params (see [Performance](performance.md)). |
-| `PublishEvents` | `true` | Publish cache hit/miss events to the bus. |
+| `PublishEvents` | `true` | Not applied — hit/miss events publish whenever an event bus is bound. |
 
 Full caching behaviour is on the [Performance & Caching](performance.md) page.
 
@@ -195,10 +195,10 @@ All events implement `IEvent` and publish to the CodeLogic event bus.
 | `DatabaseDisconnectedEvent` | A connection is closed or lost. |
 | `TableSyncedEvent` | A table is reconciled by schema sync. |
 | `QueryExecutedEvent` | Any query completes (carries a `CacheHit` flag). |
-| `SlowQueryEvent` | A query exceeds `SlowQueryThresholdMs` (carries `ExplainJson`). |
+| `SlowQueryEvent` | A query exceeds `SlowQueryThresholdMs`. Its `ExplainJson` field is always null — plan capture is not implemented. |
 | `CacheHitEvent` | A cached result satisfies a read. |
 | `CacheMissEvent` | A cacheable read misses the cache. |
-| `N1QueryDetectedEvent` | The N+1 detector trips (`N1DetectorThreshold` > 0). |
+| `N1QueryDetectedEvent` | Declared but never published — the N+1 detector is not implemented. |
 | `HealthChangedEvent` | The health status transitions. |
 
 ## See also

@@ -103,7 +103,10 @@ public sealed class MySqlDatabaseConfig
     [ConfigField(Label = "Enable SSL/TLS", RequiresRestart = true, Group = "Security", Order = 40)]
     public bool EnableSsl { get; set; } = false;
 
-    /// <summary>Path to a client SSL certificate file. Optional.</summary>
+    /// <summary>
+    /// Path to a client SSL certificate file. Optional. Not currently applied — the connection
+    /// string sets only <c>SslMode</c> from <see cref="EnableSsl"/>.
+    /// </summary>
     [ConfigField(Label = "SSL Certificate Path", Description = "Optional path to a client certificate file.",
         RequiresRestart = true, Group = "Security", Order = 41)]
     public string? SslCertificatePath { get; set; }
@@ -117,7 +120,10 @@ public sealed class MySqlDatabaseConfig
     [ConfigField(Label = "Character Set", RequiresRestart = true, Group = "Advanced", Order = 50, Collapsed = true)]
     public string CharacterSet { get; set; } = "utf8mb4";
 
-    /// <summary>Default collation. Default: "utf8mb4_unicode_ci".</summary>
+    /// <summary>
+    /// Default collation. Default: "utf8mb4_unicode_ci". Informational only — it is not written
+    /// into the connection string; table collation comes from <c>[Table(Collation = ...)]</c>.
+    /// </summary>
     [ConfigField(Label = "Collation", RequiresRestart = true, Group = "Advanced", Order = 51, Collapsed = true)]
     public string Collation { get; set; } = "utf8mb4_unicode_ci";
 
@@ -186,8 +192,8 @@ public sealed class MySqlDatabaseConfig
         };
 
     /// <summary>
-    /// Directory for schema backup files.
-    /// Null = <c>DataDirectory/backups</c>.
+    /// Intended directory for schema backup files. Not currently applied —
+    /// <see cref="Services.BackupManager"/> always writes to <c>DataDirectory/backups</c>.
     /// </summary>
     [ConfigField(Label = "Backup Directory", Description = "Override where schema backups are stored. Blank = default data/backups folder.",
         Group = "Schema Sync", Order = 62, Collapsed = true)]
@@ -200,8 +206,8 @@ public sealed class MySqlDatabaseConfig
     public int SlowQueryThresholdMs { get; set; } = 1000;
 
     /// <summary>
-    /// Per-database override for the global cache switch. Null = inherit global
-    /// <see cref="CacheConfiguration.Enabled"/>; true/false forces on/off for this DB.
+    /// Intended per-database override for the global cache switch. Not currently applied —
+    /// only the global <see cref="CacheConfiguration.Enabled"/> switch is honoured.
     /// </summary>
     [ConfigField(Label = "Cache Enabled Override",
         Description = "Override the global cache switch for this database only. Leave empty to inherit.",
@@ -209,27 +215,37 @@ public sealed class MySqlDatabaseConfig
     public bool? CacheEnabledOverride { get; set; } = null;
 
     /// <summary>
-    /// Default per-query timeout in milliseconds. Maps to MySqlConnector's command timeout
-    /// when it's finer than <see cref="CommandTimeout"/> (which is in seconds).
+    /// Intended default per-query timeout in milliseconds. Not currently applied — commands
+    /// use MySqlConnector's <see cref="CommandTimeout"/> (seconds) from the connection string.
     /// </summary>
     [ConfigField(Label = "Query Timeout (ms)", Min = 0,
         Description = "Default per-query timeout in ms. Used when no .WithTimeout() override is set.",
         Group = "Timeouts", Order = 32, Collapsed = true)]
     public int QueryTimeoutMs { get; set; } = 30_000;
 
-    /// <summary>Chunk size used by <c>InsertManyAsync</c> when emitting batched INSERTs.</summary>
+    /// <summary>
+    /// Intended chunk size for <c>InsertManyAsync</c> / <c>UpsertManyAsync</c>. Not currently
+    /// applied — <c>MySQL2Library.GetRepository&lt;T&gt;</c> constructs the repository with its
+    /// own default of 500 rows per batched statement.
+    /// </summary>
     [ConfigField(Label = "Max Batch Insert Size", Min = 1, Max = 10_000,
         Description = "Number of rows per batched INSERT statement.",
         Group = "Performance", Order = 80, Collapsed = true)]
     public int MaxBatchInsertSize { get; set; } = 500;
 
-    /// <summary>Maximum number of values allowed in a parameterized IN (...) clause.</summary>
+    /// <summary>
+    /// Intended maximum number of values in a parameterized <c>IN (...)</c> clause. Not currently
+    /// applied — a collection <c>Contains</c> translation emits one parameter per value, uncapped.
+    /// </summary>
     [ConfigField(Label = "Max IN-Clause Values", Min = 1, Max = 65_000,
         Description = "Above this, IN-clause queries auto-chunk or fall back to a temp table.",
         Group = "Performance", Order = 81, Collapsed = true)]
     public int MaxInClauseValues { get; set; } = 1_000;
 
-    /// <summary>Per-connection prepared statement cache size.</summary>
+    /// <summary>
+    /// Intended per-connection prepared statement cache size. Not currently applied — it is not
+    /// written into the connection string.
+    /// </summary>
     [ConfigField(Label = "Prepared Statement Cache Size", Min = 0,
         Description = "Number of prepared statements kept per connection.",
         Group = "Performance", Order = 82, Collapsed = true)]
@@ -256,8 +272,9 @@ public sealed class MySqlDatabaseConfig
     public int TransientRetryBaseDelayMs { get; set; } = 50;
 
     /// <summary>
-    /// Warn when the same query template fires this many times inside a single request
-    /// scope (AsyncLocal). 0 disables the detector.
+    /// Intended threshold for warning when the same query template fires this many times inside
+    /// a single request scope. Not currently applied — no code path counts query templates, so
+    /// <c>N1QueryDetectedEvent</c> is never published regardless of this value.
     /// </summary>
     [ConfigField(Label = "N+1 Detector Threshold", Min = 0,
         Description = "Warn when the same query template fires N times in one request scope. 0 disables.",
@@ -265,8 +282,9 @@ public sealed class MySqlDatabaseConfig
     public int N1DetectorThreshold { get; set; } = 0;
 
     /// <summary>
-    /// When a slow query is detected, automatically capture <c>EXPLAIN FORMAT=JSON</c>
-    /// and attach it to the <c>SlowQueryEvent</c>.
+    /// Intended to capture <c>EXPLAIN FORMAT=JSON</c> on a slow query and attach it to the
+    /// <c>SlowQueryEvent</c>. Not currently applied — no <c>EXPLAIN</c> is ever run, so
+    /// <c>SlowQueryEvent.ExplainJson</c> is always null.
     /// </summary>
     [ConfigField(Label = "Capture EXPLAIN On Slow",
         Description = "On slow query, run EXPLAIN FORMAT=JSON and attach to the event.",
@@ -274,8 +292,9 @@ public sealed class MySqlDatabaseConfig
     public bool CaptureExplainOnSlowQuery { get; set; } = true;
 
     /// <summary>
-    /// Default VARCHAR length when a string property has no explicit
-    /// <c>[Column(Size = …)]</c>. Default: 255.
+    /// Intended default VARCHAR length when a string property has no explicit
+    /// <c>[Column(Size = …)]</c>. Not currently applied — type inference is hard-wired to the
+    /// same value, 255, so changing this has no effect.
     /// </summary>
     [ConfigField(Label = "Default String Size", Min = 1, Max = 65_535,
         Description = "Default VARCHAR length for string columns without an explicit Size.",

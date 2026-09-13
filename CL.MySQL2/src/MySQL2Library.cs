@@ -671,8 +671,8 @@ public sealed class MySQL2Library : ILibrary
     /// <param name="refreshEvery">How often the pool re-runs every registered query.</param>
     /// <param name="maxIdleFires">
     /// Drop a registered entry after this many consecutive refresh ticks with
-    /// no read. Default 3 — at a 30-second refresh interval, an unread entry
-    /// is dropped after ~90 seconds, bounding cardinality on parameterized queries.
+    /// no read. Default 10 — at a 30-second refresh interval, an unread entry
+    /// is dropped after ~5 minutes, bounding cardinality on parameterized queries.
     /// </param>
     /// <param name="warmUp">
     /// Optional warm-up callback. When supplied, the pool runs it once as a

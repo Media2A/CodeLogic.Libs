@@ -10,8 +10,10 @@ namespace CL.MySQL2.Services;
 /// <see cref="RetainDaysAttribute"/>. Runs once per 24 hours; on first start it runs
 /// after a short delay so library startup isn't blocked by a potentially long delete.
 /// <para>
-/// Each purge pass runs <c>DELETE FROM {table} WHERE {col} &lt; NOW() - INTERVAL N DAY LIMIT batchSize</c>
-/// repeatedly until a pass deletes zero rows. That keeps individual transactions small
+/// Each purge pass runs <c>DELETE FROM {table} WHERE {col} &lt; @cutoff LIMIT batchSize</c>
+/// repeatedly until a pass deletes fewer rows than the batch size. The cutoff is computed
+/// client-side as <c>DateTime.UtcNow.AddDays(-days)</c> and bound as a parameter — the server's
+/// own clock is not consulted. That keeps individual transactions small
 /// (friendly to InnoDB's undo log) while still converging on empty.
 /// </para>
 /// </summary>

@@ -20,7 +20,7 @@ It is built on [MySqlConnector](https://www.nuget.org/packages/MySqlConnector) a
 | Data lifecycle | Soft-delete filtering, retention-based background purging, schema backup, and schema restore. |
 | Performance | Compiled materializers, projection pushdown, batched writes, result caching, single-flight misses, warm smart-cache pools, and time-quantized cache keys. |
 | Reliability | Connection pooling, named databases, explicit transactions, deadlock/lock-timeout retry, command cancellation, and health checks. |
-| Operations | Query timing, slow-query detection, optional `EXPLAIN FORMAT=JSON`, N+1 detection, cache statistics, pool statistics, and CodeLogic events. |
+| Operations | Query timing, slow-query detection, cache statistics, pool statistics, and CodeLogic events. |
 | Escape hatches | Parameterized raw queries, commands, scalar reads, direct connection access, and pluggable cache/coordinator interfaces. |
 
 ## Install
@@ -85,7 +85,7 @@ The model is the schema source of truth. `CL.MySQL2.Models` provides attributes 
 - `[ForeignKey]`, `[Index]`, and `[CompositeIndex]` describe constraints and single, composite, unique, or covering indexes.
 - `[Ignore]` excludes a property from persistence.
 - `[SoftDelete]` marks a nullable timestamp used for automatic read filtering and repository soft deletes.
-- `[RetainDays]` enables scheduled batch deletion of expired rows.
+- `[RetainDays]` enables scheduled batch deletion of expired rows (first pass 5 minutes after start, then every 24 hours).
 - `PreviousName` on `[Column]` performs an in-place column rename so existing data is preserved.
 
 Properties without `[Column]` use CLR type inference and their property name as the column name. When `[Column]` is used for explicit mapping, its `DataType` selects from the MySQL integer, decimal, floating point, bit, character, text, binary/blob, date/time, enum/set, JSON, and geometry families. `StorageType.Binary` can store a `Guid` as `BINARY(16)`; `SequentialGuid.NewId()` creates time-ordered UUIDv7 values suitable for indexed primary keys.
@@ -118,7 +118,7 @@ Every desired schema is hashed into `__schema_state`. An unchanged model takes t
 | `UpsertWithIncrementsAsync` | Insert a seed or atomically accumulate selected numeric columns. |
 | `GetByIdAsync` / `GetByColumnAsync` / `GetAllAsync` / `FindAsync` | Typed entity retrieval. |
 | `GetPagedAsync` | Page-number/offset paging with totals. |
-| `CountAsync` | Count table rows. |
+| `CountAsync` | Count table rows. Unlike the other reads this ignores `[SoftDelete]`, so deleted rows are counted. |
 | `UpdateAsync` | Update an entity by its mapped primary key. |
 | `IncrementAsync` / `DecrementAsync` / `AdjustAsync` | Atomic server-side counter changes. |
 | `DeleteAsync` | Soft delete when `[SoftDelete]` is present; otherwise physically delete. |
@@ -249,7 +249,7 @@ Result<int> affected = await mysql.ExecuteSqlAsync(
     "UPDATE users SET verified = 1 WHERE id = @id",
     new Dictionary<string, object?> { ["@id"] = 42L });
 
-Result<long?> count = await mysql.SqlScalarAsync<long>("SELECT COUNT(*) FROM users");
+Result<long> count = await mysql.SqlScalarAsync<long>("SELECT COUNT(*) FROM users");
 ```
 
 `BeginTransactionAsync` returns an async-disposable transaction that rolls back automatically unless committed. Pass the scope to `GetRepository<T>` or `Query<T>` to enlist that work in it:
@@ -293,7 +293,7 @@ Migrations run in version/order sequence, are tracked in `__migrations`, verify 
 
 Before destructive schema reconciliation, the backup manager writes DDL snapshots. `RestoreSchemaAsync` can replay the latest or a named snapshot and then clears the CRC state so the next sync performs a full comparison. These are schema backups only; they do not preserve table rows.
 
-For row lifecycle management, `[SoftDelete]` changes repository deletion into a timestamp update and filters ordinary reads by default. `.IncludeDeleted()` opts a query back into those rows. `[RetainDays]` registers an entity for background batch purging based on its timestamp column.
+For row lifecycle management, `[SoftDelete]` changes repository deletion into a timestamp update and filters ordinary reads by default. `.IncludeDeleted()` opts a query back into those rows. `[RetainDays]` registers an entity for background batch purging based on its timestamp column; the worker is built during library start from the types already passed to `SyncTableAsync` / `SyncSchemaAsync`, so reconcile those entities before `CodeLogic.StartAsync()`.
 
 ## Caching and performance
 
@@ -309,7 +309,7 @@ Result<List<User>> cached = await mysql.Query<User>()
 - Cache keys include the connection, SQL, and parameters.
 - Table version stamps invalidate cached results after repository or query-builder mutations.
 - Concurrent misses for one key collapse into a single database execution.
-- Near-current `DateTime` parameters can be quantized so rolling-window queries reuse cache entries.
+- `DateTime` parameters within 365 days of now are quantized to a `TimeQuantizeSeconds` bucket (60s by default) so rolling-window queries reuse cache entries.
 - `ICacheStore` and `ICacheCoordinator` provide seams for shared stores, cross-node invalidation, and refresh leases.
 
 ### Smart cache pools
@@ -336,9 +336,9 @@ Smart pools refresh registered queries in the background, retire idle entries, a
 
 - Deadlocks (`1213`) and lock-wait timeouts (`1205`) on individual non-transactional statements are retried with exponential backoff and jitter.
 - `TestConnectionAsync` and the CodeLogic library health check expose connection health.
-- `SlowQueryEvent` can include `EXPLAIN FORMAT=JSON` when the configured threshold is exceeded.
+- `SlowQueryEvent` reports the SQL and elapsed milliseconds when the configured threshold is exceeded. Its `ExplainJson` field and the `CaptureExplainOnSlowQuery` setting are placeholders — no `EXPLAIN` is run today.
 - `QueryExecutedEvent` reports SQL, duration, row count, connection, and cache-hit status.
-- `CacheHitEvent`, `CacheMissEvent`, `N1QueryDetectedEvent`, `DatabaseConnectedEvent`, `DatabaseDisconnectedEvent`, `TableSyncedEvent`, and `HealthChangedEvent` integrate with the CodeLogic event bus.
+- `CacheHitEvent`, `CacheMissEvent`, `DatabaseConnectedEvent`, `DatabaseDisconnectedEvent`, `TableSyncedEvent`, and `HealthChangedEvent` integrate with the CodeLogic event bus. (`N1QueryDetectedEvent` is declared but never published — the N+1 detector is not implemented.)
 - `GetCacheStats()` and `GetCachePoolStats()` expose cache entries, versions, refreshes, failures, and activity.
 
 ## Important behavior boundaries
@@ -374,9 +374,9 @@ The library generates `config.mysql.json` (`mysql`) and `config.mysql.cache.json
 }
 ```
 
-Important database settings include endpoint and credentials, pooling, connection/command/query timeouts, SSL, charset/collation, sync mode, backup location, batch size, `IN` limits, retry policy, N+1 threshold, slow-query threshold, and slow-query `EXPLAIN` capture.
+Applied database settings include endpoint and credentials, pooling, connection and command timeouts, SSL mode, connection charset, sync mode, the transient retry policy, and the slow-query threshold. Several further fields are declared but not currently read — `QueryTimeoutMs`, `MaxBatchInsertSize`, `MaxInClauseValues`, `PreparedStatementCacheSize`, `N1DetectorThreshold`, `CaptureExplainOnSlowQuery`, `BackupDirectory`, `CacheEnabledOverride`, `DefaultStringSize`, `Collation`, and `SslCertificatePath`. See the [overview](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/index.html) for the per-field status.
 
-The cache configuration controls its global switch, entry limit, default TTL, `DateTime` quantization window, and cache hit/miss event publication. Each named database can override the global cache switch.
+The cache configuration's global switch, entry limit, and `DateTime` quantization window are applied at startup. Its `MaxMemoryMb`, `DefaultTtlSeconds`, and `PublishEvents` fields, and the per-database `CacheEnabledOverride`, are declared but not currently read.
 
 ## Main entry points
 

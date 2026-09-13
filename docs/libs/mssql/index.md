@@ -2,7 +2,7 @@
 
 > A typed data-access layer for SQL Server 2019+, SQL Server 2022/2025, and Azure SQL — repositories, a LINQ query builder, declarative schema sync, imperative migrations, and a self-invalidating result cache.
 
-`CL.MSSQL` is the flagship data library for CodeLogic 4. Map a plain class with attributes and the library keeps the live table in shape, generates reflection-free row mappers, translates LINQ-shaped expressions to real SQL, and caches results with version-stamped invalidation. It builds on [Microsoft.Data.SqlClient](https://www.nuget.org/packages/Microsoft.Data.SqlClient) and works against SQL Server 2019+, SQL Server 2022/2025, and Azure SQL. Every fallible operation returns a framework `Result<T>` — no exceptions for the expected failure paths.
+`CL.MSSQL` is the flagship data library for CodeLogic 4. Map a plain class with attributes and the library keeps the live table in shape, generates reflection-free row mappers, translates LINQ-shaped expressions to real SQL, and caches results with version-stamped invalidation. It builds on [Microsoft.Data.SqlClient](https://www.nuget.org/packages/Microsoft.Data.SqlClient) and works against SQL Server 2019+, SQL Server 2022/2025, and Azure SQL. Every fallible *execution* returns a framework `Result<T>` — no exceptions for the expected failure paths. Programming errors caught while a query is being composed (an unsupported expression, `.Join` after `.OrderBy`, `WhereExists` against the outer query's own table, a bad property name passed to `UpsertWithIncrementsAsync`) still throw.
 
 | | |
 |---|---|
@@ -12,12 +12,12 @@
 | **Dependencies** | Microsoft.Data.SqlClient 7.x |
 | **Engines** | SQL Server 2019, 2022, 2025 · Azure SQL Database |
 
-This overview covers loading, the entry points, and configuration. The deep material lives on three sub-pages:
+This overview covers loading, the entry points, and configuration. The deep material lives on four sub-pages:
 
 - **[Query Builder](queries.md)** — `Where` / subquery filters / ordering / paging / typed and raw joins / projections / `GroupBy` aggregates / terminals / bulk update & delete / raw SQL / transactions.
 - **[Schema & Migrations](schema-migrations.md)** — entity attributes, `SyncMode` & `SchemaSyncLevel`, `SyncTableAsync` / `SyncSchemaAsync`, the CRC sentinel, soft delete, retention, imperative migrations, backups & restore.
 - **[Performance & Caching](performance.md)** — the result cache, time quantization, table-version invalidation, `SmartCachePool`, multi-node coordination, transient retry, the N+1 detector, slow-query / `EXPLAIN`, compiled materializers, projection pushdown.
-- **[Capability parity](parity.md)** — the complete MySQL2-to-SQL Server feature matrix and native differences.
+- **[Capability parity](parity.md)** — the capability matrix for this library and its SQL Server-native differences.
 
 ## Install & load
 
@@ -72,7 +72,7 @@ var repo = mssql.GetRepository<User>();
 
 // Create
 Result<User> created = await repo.InsertAsync(new User { Email = "ada@example.com", DisplayName = "Ada" });
-Result<int>  many    = await repo.InsertManyAsync(batch);   // chunked at MaxBatchInsertSize (default 500)
+Result<int>  many    = await repo.InsertManyAsync(batch);   // chunked at 500 rows, capped by the 2,100-parameter limit
 
 // Read
 Result<User?>       byId   = await repo.GetByIdAsync(1L);
@@ -143,7 +143,7 @@ Two files are written on first run.
 | `Database` / `Username` / `Password` | `""` | Credentials. |
 | `AuthenticationMode` | `SqlLogin` | `SqlLogin` or `IntegratedSecurity`. |
 | `EnablePooling` | `true` | Connection pooling. |
-| `MinPoolSize` / `MaxPoolSize` | `1` / `100` | Pool bounds. |
+| `MinPoolSize` / `MaxPoolSize` | `0` / `100` | Pool bounds. |
 | `ConnectionLifetime` | `300` | Seconds before a pooled connection is recycled. |
 | `ConnectionTimeout` / `CommandTimeout` | `30` / `30` | Seconds. |
 | `Encrypt` / `TrustServerCertificate` | `true` / `false` | TLS validation. |
@@ -154,15 +154,15 @@ Two files are written on first run.
 | `BackupDirectory` | `null` | Where schema backups are written. |
 | `SlowQueryThresholdMs` | `1000` | Threshold for `SlowQueryEvent`. |
 | `CaptureExplainOnSlowQuery` | `true` | Attach best-effort estimated `SHOWPLAN_XML`. |
-| `QueryTimeoutMs` | `30000` | Per-query timeout. |
-| `MaxBatchInsertSize` | `500` | Insert/upsert chunk size. |
-| `MaxInClauseValues` | `1000` | `IN (...)` value cap. |
-| `PreparedStatementCacheSize` | `256` | Per-connection prepared-statement cache. |
+| `QueryTimeoutMs` | `30000` | Reserved — not read by the current code; use `CommandTimeout`. |
+| `MaxBatchInsertSize` | `500` | Insert/upsert chunk size. Reserved — `GetRepository<T>()` does not yet pass it, so repositories chunk at the built-in 500. |
+| `MaxInClauseValues` | `1000` | Reserved — no cap is applied to generated `IN (...)` lists today. |
+| `PreparedStatementCacheSize` | `256` | Reserved — not read by the current code. |
 | `TransientRetryCount` | `3` | Deadlock/lock-wait retries (0 disables). |
 | `TransientRetryBaseDelayMs` | `50` | Base backoff; exponential + jitter. |
-| `N1DetectorThreshold` | `0` | Repeats before an N+1 is flagged (0 = off). |
-| `CacheEnabledOverride` | `null` | Per-database cache on/off override. |
-| `DefaultStringSize` | `255` | `NVarChar` size when `Size` is unset. |
+| `N1DetectorThreshold` | `0` | Reserved — the N+1 detector is not wired up yet, so this has no effect. |
+| `CacheEnabledOverride` | `null` | Reserved — not read by the current code; use the global `Enabled` switch. |
+| `DefaultStringSize` | `255` | Reserved — not read by the current code; unsized string columns always infer `nvarchar(255)`. |
 
 `config.mssql.cache.json` (section `mssql.cache`) controls the result cache.
 
@@ -170,10 +170,10 @@ Two files are written on first run.
 |---------|---------|-------|
 | `Enabled` | `true` | Global cache switch. |
 | `MaxEntries` | `10000` | Entry ceiling. |
-| `MaxMemoryMb` | `256` | Approximate memory budget. |
-| `DefaultTtlSeconds` | `60` | Default TTL when none is given. |
+| `MaxMemoryMb` | `256` | Advisory only — eviction is by entry count, not memory. |
+| `DefaultTtlSeconds` | `60` | Reserved — `WithCache` has no parameterless overload, so every cached query supplies its own TTL. |
 | `TimeQuantizeSeconds` | `60` | Quantization bucket for DateTime params (see [Performance](performance.md)). |
-| `PublishEvents` | `true` | Publish cache hit/miss events to the bus. |
+| `PublishEvents` | `true` | Reserved — cache hit/miss events are always published once an event bus is bound. |
 
 Full caching behaviour is on the [Performance & Caching](performance.md) page.
 
@@ -201,7 +201,7 @@ All events implement `IEvent` and publish to the CodeLogic event bus.
 | `SlowQueryEvent` | A query exceeds `SlowQueryThresholdMs` (carries `ExplainJson`). |
 | `CacheHitEvent` | A cached result satisfies a read. |
 | `CacheMissEvent` | A cacheable read misses the cache. |
-| `N1QueryDetectedEvent` | The N+1 detector trips (`N1DetectorThreshold` > 0). |
+| `N1QueryDetectedEvent` | Declared for the N+1 detector, which is not wired up yet — nothing publishes this today. |
 | `HealthChangedEvent` | The health status transitions. |
 
 ## See also

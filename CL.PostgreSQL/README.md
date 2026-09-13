@@ -59,7 +59,7 @@ var recent = await pg.Query<User>()
 
 ## Features
 
-- **Multi-database** — manage connections to several PostgreSQL instances from one config; pick the target per call with a `connectionId` (default `"Default"`), or `RegisterDatabase` one at runtime.
+- **Multi-database** — manage connections to several PostgreSQL instances from one config; pick the target per call with a `connectionId` (default `"Default"`), or add one at runtime with `pg.ConnectionManager.RegisterConfiguration(config, id)`.
 - **Repository** — full CRUD plus batched bulk insert, `ON CONFLICT` upserts, paging, find, raw SQL, soft delete, and atomic increment/decrement.
 - **Fluent query builder** — `Where`, `OrderBy`, `Limit`/`Offset` (aliases `Take`/`Skip`), `Join`, typed `Select` projections, `GroupBy`, aggregates, `WhereIn`/`WhereExists`, bulk update/delete.
 - **Cursor paging** — `After(cursor).ToCursorPagedListAsync()` for stable keyset pagination that does not drift as rows are inserted. Tokens are validated against the issuing query's entity and ordering, but are not signed — treat a cursor as a position, not as an authorisation.
@@ -67,7 +67,7 @@ var recent = await pg.Query<User>()
 - **Migrations** — `IMigration` classes with up/down, ordered by app version, tracked in a database table (not a local file) and applied under an advisory lock so only one node runs them.
 - **Schema sync** — create or alter tables to match entities (single, set, or whole namespace), CRC-gated so unchanged models cost nothing, with `SyncMode` controlling how destructive a reconcile may be.
 - **PostgreSQL-native** — `uuid`, `timestamptz`, `jsonb`, arrays, ranges, `inet`; identity columns; `INCLUDE` covering indexes; `pg_advisory_lock`; `ctid`-batched retention.
-- **Observability** — query-executed, slow-query (with `EXPLAIN (FORMAT JSON)`), cache hit/miss, and N+1 detection events.
+- **Observability** — query-executed, slow-query, and cache hit/miss events on the framework bus.
 - **Transactions** — `BeginTransactionAsync()` returns an `await using` scope that auto-rolls-back if it is never committed.
 
 ## Configuration
@@ -102,16 +102,16 @@ Auto-generated on first run as `config.postgresql.json` (section `postgresql`). 
 | `database` / `username` / `password` | `""` | Connection credentials. The database is not the schema — see `defaultSchema`. |
 | `sslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, `VerifyFull`. **`Prefer` encrypts but does not verify the certificate; use `VerifyFull` in production.** |
 | `sslCertificatePath` / `sslKeyPath` / `sslRootCertificatePath` | `null` | Client certificate, its key, and the CA bundle used by `VerifyCA`/`VerifyFull`. |
-| `defaultSchema` | `public` | Applied as `search_path`, and the schema an entity targets when `[Table]` declares none. |
+| `defaultSchema` | `public` | Applied as the connection's `search_path`. It does not move entities: a `[Table]` without a `Schema` is always mapped to the literal `public` schema. |
 | `applicationName` | `null` | Reported to the server; shows up in `pg_stat_activity`. |
 | `minPoolSize` / `maxPoolSize` | `1` / `100` | Connection-pool bounds. |
 | `connectionLifetime` | `300` | Seconds a pooled connection may sit idle before being closed. |
 | `connectionTimeout` / `commandTimeout` | `30` / `30` | Seconds to wait when opening a connection / running a command. |
 | `syncMode` | `production` | `developer` (drops freely), `production` (add and modify only), `migration` (one-shot destructive reconcile, backup first). |
 | `allowDestructiveSync` | `false` | Legacy escape hatch; promotes `production` to a full reconcile. |
-| `maxBatchInsertSize` | `500` | Rows per batched insert, further capped so a statement stays under PostgreSQL's 65535-parameter limit. |
+| `maxBatchInsertSize` | `500` | Intended rows per batched insert. Not currently read — the repository uses its own 500-row default, capped so a statement stays under PostgreSQL's 65535-parameter limit. |
 | `slowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
-| `transientRetryCount` | `3` | Retries for serialization failures and deadlocks (SQLSTATE `40001`, `40P01`). |
+| `transientRetryCount` | `3` | Retries for serialization failures, deadlocks and unavailable locks (SQLSTATE `40001`, `40P01`, `55P03`). |
 
 ## Notes for PostgreSQL
 

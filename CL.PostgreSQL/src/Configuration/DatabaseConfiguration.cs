@@ -6,7 +6,7 @@ namespace CL.PostgreSQL.Configuration;
 
 /// <summary>
 /// Root configuration for <c>CL.PostgreSQL</c>.
-/// Serialized to / from <c>config.mysql.json</c> in the library's config directory.
+/// Serialized to / from <c>config.postgresql.json</c> in the library's config directory.
 /// </summary>
 [ConfigSection("postgresql")]
 public sealed class DatabaseConfiguration : ConfigModelBase
@@ -90,7 +90,10 @@ public sealed class PostgreSqlDatabaseConfig
     [ConfigField(Label = "Max Pool Size", Min = 1, RequiresRestart = true, Group = "Pooling", Order = 22, Collapsed = true)]
     public int MaxPoolSize { get; set; } = 100;
 
-    /// <summary>Maximum connection lifetime in seconds. Default: 300.</summary>
+    /// <summary>
+    /// How long a pooled connection may sit idle before it is closed, in seconds.
+    /// Maps to Npgsql's <c>Connection Idle Lifetime</c>. Default: 300.
+    /// </summary>
     [ConfigField(Label = "Connection Lifetime (s)", Min = 0, RequiresRestart = true, Group = "Pooling", Order = 23, Collapsed = true)]
     public int ConnectionLifetime { get; set; } = 300;
 
@@ -132,8 +135,12 @@ public sealed class PostgreSqlDatabaseConfig
     public string? SslRootCertificatePath { get; set; }
 
     /// <summary>
-    /// The <c>search_path</c> applied to every connection, and the schema table sync
-    /// targets when an entity does not declare one. Default: "public".
+    /// The <c>search_path</c> applied to every connection. Default: "public".
+    /// <para>
+    /// This does <b>not</b> change where an entity is mapped: a type without
+    /// <c>[Table(Schema = …)]</c> always resolves to the literal <c>public</c> schema, and
+    /// every generated statement is schema-qualified with that.
+    /// </para>
     /// </summary>
     [ConfigField(Label = "Default Schema", RequiresRestart = true, Group = "Advanced", Order = 50, Collapsed = true)]
     public string DefaultSchema { get; set; } = "public";
@@ -210,8 +217,8 @@ public sealed class PostgreSqlDatabaseConfig
         };
 
     /// <summary>
-    /// Directory for schema backup files.
-    /// Null = <c>DataDirectory/backups</c>.
+    /// Intended override for the schema-backup directory. <b>Not currently applied:</b>
+    /// <see cref="Services.BackupManager"/> always writes to <c>DataDirectory/backups</c>.
     /// </summary>
     [ConfigField(Label = "Backup Directory", Description = "Override where schema backups are stored. Blank = default data/backups folder.",
         Group = "Schema Sync", Order = 62, Collapsed = true)]
@@ -224,8 +231,9 @@ public sealed class PostgreSqlDatabaseConfig
     public int SlowQueryThresholdMs { get; set; } = 1000;
 
     /// <summary>
-    /// Per-database override for the global cache switch. Null = inherit global
-    /// <see cref="CacheConfiguration.Enabled"/>; true/false forces on/off for this DB.
+    /// Intended per-database override for the global cache switch. <b>Not currently
+    /// applied:</b> nothing reads this value, so <see cref="CacheConfiguration.Enabled"/>
+    /// governs every database.
     /// </summary>
     [ConfigField(Label = "Cache Enabled Override",
         Description = "Override the global cache switch for this database only. Leave empty to inherit.",
@@ -233,35 +241,50 @@ public sealed class PostgreSqlDatabaseConfig
     public bool? CacheEnabledOverride { get; set; } = null;
 
     /// <summary>
-    /// Default per-query timeout in milliseconds. Maps to Npgsql's command timeout
-    /// when it's finer than <see cref="CommandTimeout"/> (which is in seconds).
+    /// Intended default per-query timeout in milliseconds. <b>Not currently applied:</b>
+    /// nothing reads this value — <see cref="CommandTimeout"/> (in seconds) is the timeout
+    /// that actually reaches the connection string.
     /// </summary>
     [ConfigField(Label = "Query Timeout (ms)", Min = 0,
-        Description = "Default per-query timeout in ms. Used when no .WithTimeout() override is set.",
+        Description = "Intended per-query timeout in ms. Not currently applied; use Command Timeout.",
         Group = "Timeouts", Order = 32, Collapsed = true)]
     public int QueryTimeoutMs { get; set; } = 30_000;
 
-    /// <summary>Chunk size used by <c>InsertManyAsync</c> when emitting batched INSERTs.</summary>
+    /// <summary>
+    /// Intended chunk size for the batched <c>InsertManyAsync</c> / <c>UpsertManyAsync</c>
+    /// statements. <b>Not currently applied:</b> <c>GetRepository&lt;T&gt;()</c> does not pass
+    /// it through, so <see cref="Services.Repository{T}"/> uses its own default of 500 rows
+    /// (further capped by PostgreSQL's 65535-parameter ceiling).
+    /// </summary>
     [ConfigField(Label = "Max Batch Insert Size", Min = 1, Max = 10_000,
-        Description = "Number of rows per batched INSERT statement.",
+        Description = "Rows per batched INSERT. Not currently applied; the repository default of 500 is used.",
         Group = "Performance", Order = 80, Collapsed = true)]
     public int MaxBatchInsertSize { get; set; } = 500;
 
-    /// <summary>Maximum number of values allowed in a parameterized IN (...) clause.</summary>
+    /// <summary>
+    /// Intended ceiling on the number of values in a generated <c>IN (...)</c> list.
+    /// <b>Advisory only:</b> the expression translator emits every value in a single
+    /// <c>IN</c> list and does not consult this setting, so a large <c>Contains</c>
+    /// collection is sent as-is.
+    /// </summary>
     [ConfigField(Label = "Max IN-Clause Values", Min = 1, Max = 65_000,
-        Description = "Above this, IN-clause queries auto-chunk or fall back to a temp table.",
+        Description = "Advisory ceiling on generated IN lists; not currently enforced.",
         Group = "Performance", Order = 81, Collapsed = true)]
     public int MaxInClauseValues { get; set; } = 1_000;
 
-    /// <summary>Per-connection prepared statement cache size.</summary>
+    /// <summary>
+    /// Intended per-connection prepared-statement cache size. <b>Not currently applied:</b>
+    /// nothing reads this value, so Npgsql's own default is in force.
+    /// </summary>
     [ConfigField(Label = "Prepared Statement Cache Size", Min = 0,
-        Description = "Number of prepared statements kept per connection.",
+        Description = "Prepared statements kept per connection. Not currently applied.",
         Group = "Performance", Order = 82, Collapsed = true)]
     public int PreparedStatementCacheSize { get; set; } = 256;
 
     /// <summary>
     /// How many times to automatically retry a single non-transactional statement that
-    /// fails with a transient error (deadlock 1213, lock-wait timeout 1205). 0 disables.
+    /// fails with a transient error — SQLSTATE <c>40001</c> (serialization failure),
+    /// <c>40P01</c> (deadlock detected) or <c>55P03</c> (lock not available). 0 disables.
     /// Default: 3. Statements inside an explicit transaction scope are never auto-retried —
     /// the whole transaction must be retried by the caller.
     /// </summary>
@@ -280,28 +303,30 @@ public sealed class PostgreSqlDatabaseConfig
     public int TransientRetryBaseDelayMs { get; set; } = 50;
 
     /// <summary>
-    /// Warn when the same query template fires this many times inside a single request
-    /// scope (AsyncLocal). 0 disables the detector.
+    /// Intended threshold for the N+1 detector: warn when one query template fires this
+    /// many times inside a single request scope. <b>Not currently applied:</b> no
+    /// request-scope counting is implemented and <c>N1QueryDetectedEvent</c> is never
+    /// published, so this setting has no effect at any value.
     /// </summary>
     [ConfigField(Label = "N+1 Detector Threshold", Min = 0,
-        Description = "Warn when the same query template fires N times in one request scope. 0 disables.",
+        Description = "Intended N+1 warning threshold. The detector is not implemented; no effect.",
         Group = "Observability", Order = 90, Collapsed = true)]
     public int N1DetectorThreshold { get; set; } = 0;
 
     /// <summary>
-    /// When a slow query is detected, automatically capture <c>EXPLAIN (FORMAT JSON)</c>
-    /// and attach it to the <c>SlowQueryEvent</c>. The plan is estimated, not executed:
-    /// ANALYZE is deliberately not used, since re-running the statement would repeat any
-    /// side effects.
+    /// Intended to capture <c>EXPLAIN (FORMAT JSON)</c> for a slow query and attach it to
+    /// the <c>SlowQueryEvent</c>. <b>Not currently applied:</b> no call site runs EXPLAIN,
+    /// so <c>SlowQueryEvent.ExplainJson</c> is always null whatever this is set to.
     /// </summary>
     [ConfigField(Label = "Capture EXPLAIN On Slow",
-        Description = "On slow query, run EXPLAIN (FORMAT JSON) and attach to the event.",
+        Description = "Intended EXPLAIN capture on slow queries. Not currently implemented.",
         Group = "Observability", Order = 91, Collapsed = true)]
     public bool CaptureExplainOnSlowQuery { get; set; } = true;
 
     /// <summary>
-    /// Default VARCHAR length when a string property has no explicit
-    /// <c>[Column(Size = …)]</c>. Default: 255.
+    /// Intended default <c>varchar</c> length for a string property with no explicit
+    /// <c>[Column(Size = …)]</c>. <b>Not currently applied:</b> type inference uses its own
+    /// hard-coded default of 255, which this value merely happens to match.
     /// </summary>
     [ConfigField(Label = "Default String Size", Min = 1, Max = 65_535,
         Description = "Default VARCHAR length for string columns without an explicit Size.",

@@ -233,8 +233,11 @@ public sealed class RetainDaysAttribute : Attribute
 /// <summary>
 /// Marks an entity for <b>soft deletes</b>. <see cref="CL.MySQL2.Services.Repository{T}.DeleteAsync(object, System.Threading.CancellationToken)"/>
 /// sets the named timestamp column to the current UTC time instead of issuing a physical DELETE, and
-/// reads through <c>mysql.Query&lt;T&gt;()</c> and the repository getters automatically exclude
-/// rows where that column is set (<c>WHERE col IS NULL</c>). Opt back in to deleted rows with
+/// reads through <c>mysql.Query&lt;T&gt;()</c> and the repository getters
+/// (<c>GetByIdAsync</c>, <c>GetByColumnAsync</c>, <c>GetAllAsync</c>, <c>GetPagedAsync</c>,
+/// <c>FindAsync</c>) automatically exclude rows where that column is set
+/// (<c>WHERE col IS NULL</c>). <c>Repository{T}.CountAsync</c> is the exception — it counts
+/// every row, soft-deleted included. Opt back in to deleted rows with
 /// <c>.IncludeDeleted()</c> on a query, or purge for real with
 /// <see cref="CL.MySQL2.Services.Repository{T}.HardDeleteAsync(object, System.Threading.CancellationToken)"/>.
 /// <para>

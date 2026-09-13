@@ -31,7 +31,10 @@ public static class SqlFn
     /// </summary>
     public static int DayOfWeek(DateTime d) => throw OutsideQuery(nameof(DayOfWeek));
 
-    /// <summary>PostgreSQL <c>d::date</c> — strips the time component.</summary>
+    /// <summary>
+    /// PostgreSQL <c>(d AT TIME ZONE 'UTC')::date</c> — strips the time component, taking
+    /// the date in UTC so it does not swing with the server's session time zone.
+    /// </summary>
     public static DateTime Date(DateTime d) => throw OutsideQuery(nameof(Date));
 
     /// <summary>
@@ -66,7 +69,11 @@ public static class SqlFn
 
     // ── Math ──────────────────────────────────────────────────────────────────
 
-    /// <summary>PostgreSQL <c>ROUND(v, digits)</c>.</summary>
+    /// <summary>
+    /// Rounds to <paramref name="digits"/> decimals. PostgreSQL has no
+    /// <c>round(double precision, integer)</c> — only the numeric form takes a digit count —
+    /// so this emits <c>ROUND(v::numeric, digits)::double precision</c>.
+    /// </summary>
     public static double Round(double v, int digits) => throw OutsideQuery(nameof(Round));
     /// <summary>PostgreSQL <c>FLOOR(v)</c>.</summary>
     public static double Floor(double v) => throw OutsideQuery(nameof(Floor));

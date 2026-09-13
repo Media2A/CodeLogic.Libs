@@ -295,7 +295,7 @@ internal sealed class PostgreSqlExpressionVisitor : ExpressionVisitor
     }
 
     /// <summary>
-    /// Builds a backtick-quoted column reference, qualified by the alias mapped to
+    /// Builds a double-quoted column reference, qualified by the alias mapped to
     /// <paramref name="owner"/> when a multi-source alias map is in play, or by the single
     /// <c>_tableAlias</c> otherwise. With no alias the column is left unqualified — exactly
     /// the single-table behaviour that predates joins.

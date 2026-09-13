@@ -56,15 +56,18 @@ A pool is a named, pre-warmed entry that refreshes itself in the background rath
 expiring and forcing a caller to wait.
 
 ```csharp
-pg.RegisterCachePool("active-users", TimeSpan.FromMinutes(1),
-    ct => pg.Query<User>().Where(u => u.IsActive).ToListAsync());
+// The warm-up callback is a Func<Task>; queries register themselves with the pool
+// through their own .SmartCache(name) decoration.
+pg.RegisterCachePool("active-users", TimeSpan.FromMinutes(1), maxIdleFires: 10,
+    warmUp: () => pg.Query<User>().Where(u => u.IsActive).SmartCache("active-users").ToListAsync());
 
 var rows = await pg.Query<User>().SmartCache("active-users").ToListAsync();
 ```
 
-Pools stop refreshing after `MaxIdleFires` consecutive ticks with no reads, so an unused pool
-does not keep querying forever. `GetCachePoolStats()` reports per-pool hit counts, last read
-and refresh state.
+An individual entry is dropped from the pool after `MaxIdleFires` consecutive refresh ticks
+with no read (default 10), so an unread parameterisation stops being refreshed; the pool's
+timer itself keeps running. `GetCachePoolStats()` reports the refresh interval, `MaxIdleFires`,
+the live entry count, ticks fired and failed, and the last tick time.
 
 ## Multi-node
 
@@ -107,34 +110,41 @@ on a second attempt.
 ## Batch limits
 
 PostgreSQL's extended protocol caps a statement at 65535 bound parameters. Batched inserts
-and upserts chunk at `min(maxBatchInsertSize, (65535 - reserved) / columnsPerRow)`, so a wide
-table automatically gets smaller batches rather than failing at the wire.
+and upserts chunk at `min(batchSize, (65535 - 16) / columnsPerRow)`, so a wide table
+automatically gets smaller batches rather than failing at the wire. `batchSize` is the
+repository's own default of 500 — the `maxBatchInsertSize` config value is not currently
+plumbed through to it.
 
-Generated `IN` lists chunk at `maxInClauseValues`.
+Generated `IN` lists are **not** chunked: `ids.Contains(x.Id)` emits one bound parameter per
+value in a single list, and `maxInClauseValues` is not consulted. Chunk large sets yourself.
 
 ## Observability
 
 ### Slow queries
 
-Queries at or over `slowQueryThresholdMs` raise a `SlowQueryEvent`. With
-`captureExplainOnSlowQuery` the plan is attached as JSON from `EXPLAIN (FORMAT JSON)`.
+Queries at or over `slowQueryThresholdMs` are logged as a warning and raise a
+`SlowQueryEvent` carrying the connection id, SQL text and elapsed milliseconds.
 
-The plan is estimated, not executed — `ANALYZE` is deliberately not used, since re-running
-the statement would repeat any side effects.
+`SlowQueryEvent.ExplainJson` and the `captureExplainOnSlowQuery` setting are reserved for a
+planned `EXPLAIN (FORMAT JSON)` capture that is **not implemented**: no call site runs
+`EXPLAIN`, so the field is always null.
 
 ### N+1 detection
 
-Set `n1DetectorThreshold` above zero and the library counts query templates within a request
-scope (`AsyncLocal`). When one template fires that many times in a single scope it raises
-`N1QueryDetectedEvent` once, naming the template and the count — the signature of a loop
-issuing one query per row.
+`N1QueryDetectedEvent` and the `n1DetectorThreshold` setting are likewise reserved. No
+request-scope template counting exists yet, so the event is never published and the setting
+has no effect at any value.
 
 ### Counters
 
 ```csharp
-var stats = pg.GetCacheStats();        // hits, misses, entries, evictions
+var stats = pg.GetCacheStats();        // TotalEntries, EntriesByTable, TableVersions
 var pools = pg.GetCachePoolStats();    // per-pool refresh state
 ```
+
+`GetCacheStats()` is a structural snapshot — how many entries exist and per table, plus the
+table-version counters. It does not track hit/miss or eviction counts; subscribe to
+`CacheHitEvent` / `CacheMissEvent` for those.
 
 `QueryExecutedEvent` fires after every query with its SQL, elapsed milliseconds, row count
 and cache-hit flag, which is usually the easiest hook for metrics or tracing.

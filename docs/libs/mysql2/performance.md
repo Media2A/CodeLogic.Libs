@@ -1,6 +1,6 @@
 # CL.MySQL2 — Performance & Caching
 
-> A self-invalidating result cache, warm smart-cache pools, multi-node coordination, transient retries, and the diagnostics that surface slow and N+1 queries.
+> A self-invalidating result cache, warm smart-cache pools, multi-node coordination, transient retries, and the diagnostics that surface slow queries.
 
 See the [overview](index.md) for loading, repositories, configuration, and events.
 
@@ -18,7 +18,7 @@ Result<List<Server>> servers = await mysql.Query<Server>()
     .ToListAsync();
 ```
 
-The cache is configured in `config.mysql.cache.json` (`Enabled`, `MaxEntries`, `MaxMemoryMb`, `DefaultTtlSeconds`, `TimeQuantizeSeconds`, `PublishEvents`) and exposed through the static `QueryCache` facade (`QueryCache.Enabled`, `QueryCache.TimeQuantizeSeconds`). A per-database `CacheEnabledOverride` can force it on or off for one connection.
+The cache reads three values from `config.mysql.cache.json` at startup — `Enabled`, `MaxEntries`, and `TimeQuantizeSeconds` — via `QueryCache.Configure(...)`. The remaining fields in that file (`MaxMemoryMb`, `DefaultTtlSeconds`, `PublishEvents`) and the per-database `CacheEnabledOverride` are declared but not currently read by any code path. The public surface of the static `QueryCache` facade is `Configure`, `UseStore`, `UseCoordinator`, `Count`, `Invalidate`, `GetStats`, and `Clear`; `Enabled` and `TimeQuantizeSeconds` are internal.
 
 > Caching is available on single-table `QueryBuilder<T>` reads and on `ProjectedQuery` (single-table `Select`). It is **not** available on joined queries or subquery-filtered (`WhereExists` / `WhereIn`) queries — those stamp a single table's version and could not be invalidated when the other table mutates. It is also disabled inside a transaction scope.
 
@@ -109,25 +109,31 @@ Single non-transactional statements that fail with a deadlock (`1213`) or lock-w
 
 > Statements inside an explicit transaction scope are **never** auto-retried — the whole transaction is the caller's to retry, since an inner statement can't be replayed in isolation.
 
-## N+1 detection
+## N+1 detection — not implemented
 
-The N+1 detector flags repeated execution of the same parameterized query shape — the classic loop that issues one query per row. It is **off by default**; set `N1DetectorThreshold` to the repeat count that should trip it.
+`N1DetectorThreshold` and the `N1QueryDetectedEvent` record both exist, and
+`QueryObservability.RecordN1` is there to publish the event, but nothing calls it and nothing
+reads the threshold. **No N+1 detection runs today and `N1QueryDetectedEvent` is never
+published**, whatever `N1DetectorThreshold` is set to. Treat the setting as reserved.
 
-```json
-{ "Databases": { "Default": { "N1DetectorThreshold": 20 } } }
-```
+The shape it is meant to catch — a loop issuing one query per row — is still worth avoiding;
+the fix is usually a single `WhereIn` / join instead of the loop — see
+[Query Builder](queries.md).
 
-When tripped it publishes an `N1QueryDetectedEvent`. The fix is usually a single `WhereIn` / join instead of the loop — see [Query Builder](queries.md).
+## Slow-query reporting
 
-## Slow-query capture & EXPLAIN
+Queries slower than `SlowQueryThresholdMs` (default 1000ms) are logged at warning level and
+publish a `SlowQueryEvent` carrying the connection id, the SQL, and the elapsed milliseconds.
 
-Queries slower than `SlowQueryThresholdMs` (default 1000ms) publish a `SlowQueryEvent`. When `CaptureExplainOnSlowQuery` is `true` (the default) the event carries the `EXPLAIN` JSON for the offending query, so a subscriber can log a ready-to-analyze plan.
+The event also has an `ExplainJson` field and the configuration has a
+`CaptureExplainOnSlowQuery` flag, but **plan capture is not implemented**: no `EXPLAIN` is ever
+executed and `ExplainJson` is always null, regardless of the flag.
 
 ```csharp
 // Subscribe on the CodeLogic event bus
 events.Subscribe<SlowQueryEvent>(e =>
 {
-    logger.Warn($"Slow query {e.ElapsedMs:n0}ms\n{e.ExplainJson}");
+    logger.Warn($"Slow query {e.ElapsedMs:n0}ms: {e.Query}");
 });
 ```
 
@@ -142,15 +148,20 @@ Both apply automatically to the builder, projections, joins, and raw `SqlQueryAs
 
 ## Batch sizes & limits
 
-Tune throughput and protect the server with these per-database knobs (in `config.mysql.json`):
+`config.mysql.json` declares several per-database throughput knobs. Only some of them are actually wired up today — the rest are placeholders, so check this table before tuning:
 
-| Setting | Default | Purpose |
-|---------|---------|---------|
-| `MaxBatchInsertSize` | `500` | Rows per chunk in `InsertManyAsync` / `UpsertManyAsync` (also `Repository.MaxBatchInsertSize`). |
-| `MaxInClauseValues` | `1000` | Cap on values in a generated `IN (...)`. |
-| `PreparedStatementCacheSize` | `256` | Per-connection prepared-statement cache. |
-| `QueryTimeoutMs` | `30000` | Per-query timeout. |
-| `CommandTimeout` | `30` | Command timeout (seconds). |
+| Setting | Default | Status |
+|---------|---------|--------|
+| `CommandTimeout` | `30` | **Applied** — written to the connection string as `DefaultCommandTimeout` (seconds). |
+| `ConnectionTimeout` | `30` | **Applied** — connection-string `ConnectionTimeout` (seconds). |
+| `MinPoolSize` / `MaxPoolSize` | `1` / `100` | **Applied** — connection-string pool bounds. |
+| `MaxBatchInsertSize` | `500` | Not applied. `Repository<T>` takes the chunk size as a constructor argument defaulting to 500, and `GetRepository<T>` never passes the configured value, so chunking is fixed at 500. |
+| `MaxInClauseValues` | `1000` | Not applied — a collection `Contains` emits one parameter per value, uncapped. |
+| `PreparedStatementCacheSize` | `256` | Not applied — not written into the connection string. |
+| `QueryTimeoutMs` | `30000` | Not applied — nothing reads it; `CommandTimeout` governs. |
+
+There is no `Repository.MaxBatchInsertSize` property — the chunk size is a private field set
+from a constructor parameter.
 
 For large inserts, prefer `InsertManyAsync` (chunked) over a loop of `InsertAsync` — fewer round trips, and each chunk is eligible for transient retry.
 

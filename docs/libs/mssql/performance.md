@@ -1,6 +1,6 @@
 # CL.MSSQL — Performance & Caching
 
-> A self-invalidating result cache, warm smart-cache pools, multi-node coordination, transient retries, and the diagnostics that surface slow and N+1 queries.
+> A self-invalidating result cache, warm smart-cache pools, multi-node coordination, transient retries, and the diagnostics that surface slow queries.
 
 See the [overview](index.md) for loading, repositories, configuration, and events.
 
@@ -18,13 +18,13 @@ Result<List<Server>> servers = await mssql.Query<Server>()
     .ToListAsync();
 ```
 
-The cache is configured in `config.mssql.cache.json` (`Enabled`, `MaxEntries`, `MaxMemoryMb`, `DefaultTtlSeconds`, `TimeQuantizeSeconds`, `PublishEvents`) and exposed through the static `QueryCache` facade (`QueryCache.Enabled`, `QueryCache.TimeQuantizeSeconds`). A per-database `CacheEnabledOverride` can force it on or off for one connection.
+The cache is configured in `config.mssql.cache.json`. Only `Enabled`, `MaxEntries`, and `TimeQuantizeSeconds` are applied at startup (via `QueryCache.Configure`); `MaxMemoryMb`, `DefaultTtlSeconds`, `PublishEvents`, and the per-database `CacheEnabledOverride` are declared but not yet read by the library. The static `QueryCache` facade exposes the public operations `UseStore`, `UseCoordinator`, `Invalidate`, `Clear`, `Count`, and `GetStats` — the resolved `Enabled` and `TimeQuantizeSeconds` values are internal and not readable from application code.
 
 > Caching is available on single-table `QueryBuilder<T>` reads and on `ProjectedQuery` (single-table `Select`). It is **not** available on joined queries or subquery-filtered (`WhereExists` / `WhereIn`) queries — those stamp a single table's version and could not be invalidated when the other table mutates. It is also disabled inside a transaction scope.
 
 ### Table-version invalidation
 
-Every cacheable table carries a version counter that is mixed into the cache key. Any mutation through the library bumps that counter, so all existing entries for the table instantly become un-hittable — there is no key tracking and no eviction sweep on the hot path. Old entries fall out by TTL or LRU later.
+Every cacheable table carries a version counter that is mixed into the cache key. Any mutation through the library bumps that counter and sweeps the table's now-orphaned entries from the store, so all existing entries for the table instantly become un-hittable — there is no per-key tracking on the hot path. One exception: a table that currently has live `SmartCachePool` entries is skipped entirely (no bump, no eviction), because the pool's refresh tick is the freshness mechanism for those tables.
 
 This makes invalidation free: you never call an `Invalidate(...)` yourself for ordinary CRUD; an `InsertAsync` / `UpdateAsync` / `DeleteAsync` / bulk write bumps the version as a side effect.
 
@@ -70,7 +70,7 @@ Result<List<Server>> servers = await mssql.Query<Server>()
 await mssql.RefreshCachePoolAsync("dashboard");
 ```
 
-- `maxIdleFires` (default 10): an entry not read for that many consecutive ticks is dropped from the refresh list, bounding cardinality on parameterized queries.
+- `maxIdleFires` (default 10, floored at 1): an entry that goes more than that many consecutive ticks without a read is dropped from the refresh list, bounding cardinality on parameterized queries. Idle accounting runs on every node, even ones that did not win the refresh lease.
 - Smart cache is mutually exclusive with `.WithCache(ttl)` — if both are set the pool wins. An unknown pool name on `.SmartCache(name)` logs a warning and falls back to non-cached execution (no exception).
 - Like `.WithCache`, smart cache is disabled inside a transaction scope.
 
@@ -109,15 +109,14 @@ Complete non-caller-transaction operations that fail with a deadlock (`1205`), l
 
 > Statements inside an explicit transaction scope are **never** auto-retried — the whole transaction is the caller's to retry, since an inner statement can't be replayed in isolation.
 
-## N+1 detection
+## N+1 detection (not yet wired)
 
-The N+1 detector flags repeated execution of the same parameterized query shape — the classic loop that issues one query per row. It is **off by default**; set `N1DetectorThreshold` to the repeat count that should trip it.
-
-```json
-{ "Databases": { "Default": { "N1DetectorThreshold": 20 } } }
-```
-
-When tripped it publishes an `N1QueryDetectedEvent`. The fix is usually a single `WhereIn` / join instead of the loop — see [Query Builder](queries.md).
+> The pieces are declared — the `N1DetectorThreshold` setting, the `N1QueryDetectedEvent`, and
+> `QueryObservability.RecordN1` — but nothing in the query pipeline counts repeats or calls
+> `RecordN1`, so setting `N1DetectorThreshold` currently has no effect and the event never
+> fires. To spot the classic one-query-per-row loop today, subscribe to `QueryExecutedEvent`
+> and group by SQL text. The fix is usually a single `WhereIn` / join instead of the loop —
+> see [Query Builder](queries.md).
 
 ## Slow-query capture and estimated plans
 
@@ -142,15 +141,18 @@ Both apply automatically to the builder, projections, joins, and raw `SqlQueryAs
 
 ## Batch sizes & limits
 
-Tune throughput and protect the server with these per-database knobs (in `config.mssql.json`):
+These per-database knobs live in `config.mssql.json`. Of them, only `CommandTimeout` currently reaches the code; the rest are declared but not yet read, so batching falls back to the built-in 500-row default:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `MaxBatchInsertSize` | `500` | Rows per chunk in `InsertManyAsync` / `UpsertManyAsync` (also `Repository.MaxBatchInsertSize`). |
-| `MaxInClauseValues` | `1000` | Cap on values in a generated `IN (...)`. |
-| `PreparedStatementCacheSize` | `256` | Per-connection prepared-statement cache. |
-| `QueryTimeoutMs` | `30000` | Per-query timeout. |
-| `CommandTimeout` | `30` | Command timeout (seconds). |
+| `MaxBatchInsertSize` | `500` | Intended rows per chunk in `InsertManyAsync` / `UpsertManyAsync`. **Not yet plumbed through `GetRepository<T>()`**, which leaves the `Repository<T>` constructor's own `maxBatchInsertSize` default of 500 in place. |
+| `MaxInClauseValues` | `1000` | Reserved — the expression visitor applies no cap to generated `IN (...)` lists. |
+| `PreparedStatementCacheSize` | `256` | Reserved — not read by the current code. |
+| `QueryTimeoutMs` | `30000` | Reserved — not read by the current code. |
+| `CommandTimeout` | `30` | Command timeout in seconds; applied via the built connection string. |
+
+Whatever chunk size is in force, it is reduced further per statement so a batch stays under
+SQL Server's 2,100-parameter limit for the entity's column count (`SqlServerDialect.MaxBatchRows`).
 
 For large inserts, prefer `InsertManyAsync` (chunked) over a loop of `InsertAsync` — fewer round trips, and each chunk is eligible for transient retry.
 

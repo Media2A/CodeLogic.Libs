@@ -100,7 +100,9 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Bulk-inserts a collection of entities using real batched INSERT statements.
-    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// Batches of up to the constructor's <c>maxBatchInsertSize</c> (default 500) are sent
+    /// per round-trip. Note that <c>MySQL2Library.GetRepository&lt;T&gt;</c> always uses that
+    /// default — the <c>MaxBatchInsertSize</c> configuration field is not plumbed through.
     /// </summary>
     public async Task<Result<int>> InsertManyAsync(IEnumerable<T> entities, CancellationToken ct = default)
     {
@@ -163,7 +165,9 @@ public sealed class Repository<T> where T : class, new()
     /// <summary>
     /// Inserts a single entity, or updates all non-auto-PK columns to the entity's values
     /// if a UNIQUE/PRIMARY-KEY conflict occurs (set semantics). Issues
-    /// <c>INSERT ... AS new ON DUPLICATE KEY UPDATE</c> (MySQL 8.0.20+ alias syntax).
+    /// <c>INSERT ... ON DUPLICATE KEY UPDATE col = VALUES(col)</c> — the <c>VALUES(col)</c>
+    /// form, which both MySQL (all versions) and MariaDB accept; the newer <c>... AS new</c>
+    /// row-alias syntax is MySQL 8.0.19+ only and is deliberately not used.
     /// On a new insert the auto-PK is refreshed from <c>LAST_INSERT_ID()</c>; on a pure
     /// update the entity's existing PK value is preserved.
     /// </summary>
@@ -222,7 +226,8 @@ public sealed class Repository<T> where T : class, new()
     /// <summary>
     /// Bulk-upserts a collection of entities using batched
     /// <c>INSERT ... ON DUPLICATE KEY UPDATE</c> statements (set semantics).
-    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// Batches of up to the constructor's <c>maxBatchInsertSize</c> (default 500) are sent
+    /// per round-trip.
     /// Returns the total rows-affected count (MySQL counts 1 for each insert and 2 for each
     /// update, so this is not equal to <c>entities.Count</c>).
     /// </summary>
@@ -562,7 +567,11 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
-    /// <summary>Returns the total row count for the table.</summary>
+    /// <summary>
+    /// Returns the total row count for the table. Unlike the other repository reads this does
+    /// <b>not</b> apply the <see cref="Models.SoftDeleteAttribute"/> filter — soft-deleted rows
+    /// are included in the count.
+    /// </summary>
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try

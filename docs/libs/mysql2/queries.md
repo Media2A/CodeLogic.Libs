@@ -30,7 +30,7 @@ mysql.Query<Order>()
     .Where(o => o.CreatedUtc >= DateTime.UtcNow.AddDays(-30));
 ```
 
-Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`, capped at `MaxInClauseValues`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
+Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`; an empty collection becomes `1 = 0`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
 
 ## Subquery filters — `EXISTS` / `IN`
 
@@ -138,8 +138,12 @@ For ad-hoc joins outside the typed model, the string overload appends a literal 
 
 ```csharp
 mysql.Query<Order>()
-    .Join("customers c", "c.id = t0.customer_id", JoinType.Left);
+    .Join("customers c", "c.id = orders.customer_id", JoinType.Left);
 ```
+
+The base table is *not* aliased on a raw-string join — it appears under its own mapped name
+(`orders` above), so qualify left-side columns with the table name. The `t0` / `t1` aliases
+exist only inside a typed `Join<TRight, TKey, TResult>`.
 
 ## Projections — `Select`
 
@@ -175,7 +179,7 @@ Result<List<DailyTotal>> daily = await mysql.Query<Order>()
     .ToListAsync();
 ```
 
-Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(...)`, `g.Max(...)`, `g.Count()`, and `g.Any()`.
+Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(...)`, `g.Max(...)`, `g.Count()`, and `g.Any()`. The predicate overloads `g.Count(x => …)` and `g.Any(x => …)` are also translated, each as a `SUM(CASE WHEN … THEN 1 ELSE 0 END)` expression.
 
 `SqlFn` exposes server-side functions for use inside a **grouped** query's key or projection:
 `Year`, `Month`, `Day`, `Hour`, `Minute`, `DayOfWeek`, `Date`, `BucketUtc`, `Coalesce`,
@@ -258,8 +262,9 @@ Result<int> n = await mysql.ExecuteSqlAsync(
     "UPDATE users SET active = 0 WHERE last_seen < @cutoff",
     new Dictionary<string, object?> { ["@cutoff"] = cutoff });
 
-// Single scalar value
-Result<long?> max = await mysql.SqlScalarAsync<long>(
+// Single scalar value — T? on an unconstrained T is just T for a value type,
+// so SqlScalarAsync<long> yields Result<long> (0 when there are no rows).
+Result<long> max = await mysql.SqlScalarAsync<long>(
     "SELECT MAX(id) FROM users");
 ```
 
@@ -279,31 +284,25 @@ await mysql.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
 await tx.CommitAsync();      // without this, disposal rolls back
 ```
 
-Raw SQL inside the same scope:
+> **The library-level raw SQL helpers do not enlist in a transaction scope.**
+> `SqlQueryAsync` / `ExecuteSqlAsync` / `SqlScalarAsync` take a `connectionId`, not a
+> `TransactionScope`, and each opens its own pooled connection. Calling one inside an
+> `await using TransactionScope` block runs it *outside* the transaction, so a later
+> `RollbackAsync` will not undo it.
 
-```csharp
-await using TransactionScope tx = await mysql.BeginTransactionAsync();
-try
-{
-    await mysql.ExecuteSqlAsync("UPDATE accounts SET balance = balance - @amt WHERE id = @from",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@from"] = 1L });
-    await mysql.ExecuteSqlAsync("UPDATE accounts SET balance = balance + @amt WHERE id = @to",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@to"] = 2L });
-
-    await tx.CommitAsync();
-}
-catch
-{
-    await tx.RollbackAsync();   // or just let the scope dispose
-    throw;
-}
-```
+The transactional surface is the typed one: `GetRepository<T>(tx)` and `Query<T>(tx)`,
+including the query builder's bulk `UpdateAsync` / `DeleteAsync`. The scope's underlying
+`MySqlConnection` and `MySqlTransaction` are internal, so there is no supported way to issue
+a hand-written statement on them from application code. Where raw SQL genuinely has to be
+transactional, write it as an `IMigration`: `IMigrationContext` exposes the live `Connection`
+and `Transaction` along with `ExecuteAsync` / `QueryAsync` / `ScalarAsync` helpers that
+already run on them.
 
 > Statements inside an explicit transaction scope are **never** transient-retried — the whole transaction is the caller's to retry. The result cache and smart-cache pools are also disabled inside a transaction. See [Performance & Caching](performance.md).
 
 ## Choosing a connection
 
-Every entry point accepts a `connectionId` selecting a named database from `config.mysql.json`; it defaults to `"Default"`. On the builder, `.WithConnection("Reporting")` does the same fluently.
+Every entry point accepts a `connectionId` selecting a named database from `config.mysql.json`; it defaults to `"Default"`. On the builder, `.WithConnection("Reporting")` does the same fluently. (`GetRepository<T>` and `Query<T>` also have a `TransactionScope` overload, which takes its connection from the scope.)
 
 ```csharp
 var reports = mysql.Query<Sale>().WithConnection("Reporting");

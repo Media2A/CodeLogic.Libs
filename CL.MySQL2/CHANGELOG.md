@@ -11,6 +11,51 @@ NuGet package version of `CodeLogic.MySQL2`.
 - The README's transaction example still built a `Repository<T>` by hand; it now uses the
   `GetRepository<T>(tx)` / `Query<T>(tx)` accessors added in this release.
 - Documented `SqlFn` and transaction-scoped queries in the queries guide.
+- **Corrected: the raw SQL helpers do not join a transaction.** The queries guide showed
+  `ExecuteSqlAsync` calls inside an `await using TransactionScope` block as if they were part
+  of the transaction. They are not — `SqlQueryAsync` / `ExecuteSqlAsync` / `SqlScalarAsync`
+  take a `connectionId` and open their own pooled connection, so a rollback does not undo
+  them. The guide now says so and points at `GetRepository<T>(tx)` / `Query<T>(tx)` and
+  `IMigrationContext` instead.
+- **Corrected: the attribute namespace.** The overview and schema guide told you to
+  `using CL.MySQL2.Attributes;`. No such namespace exists — `[Table]`, `[Column]`,
+  `[SoftDelete]` and friends live in `CL.MySQL2.Models`.
+- **Corrected: configuration fields that do nothing.** `QueryTimeoutMs`,
+  `MaxBatchInsertSize`, `MaxInClauseValues`, `PreparedStatementCacheSize`,
+  `N1DetectorThreshold`, `CaptureExplainOnSlowQuery`, `BackupDirectory`,
+  `CacheEnabledOverride`, `DefaultStringSize`, `Collation`, `SslCertificatePath`,
+  `MaxMemoryMb`, `DefaultTtlSeconds` and `PublishEvents` were all documented as live knobs.
+  None of them is read by any code path today. The config tables and the XML comments now
+  mark each one, and state what actually governs the behaviour (for example insert chunking
+  is fixed at 500 rows, and generated `IN (...)` lists are uncapped).
+- **Corrected: N+1 detection and `EXPLAIN` capture are not implemented.** `N1QueryDetectedEvent`
+  is never published and `SlowQueryEvent.ExplainJson` is always null; the performance page,
+  the events table and the README no longer promise either.
+- **Corrected: `QueryCache.Enabled` and `QueryCache.TimeQuantizeSeconds` are internal.** The
+  performance page presented them as part of the public facade.
+- **Corrected: soft delete and `CountAsync`.** `Repository.CountAsync()` issues a bare
+  `SELECT COUNT(*)` and therefore counts soft-deleted rows, unlike every other repository
+  read. The soft-delete documentation used to imply otherwise.
+- **Corrected: the retention SQL and its registration window.** The `RetentionWorker` summary
+  claimed a server-side `NOW() - INTERVAL N DAY` cutoff; it actually binds a client-side
+  `DateTime.UtcNow.AddDays(-days)` as a parameter. The schema guide also now explains that the
+  worker is built at library start from the entities already passed to `SyncTableAsync` /
+  `SyncSchemaAsync`, and that the first pass runs 5 minutes after start, then daily.
+- **Corrected: the upsert SQL.** `UpsertAsync` was documented as emitting
+  `INSERT ... AS new ON DUPLICATE KEY UPDATE` (MySQL 8.0.20+). It deliberately emits the
+  `VALUES(col)` form instead, so that it also works on MariaDB.
+- **Corrected: `RegisterCachePool(maxIdleFires:)` defaults to 10, not 3** — an unread entry is
+  dropped after roughly five minutes at a 30-second refresh interval, not ninety seconds.
+- **Corrected: the raw-string `.Join` example.** It qualified the left side as `t0`, but the
+  base table is not aliased on a raw join; `t0` / `t1` exist only inside a typed `Join<,,>`.
+- **Corrected: `SqlScalarAsync<long>` returns `Result<long>`, not `Result<long?>`.** The
+  README and queries examples as written did not compile.
+- **Corrected: schema backups.** They are always written to `DataDirectory/backups` as
+  `{table}_{yyyyMMdd_HHmmss}.sql`, and `RestoreSchemaAsync`'s `backupFile` is a file path, not
+  a bare name. The restore example used a filename in a format the library never produces.
+- Documented the empty-collection `Contains` translation (`1 = 0`), the grouped
+  `g.Count(predicate)` / `g.Any(predicate)` overloads, and the 365-day window for `DateTime`
+  cache-key quantization.
 
 ### Fixed (configuration validation)
 

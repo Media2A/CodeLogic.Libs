@@ -11,9 +11,10 @@ namespace CL.MSSQL.Services;
 /// <see cref="RetainDaysAttribute"/>. Runs once per 24 hours; on first start it runs
 /// after a short delay so library startup isn't blocked by a potentially long delete.
 /// <para>
-/// Each purge pass runs a bounded <c>DELETE TOP (@batch)</c> statement.
-/// repeatedly until a pass deletes zero rows. That keeps individual transactions small
-/// (friendly to SQL Server's transaction log) while still converging on empty.
+/// Each purge pass runs a bounded <c>DELETE TOP (@batch)</c> statement repeatedly until one
+/// batch deletes fewer rows than <see cref="RetainDaysAttribute.BatchSize"/> (the table is
+/// drained). That keeps individual transactions small (friendly to SQL Server's transaction
+/// log) while still converging on empty.
 /// </para>
 /// </summary>
 public sealed class RetentionWorker : IAsyncDisposable

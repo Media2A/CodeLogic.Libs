@@ -25,7 +25,7 @@ Supported in a predicate:
 | `x.Name.Contains("a")` | `LIKE` with the term's metacharacters escaped |
 | `x.Name.StartsWith` / `EndsWith` | anchored `LIKE` |
 | `string.IsNullOrEmpty(x.Name)` | `(col IS NULL OR col = '')` |
-| `ids.Contains(x.Id)` | `IN (…)`, chunked past `maxInClauseValues` |
+| `ids.Contains(x.Id)` | `IN (…)`, one bound parameter per value (no chunking) |
 
 An empty collection in `Contains` produces `FALSE` rather than the invalid `IN ()`.
 
@@ -37,7 +37,7 @@ var withOrders = await pg.Query<User>()
     .ToListAsync();
 
 var inRegion = await pg.Query<User>()
-    .WhereIn<Region, long>((u, r) => u.RegionId, r => r.Id, r => r.IsActive)
+    .WhereIn<Region, long>(u => u.RegionId, r => r.Id, r => r.IsActive)
     .ToListAsync();
 ```
 
@@ -63,9 +63,11 @@ result is materialized by a compiled mapper, not reflection.
 ### Offset paging
 
 ```csharp
-var paged = await pg.Query<User>().OrderBy(u => u.Id).GetPagedAsync(page: 3, pageSize: 25);
-// paged.Value.Items / TotalItems / PageNumber / PageSize
+var paged = await pg.Query<User>().OrderBy(u => u.Id).ToPagedListAsync(page: 3, pageSize: 25);
+// paged.Value.Items / TotalItems / PageNumber / PageSize / TotalPages
 ```
+
+The repository has its own `GetPagedAsync(page, pageSize)` for the unfiltered case.
 
 ### Cursor paging
 
@@ -97,7 +99,8 @@ columns page correctly.
 ```csharp
 var rows = await pg.Query<User>()
     .Join<Order, long, UserOrder>(
-        (u, o) => u.Id == o.UserId,
+        u => u.Id,                      // left key
+        o => o.UserId,                  // right key
         (u, o) => new UserOrder { Email = u.Email, Total = o.Total })
     .Where((u, o) => o.Total > 100)
     .OrderByDescending((u, o) => o.Total)
@@ -119,16 +122,21 @@ var perDay = await pg.Query<Order>()
     .ToListAsync();
 ```
 
-Scalar terminals: `CountAsync`, `SumAsync`, `MinAsync`, `MaxAsync`, `AverageAsync`, `AnyAsync`.
+Scalar terminals on the query builder: `CountAsync`, `SumAsync`, `MinAsync`, `MaxAsync`,
+`AverageAsync`. (`Count` / `Any` are available *inside* a grouped projection as `g.Count()`
+and `g.Any()`; there is no `AnyAsync` terminal.)
 
 `SqlFn` exposes server-side functions for use inside a **grouped** query's key or projection.
 They are not translated in an ungrouped `Select`, which supports plain column access only —
 that throws `NotSupportedException` when the query is built.
 
-The translations target PostgreSQL, not MySQL: `Year`/`Month`/`Day`/`Hour`/`Minute`/`DayOfWeek`
-become `EXTRACT(… FROM x)::int`, `Date(x)` becomes `x::date`, `IfNull(a, b)` becomes
-`COALESCE(a, b)`, and `BucketUtc(x, n)` becomes
-`to_timestamp(floor(extract(epoch from x) / n) * n)`.
+The translations target PostgreSQL, not MySQL. The date parts are also normalised to UTC
+first, so they do not swing with the server's session `TimeZone`:
+`Year`/`Month`/`Day`/`Hour`/`Minute`/`DayOfWeek` become
+`EXTRACT(… FROM (x) AT TIME ZONE 'UTC')::int` and `Date(x)` becomes
+`((x) AT TIME ZONE 'UTC')::date`. `IfNull(a, b)` becomes `COALESCE(a, b)`, `BucketUtc(x, n)`
+becomes `to_timestamp(floor(EXTRACT(EPOCH FROM x) / n) * n)`, and `Round(v, d)` becomes
+`ROUND(v::numeric, d)::double precision` — PostgreSQL's two-argument `round` is numeric-only.
 
 `DayOfWeek` needs no adjustment here: PostgreSQL's `DOW` is already 0–6 from Sunday, matching
 .NET's `DayOfWeek`, where MySQL's `DAYOFWEEK` is 1–7 and the MySQL library subtracts one.
@@ -181,6 +189,13 @@ await pg.ExecuteSqlAsync("REFRESH MATERIALIZED VIEW \"public\".\"user_stats\"");
 Pass values as parameters. Never interpolate them into the SQL string — the builder cannot
 protect a statement you assembled yourself.
 
+> **Raw SQL does not join a transaction.** `SqlQueryAsync`, `SqlScalarAsync` and
+> `ExecuteSqlAsync` have no `TransactionScope` overload and always take their own pooled
+> connection, so a call made inside an `await using` scope commits on its own and is *not*
+> rolled back with the scope. For transactional work use `GetRepository<T>(tx)` and
+> `Query<T>(tx)`, or `IMigrationContext.ExecuteAsync` inside a migration — those do run on
+> the scope's connection.
+
 ## Transactions
 
 ```csharp
@@ -192,6 +207,9 @@ await pg.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
 
 await tx.CommitAsync();      // without this, disposal rolls back
 ```
+
+Only `GetRepository<T>(tx)` and `Query<T>(tx)` enlist on the scope. The raw-SQL entry points
+do not — see the note above.
 
 The scope rolls back if it is disposed without a commit, so an early `return` or a thrown
 exception cannot silently leave a half-applied transaction.

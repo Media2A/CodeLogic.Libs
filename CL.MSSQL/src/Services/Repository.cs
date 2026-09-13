@@ -104,7 +104,8 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Bulk-inserts a collection of entities using real batched INSERT statements.
-    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// Batch size is <c>maxBatchInsertSize</c> (default 500), further reduced so a single
+    /// statement stays under SQL Server's 2,100-parameter limit for the column count.
     /// </summary>
     public async Task<Result<int>> InsertManyAsync(IEnumerable<T> entities, CancellationToken ct = default)
     {
@@ -167,10 +168,12 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Inserts a single entity, or updates all non-auto-PK columns to the entity's values
-    /// if a UNIQUE/PRIMARY-KEY conflict occurs (set semantics). Issues
-    /// <c>INSERT ... AS new locked source-table upsert</c> (SQL Server 2019+ alias syntax).
-    /// On a new insert the auto-PK is refreshed from <c>OUTPUT INSERTED</c>; on a pure
-    /// update the entity's existing PK value is preserved.
+    /// if a UNIQUE/PRIMARY-KEY conflict occurs (set semantics). T-SQL has no upsert statement
+    /// and <c>MERGE</c> is not used; instead the row is staged in a table variable and matched
+    /// against the target with <c>WITH (UPDLOCK, HOLDLOCK)</c> under a <c>SERIALIZABLE</c>
+    /// transaction (started here when the caller has none), doing <c>UPDATE</c>-then-conditional-
+    /// <c>INSERT</c>. On a new insert the auto-PK is refreshed from <c>OUTPUT INSERTED</c>; on a
+    /// pure update the entity's existing PK value is preserved.
     /// </summary>
     public async Task<Result<T>> UpsertAsync(T entity, CancellationToken ct = default)
     {
@@ -222,8 +225,9 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Bulk-upserts a collection of entities using batched
-    /// <c>INSERT ... locked source-table upsert</c> statements (set semantics).
-    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// locked source-table upsert statements (set semantics). Batch size is
+    /// <c>maxBatchInsertSize</c> (default 500), further reduced so a single statement stays
+    /// under SQL Server's 2,100-parameter limit for the column count.
     /// Returns the total rows-affected count (SQL Server counts 1 for each insert and 2 for each
     /// update, so this is not equal to <c>entities.Count</c>).
     /// </summary>
@@ -290,8 +294,9 @@ public sealed class Repository<T> where T : class, new()
     /// Inserts <paramref name="insertSeed"/> if no UNIQUE/PRIMARY-KEY conflict occurs;
     /// otherwise applies increment / set semantics to the listed properties on conflict.
     /// Properties NOT listed in either array are insert-only — present in the
-    /// <c>VALUES</c> clause but absent from <c>locked source-table upsert</c> (so they don't
-    /// change on conflict — useful for <c>created_utc</c> style columns). Property names
+    /// <c>VALUES</c> clause but absent from the <c>UPDATE ... SET</c> list of the locked
+    /// source-table upsert (so they don't change on conflict — useful for <c>created_utc</c>
+    /// style columns). Property names
     /// resolve through <see cref="EntityMetadata{T}"/> so callers can use
     /// <c>nameof(...)</c> for compile-time-safe column references.
     /// </summary>

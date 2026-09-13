@@ -4,7 +4,7 @@ namespace CL.PostgreSQL.Localization;
 
 /// <summary>
 /// Localized strings for the CL.PostgreSQL library.
-/// Serialized to / from <c>mysql.{culture}.json</c> in the library's localization directory.
+/// Serialized to / from <c>postgresql.{culture}.json</c> in the library's localization directory.
 /// </summary>
 [LocalizationSection("postgresql")]
 public class PostgreSQLStrings : LocalizationModelBase

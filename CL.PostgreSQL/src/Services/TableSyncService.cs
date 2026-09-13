@@ -122,7 +122,7 @@ public sealed class TableSyncService
                 return Result<SyncResult>.Success(SkipResult(null));
             }
 
-            // ── CRC fast-path ── consult the sentinel before any information_schema diffing.
+            // ── CRC fast-path ── consult the sentinel before any pg_catalog diffing.
             var modelCrc = _analyzer.ComputeSchemaCrc(entityType);
             var state = await _stateStore.GetStateAsync(stateKey, connectionId, ct).ConfigureAwait(false);
 

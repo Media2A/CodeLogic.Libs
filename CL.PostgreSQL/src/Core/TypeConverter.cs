@@ -11,7 +11,8 @@ namespace CL.PostgreSQL.Core;
 internal static class TypeConverter
 {
     /// <summary>
-    /// Returns the PostgreSQL DDL type string for the given column attribute (e.g., "VARCHAR(255)", "DECIMAL(10,2)").
+    /// Returns the PostgreSQL DDL type string for the given column attribute
+    /// (e.g. "character varying(255)", "numeric(10,2)", "timestamp with time zone").
     /// When <paramref name="storageType"/> is not <see cref="StorageType.Default"/> it overrides
     /// the <see cref="ColumnAttribute.DataType"/>.
     /// </summary>

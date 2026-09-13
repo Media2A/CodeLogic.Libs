@@ -204,10 +204,11 @@ public sealed class ConnectionManager
     }
 
     /// <summary>
-    /// PostgreSQL errors that are safe to retry. These are the SQLSTATE class 40
-    /// transaction-rollback codes: 40001 serialization failure (raised by a
-    /// serializable/repeatable-read conflict) and 40P01 deadlock detected. Both mean the
-    /// transaction was rolled back cleanly and re-running it may succeed.
+    /// PostgreSQL errors that are safe to retry: the SQLSTATE class 40 transaction-rollback
+    /// codes 40001 (serialization failure, raised by a serializable/repeatable-read conflict)
+    /// and 40P01 (deadlock detected), which both mean the transaction rolled back cleanly and
+    /// re-running it may succeed, plus 55P03 (lock not available), which means a
+    /// <c>lock_timeout</c> wait expired and the lock may be free on the next attempt.
     /// </summary>
     private static bool IsTransient(PostgresException ex) =>
         ex.SqlState is "40001" or "40P01" or "55P03";

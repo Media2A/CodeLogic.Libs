@@ -10,6 +10,75 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 - Corrected the `SqlFn` XML documentation for the date-part helpers, which still described
   MySQL's `DAYOFWEEK(d) - 1` adjustment. PostgreSQL's `EXTRACT(DOW …)` already matches .NET's
   numbering and no adjustment is applied.
+- **Raw SQL never joins a `TransactionScope`.** `SqlQueryAsync`, `SqlScalarAsync` and
+  `ExecuteSqlAsync` have no scope overload and always take their own pooled connection, so a
+  call inside an `await using` scope commits independently and is not rolled back with it.
+  The query-builder page now warns about this and points at `GetRepository<T>(tx)`,
+  `Query<T>(tx)` and `IMigrationContext`.
+- **`[RetainDays]` only runs for entities synced before `CodeLogic.StartAsync()`.** The
+  retention worker is constructed at start-up from a snapshot of the registered entity
+  types, and entities register through `SyncTableAsync` / `SyncSchemaAsync`. Syncing after
+  `StartAsync()` — the order every quick-start shows — leaves the worker with nothing to do.
+  The schema page now states the ordering requirement and the `RunOnceAsync` alternative.
+- **`RegisterDatabase` does not exist.** The README and overview showed
+  `pg.RegisterDatabase(id, config)` for adding a connection at runtime; the real call is
+  `pg.ConnectionManager.RegisterConfiguration(config, id)` — config first, id second.
+- **The typed join sample would not compile.** `Join<TRight, TKey, TResult>` takes a left
+  key selector, a right key selector and a result selector; the sample passed a two-argument
+  join *condition* instead. `WhereIn` was shown with a two-parameter outer selector for the
+  same reason — it takes `u => u.Column`.
+- **Offset paging on the query builder is `ToPagedListAsync(page, pageSize)`**, not
+  `GetPagedAsync` (which is the repository's method).
+- **`RollbackAsync` takes a `MigrationVersion`**, not a `toVersion` string; the migrations
+  sample now shows `new MigrationVersion("1.3.0", 0)`. `pg.RestoreSchemaAsync(...)` is the
+  library-level restore entry point, not `pg.RestoreTableSchemaAsync`.
+- **`RegisterCachePool`'s third argument is `maxIdleFires` (an `int`), and its warm-up
+  callback is a `Func<Task>`** — the caching sample passed a query lambda in the int slot.
+  The default `maxIdleFires` is 10, not 3, and it retires an idle *entry* rather than
+  stopping the pool's timer.
+- **There is no `AnyAsync` terminal** on the query builder; `Any` exists only inside a
+  grouped projection as `g.Any()`.
+- **Date-part translations normalise to UTC.** The query-builder page now shows the real
+  SQL — `EXTRACT(… FROM (x) AT TIME ZONE 'UTC')::int`, `((x) AT TIME ZONE 'UTC')::date`, and
+  `ROUND(v::numeric, d)::double precision` for `SqlFn.Round`.
+- **`IN` lists are never chunked.** Several pages claimed `Contains` chunked at
+  `maxInClauseValues`; every value is emitted in one list and the setting is not consulted.
+  Chunk large sets yourself.
+- **`EXPLAIN` capture and the N+1 detector are not implemented.** `captureExplainOnSlowQuery`
+  and `n1DetectorThreshold` are reserved: no call site runs `EXPLAIN`, so
+  `SlowQueryEvent.ExplainJson` is always null, and `N1QueryDetectedEvent` is never published.
+  The feature list, event table and performance page no longer advertise them as working.
+- **Documented several configuration keys that nothing reads.** `maxBatchInsertSize`,
+  `maxInClauseValues`, `defaultStringSize`, `queryTimeoutMs`, `preparedStatementCacheSize`,
+  `backupDirectory`, `cacheEnabledOverride`, and the cache section's `defaultTtlSeconds` and
+  `publishEvents` are now marked as not currently applied, naming the value actually in force.
+- **`defaultSchema` does not move entities.** It is applied as the connection's
+  `search_path`; an entity without `[Table(Schema = …)]` always maps to the literal `public`.
+- **`GetCacheStats()` returns structure, not counters** — total entries, entries by table
+  and table-version counters. It has never reported hits, misses or evictions.
+  `GetCachePoolStats()` likewise reports interval, entry count and tick counts, not hit counts.
+- **Transient retry also covers SQLSTATE `55P03`** (lock not available), alongside `40001`
+  and `40P01`. The config field's XML still named MySQL's error numbers 1213 and 1205.
+- **`UpsertWithIncrementsAsync` return value.** Its XML documented MySQL's
+  "2 = update" affected-row convention; PostgreSQL counts an `ON CONFLICT … DO UPDATE` row
+  once, so the result is 1 whether the row was inserted or updated.
+- Removed further MySQL leftovers from the XML comments: the config file was named
+  `config.mysql.json` and the localization file `mysql.{culture}.json`; the column-reference
+  builder claimed backtick quoting (PostgreSQL uses double quotes); the CRC, schema-state and
+  sync comments said `information_schema` where the analyzer reads `pg_catalog`; the
+  retention worker described a `DELETE … LIMIT` friendly to "InnoDB's undo log" rather than
+  its actual `ctid` + `FOR UPDATE SKIP LOCKED` batching; and the query-builder samples called
+  `mysql.Query<T>()`.
+- `[Column(Charset = …)]` is documented as what it emits — a `COLLATE` clause — and
+  `[Column(Unsigned = …)]` as inert, since PostgreSQL has no unsigned integer types.
+- `IMigrationContext` offers `ExecuteAsync`, `QueryAsync<T>`, `ScalarAsync<T>` and
+  `SyncTableAsync<T>` plus the raw connection and transaction; it has no `TableExistsAsync`
+  and does not expose the analyzer.
+- Retention's schedule is stated: a first pass five minutes after startup, then every 24 hours.
+- Removed a duplicated `<summary>` block on the schema analyzer's column-diff check whose
+  first copy still described MySQL facets (auto-increment, charset).
+- Corrected the `connectionLifetime` XML (it is the pooled *idle* lifetime) and the
+  `TypeConverter` example type strings (`character varying(255)`, not `VARCHAR(255)`).
 
 ### Fixed (found while completing PostgreSQL coverage)
 

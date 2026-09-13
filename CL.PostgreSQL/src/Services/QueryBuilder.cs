@@ -100,7 +100,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <c>EXISTS (SELECT 1 FROM `inner` WHERE …)</c>.
     /// <para>Example:
     /// <code>
-    /// mysql.Query&lt;Order&gt;()
+    /// pg.Query&lt;Order&gt;()
     ///   .WhereExists&lt;Shipment&gt;((o, s) =&gt; s.OrderId == o.Id &amp;&amp; s.Status == "sent")
     /// </code></para>
     /// <para><b>Not supported:</b> EXISTS against the same table as the outer query
@@ -143,7 +143,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <typeparamref name="TInner"/>).
     /// <para>Example:
     /// <code>
-    /// mysql.Query&lt;Order&gt;()
+    /// pg.Query&lt;Order&gt;()
     ///   .WhereIn&lt;Customer, long&gt;(o =&gt; o.CustomerId, c =&gt; c.Id, c =&gt; c.IsVip)
     /// </code></para>
     /// <para>A query carrying a subquery filter is not cacheable and cannot be turned into
@@ -260,7 +260,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <para>
     /// Example:
     /// <code>
-    /// await mysql.Query&lt;Order&gt;()
+    /// await pg.Query&lt;Order&gt;()
     ///     .Where(o =&gt; o.Total &gt; 100)
     ///     .Join&lt;Customer, long, OrderView&gt;(
     ///         o =&gt; o.CustomerId,             // left key
@@ -886,7 +886,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <para>
     /// Example:
     /// <code>
-    /// await mysql.Query&lt;Ticket&gt;()
+    /// await pg.Query&lt;Ticket&gt;()
     ///     .Where(t =&gt; t.Status == "open" &amp;&amp; t.CreatedUtc &lt; cutoff)
     ///     .UpdateAsync(t =&gt; new Ticket { Status = "stale", ReviewedUtc = now });
     /// </code>
