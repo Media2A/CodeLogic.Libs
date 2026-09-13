@@ -170,7 +170,7 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                     list.Add(_projection.Materializer(reader));
                 return list;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             RecordTiming(sql, sw.ElapsedMilliseconds, items.Count);
@@ -203,7 +203,7 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
             {
                 await using var cmd = BuildCommand(conn, sql, parms);
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<long>.Success(count);
         }
@@ -248,6 +248,10 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
     private SqlCommand BuildCommand(SqlConnection conn, string sql, Dictionary<string, object?> parms)
     {
         var cmd = conn.CreateCommand();
+        // Configured QueryTimeoutMs wins over the connection string's Command Timeout for
+        // commands this library issues.
+        if (_connectionManager.QueryCommandTimeoutSeconds(_connectionId) is { } timeoutSeconds)
+            cmd.CommandTimeout = timeoutSeconds;
         if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
         cmd.CommandText = sql;
         foreach (var kv in parms)
@@ -255,11 +259,14 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
         return cmd;
     }
 
-    private async Task<T> ExecuteAsync<T>(Func<SqlConnection, Task<T>> action)
+    private async Task<T> ExecuteAsync<T>(Func<SqlConnection, Task<T>> action, CancellationToken ct)
     {
         if (_transactionScope is not null)
             return await action(_transactionScope.Connection).ConfigureAwait(false);
-        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
+
+        // The token has to reach ExecuteWithConnectionAsync, otherwise opening the
+        // connection (and any transient-failure retry around it) ignores cancellation.
+        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
     private void RecordTiming(string sql, long elapsedMs, int rowCount)

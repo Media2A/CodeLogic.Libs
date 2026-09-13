@@ -3,6 +3,14 @@ namespace CL.MySQL2.Models;
 /// <summary>MySQL column data types.</summary>
 public enum DataType
 {
+    /// <summary>
+    /// No explicit type was declared on the column. The type is inferred from the CLR
+    /// property type via <see cref="CL.MySQL2.Core.TypeConverter.InferColumn"/>. This is the
+    /// default so that <c>[Column(Name = "x")]</c> without a <c>DataType</c> infers correctly
+    /// instead of silently resolving to <see cref="TinyInt"/>.
+    /// </summary>
+    Unspecified = 0,
+
     // Numeric
     TinyInt,
     SmallInt,

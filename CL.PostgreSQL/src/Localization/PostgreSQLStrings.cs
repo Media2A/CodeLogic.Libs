@@ -2,11 +2,30 @@ using CodeLogic.Core.Localization;
 
 namespace CL.PostgreSQL.Localization;
 
+/// <summary>
+/// Localized strings for the CL.PostgreSQL library.
+/// Serialized to / from <c>postgresql.{culture}.json</c> in the library's localization directory.
+/// </summary>
 [LocalizationSection("postgresql")]
 public class PostgreSQLStrings : LocalizationModelBase
 {
-    [LocalizedString(Description = "Logged after the library completes initialization. {0} = database count.")]
-    public string LibraryInitialized { get; set; } = "PostgreSQL library initialized with {0} database(s)";
+    [LocalizedString(Description = "Logged when a database connection is successfully established.")]
+    public string ConnectionEstablished { get; set; } = "Database connection established";
+
+    [LocalizedString(Description = "Logged when a connection attempt fails.")]
+    public string ConnectionFailed { get; set; } = "Failed to connect to database";
+
+    [LocalizedString(Description = "Logged when a database connection is closed.")]
+    public string ConnectionClosed { get; set; } = "Database connection closed";
+
+    [LocalizedString(Description = "Logged when a test connection succeeds.")]
+    public string ConnectionTestSuccess { get; set; } = "Connection test successful";
+
+    [LocalizedString(Description = "Logged when a test connection fails.")]
+    public string ConnectionTestFailed { get; set; } = "Connection test failed";
+
+    [LocalizedString(Description = "Logged after the library completes initialization.")]
+    public string LibraryInitialized { get; set; } = "PostgreSQL library initialized";
 
     [LocalizedString(Description = "Logged when the library starts.")]
     public string LibraryStarted { get; set; } = "PostgreSQL library started";
@@ -14,33 +33,57 @@ public class PostgreSQLStrings : LocalizationModelBase
     [LocalizedString(Description = "Logged when the library stops.")]
     public string LibraryStopped { get; set; } = "PostgreSQL library stopped";
 
-    [LocalizedString(Description = "Logged when a database is registered. {0} = connection ID, {1} = host.")]
-    public string ConnectionRegistered { get; set; } = "Registered database: {0} -> {1}";
+    [LocalizedString(Description = "Logged when table synchronization begins. {0} = table name.")]
+    public string TableSyncStarted { get; set; } = "Table synchronization started for {0}";
 
-    [LocalizedString(Description = "Logged when a connection test succeeds. {0} = connection ID, {1} = server version.")]
-    public string ConnectionTestSuccess { get; set; } = "Connection '{0}' test successful (v{1})";
+    [LocalizedString(Description = "Logged when table synchronization completes. {0} = table name.")]
+    public string TableSyncCompleted { get; set; } = "Table synchronization completed for {0}";
 
-    [LocalizedString(Description = "Logged when a connection test fails. {0} = connection ID, {1} = error.")]
-    public string ConnectionTestFailed { get; set; } = "Connection '{0}' test failed: {1}";
+    [LocalizedString(Description = "Logged when a new table is created. {0} = table name.")]
+    public string TableCreated { get; set; } = "Table {0} created successfully";
 
-    [LocalizedString(Description = "Logged when table sync begins. {0} = schema, {1} = table.")]
-    public string TableSyncStarted { get; set; } = "Table sync started: {0}.{1}";
+    [LocalizedString(Description = "Logged when a table schema is updated. {0} = table name.")]
+    public string TableUpdated { get; set; } = "Table {0} updated successfully";
 
-    [LocalizedString(Description = "Logged when a table is created. {0} = schema, {1} = table.")]
-    public string TableCreated { get; set; } = "Table created: {0}.{1}";
-
-    [LocalizedString(Description = "Logged when a table is synced. {0} = schema, {1} = table.")]
-    public string TableSynced { get; set; } = "Table synced: {0}.{1}";
-
-    [LocalizedString(Description = "Logged when table sync fails. {0} = schema, {1} = table.")]
-    public string TableSyncFailed { get; set; } = "Table sync failed: {0}.{1}";
+    [LocalizedString(Description = "Logged when table synchronization fails. {0} = table name.")]
+    public string TableSyncFailed { get; set; } = "Table synchronization failed for {0}";
 
     [LocalizedString(Description = "Logged when a slow query is detected. {0} = elapsed ms, {1} = query.")]
     public string SlowQueryDetected { get; set; } = "Slow query detected ({0}ms): {1}";
 
-    [LocalizedString(Description = "Logged when all connections are healthy. {0} = connection count.")]
-    public string HealthCheckPassed { get; set; } = "All {0} database connection(s) operational";
+    [LocalizedString(Description = "Logged after a record is inserted. {0} = table name.")]
+    public string RecordInserted { get; set; } = "Record inserted into {0}";
 
-    [LocalizedString(Description = "Logged when health check fails. {0} = failed connection IDs.")]
-    public string HealthCheckFailed { get; set; } = "Failed connections: {0}";
+    [LocalizedString(Description = "Logged after bulk insert. {0} = count, {1} = table name.")]
+    public string RecordsBulkInserted { get; set; } = "{0} records inserted into {1}";
+
+    [LocalizedString(Description = "Logged after a record is updated. {0} = table name.")]
+    public string RecordUpdated { get; set; } = "Record updated in {0}";
+
+    [LocalizedString(Description = "Logged after a record is deleted. {0} = table name.")]
+    public string RecordDeleted { get; set; } = "Record deleted from {0}";
+
+    [LocalizedString(Description = "Logged when a requested record does not exist. {0} = table name.")]
+    public string RecordNotFound { get; set; } = "Record not found in {0}";
+
+    [LocalizedString(Description = "Logged when a transaction starts.")]
+    public string TransactionStarted { get; set; } = "Transaction started";
+
+    [LocalizedString(Description = "Logged when a transaction commits successfully.")]
+    public string TransactionCommitted { get; set; } = "Transaction committed successfully";
+
+    [LocalizedString(Description = "Logged when a transaction is rolled back.")]
+    public string TransactionRolledBack { get; set; } = "Transaction rolled back";
+
+    [LocalizedString(Description = "Logged when a health check passes.")]
+    public string HealthCheckPassed { get; set; } = "Health check passed";
+
+    [LocalizedString(Description = "Logged when a health check fails. {0} = reason.")]
+    public string HealthCheckFailed { get; set; } = "Health check failed: {0}";
+
+    [LocalizedString(Description = "Logged on configuration error. {0} = error detail.")]
+    public string ConfigurationError { get; set; } = "Configuration error: {0}";
+
+    [LocalizedString(Description = "Logged on database error. {0} = error detail.")]
+    public string DatabaseError { get; set; } = "Database error: {0}";
 }

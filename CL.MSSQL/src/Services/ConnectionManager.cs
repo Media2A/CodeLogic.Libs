@@ -17,7 +17,9 @@ public sealed class ConnectionManager
     private readonly IEventBus? _events;
 
     // Per-connection-id configuration storage
-    private readonly Dictionary<string, SqlServerDatabaseConfig> _configs = new(StringComparer.OrdinalIgnoreCase);
+    // Concurrent: RegisterConfiguration can run while other threads resolve a
+    // connection, and a plain Dictionary is not safe under that mix.
+    private readonly ConcurrentDictionary<string, SqlServerDatabaseConfig> _configs = new(StringComparer.OrdinalIgnoreCase);
 
     // Per-connection-id open connection counter
     private readonly ConcurrentDictionary<string, int> _openCounts = new(StringComparer.OrdinalIgnoreCase);
@@ -66,6 +68,18 @@ public sealed class ConnectionManager
     /// <summary>Builds the ADO.NET connection string for the given connection ID.</summary>
     public string GetConnectionString(string connectionId = "Default")
         => RequireConfig(connectionId).BuildConnectionString();
+
+    /// <summary>
+    /// The command timeout, in whole seconds, that library-issued query commands should carry
+    /// for this connection id — <see cref="SqlServerDatabaseConfig.QueryTimeoutMs"/> rounded up.
+    /// Returns null when the connection is unknown or the timeout is set to 0, in which case the
+    /// command keeps whatever the connection string's <c>Command Timeout</c> gave it.
+    /// </summary>
+    internal int? QueryCommandTimeoutSeconds(string connectionId)
+    {
+        var ms = GetConfiguration(connectionId)?.QueryTimeoutMs ?? 0;
+        return ms <= 0 ? null : Math.Max(1, (int)Math.Ceiling(ms / 1000.0));
+    }
 
     // ── Connection lifecycle ───────────────────────────────────────────────────
 

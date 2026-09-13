@@ -25,6 +25,7 @@ public sealed class GroupedQuery<TKey, TSource> where TSource : class, new()
     private readonly List<string> _orderBys;
     private readonly int? _limit;
     private readonly int? _offset;
+    private readonly bool _cacheDisallowed;
 
     internal GroupedQuery(
         ConnectionManager connectionManager,
@@ -38,7 +39,8 @@ public sealed class GroupedQuery<TKey, TSource> where TSource : class, new()
         TimeSpan? cacheTtl,
         List<string> orderBys,
         int? limit,
-        int? offset)
+        int? offset,
+        bool cacheDisallowed = false)
     {
         _connectionManager = connectionManager;
         _logger = logger;
@@ -52,6 +54,7 @@ public sealed class GroupedQuery<TKey, TSource> where TSource : class, new()
         _orderBys = orderBys;
         _limit = limit;
         _offset = offset;
+        _cacheDisallowed = cacheDisallowed;
     }
 
     /// <summary>
@@ -132,7 +135,8 @@ public sealed class GroupedQuery<TKey, TSource> where TSource : class, new()
 
         return new ProjectedQuery<TSource, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, sql_out, _parameters, compiled, _cacheTtl);
+            _slowQueryThresholdMs, sql_out, _parameters, compiled, _cacheTtl,
+            cacheDisallowed: _cacheDisallowed);
     }
 
     /// <summary>

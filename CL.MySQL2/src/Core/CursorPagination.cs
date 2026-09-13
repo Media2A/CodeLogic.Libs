@@ -65,9 +65,9 @@ internal static class CursorPagination
         {
             var terms = new List<string>();
             for (var prefix = 0; prefix < i; prefix++)
-                terms.Add($"`{orders[prefix].Column.ColumnName}` <=> @cursor_{prefix}");
+                terms.Add($"{MySqlDialect.Quote(orders[prefix].Column.ColumnName)} <=> @cursor_{prefix}");
 
-            var column = $"`{orders[i].Column.ColumnName}`";
+            var column = $"{MySqlDialect.Quote(orders[i].Column.ColumnName)}";
             var value = values[i];
             string? comparison;
             if (!orders[i].Descending)

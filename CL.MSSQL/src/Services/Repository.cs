@@ -72,7 +72,7 @@ public sealed class Repository<T> where T : class, new()
 
             var lastId = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 for (var i = 0; i < insertCols.Length; i++)
@@ -81,7 +81,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@p_{i}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute));
                 }
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -104,7 +104,8 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Bulk-inserts a collection of entities using real batched INSERT statements.
-    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// Batch size is <c>maxBatchInsertSize</c> (default 500), further reduced so a single
+    /// statement stays under SQL Server's 2,100-parameter limit for the column count.
     /// </summary>
     public async Task<Result<int>> InsertManyAsync(IEnumerable<T> entities, CancellationToken ct = default)
     {
@@ -128,7 +129,7 @@ public sealed class Repository<T> where T : class, new()
                     var end = Math.Min(start + batchSize, list.Count);
                     var count = end - start;
 
-                    await using var cmd = conn.CreateCommand();
+                    await using var cmd = NewCommand(conn);
                     if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
 
                     var valueTuples = new string[count];
@@ -151,7 +152,7 @@ public sealed class Repository<T> where T : class, new()
                     inserted += count;
                 }
                 return inserted;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             _logger?.Debug($"[MSSQL] Bulk-inserted {inserted} records into {table} in {sw.ElapsedMilliseconds}ms");
@@ -167,10 +168,12 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Inserts a single entity, or updates all non-auto-PK columns to the entity's values
-    /// if a UNIQUE/PRIMARY-KEY conflict occurs (set semantics). Issues
-    /// <c>INSERT ... AS new locked source-table upsert</c> (SQL Server 2019+ alias syntax).
-    /// On a new insert the auto-PK is refreshed from <c>OUTPUT INSERTED</c>; on a pure
-    /// update the entity's existing PK value is preserved.
+    /// if a UNIQUE/PRIMARY-KEY conflict occurs (set semantics). T-SQL has no upsert statement
+    /// and <c>MERGE</c> is not used; instead the row is staged in a table variable and matched
+    /// against the target with <c>WITH (UPDLOCK, HOLDLOCK)</c> under a <c>SERIALIZABLE</c>
+    /// transaction (started here when the caller has none), doing <c>UPDATE</c>-then-conditional-
+    /// <c>INSERT</c>. On a new insert the auto-PK is refreshed from <c>OUTPUT INSERTED</c>; on a
+    /// pure update the entity's existing PK value is preserved.
     /// </summary>
     public async Task<Result<T>> UpsertAsync(T entity, CancellationToken ct = default)
     {
@@ -188,7 +191,7 @@ public sealed class Repository<T> where T : class, new()
 
             var lastId = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 for (var i = 0; i < insertCols.Length; i++)
@@ -197,7 +200,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@p_0_{i}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute));
                 }
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -222,8 +225,9 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Bulk-upserts a collection of entities using batched
-    /// <c>INSERT ... locked source-table upsert</c> statements (set semantics).
-    /// Batches of up to <c>maxBatchInsertSize</c> (default 500) are sent per round-trip.
+    /// locked source-table upsert statements (set semantics). Batch size is
+    /// <c>maxBatchInsertSize</c> (default 500), further reduced so a single statement stays
+    /// under SQL Server's 2,100-parameter limit for the column count.
     /// Returns the total rows-affected count (SQL Server counts 1 for each insert and 2 for each
     /// update, so this is not equal to <c>entities.Count</c>).
     /// </summary>
@@ -250,7 +254,7 @@ public sealed class Repository<T> where T : class, new()
                     var end = Math.Min(start + batchSize, list.Count);
                     var count = end - start;
 
-                    await using var cmd = conn.CreateCommand();
+                    await using var cmd = NewCommand(conn);
                     if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
 
                     var valueTuples = new string[count];
@@ -272,7 +276,7 @@ public sealed class Repository<T> where T : class, new()
                     affected += Convert.ToInt32(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
                 }
                 return affected;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             _logger?.Debug($"[MSSQL] Bulk-upserted {list.Count} records into {table} in {sw.ElapsedMilliseconds}ms (rows affected: {affected})");
@@ -290,8 +294,9 @@ public sealed class Repository<T> where T : class, new()
     /// Inserts <paramref name="insertSeed"/> if no UNIQUE/PRIMARY-KEY conflict occurs;
     /// otherwise applies increment / set semantics to the listed properties on conflict.
     /// Properties NOT listed in either array are insert-only — present in the
-    /// <c>VALUES</c> clause but absent from <c>locked source-table upsert</c> (so they don't
-    /// change on conflict — useful for <c>created_utc</c> style columns). Property names
+    /// <c>VALUES</c> clause but absent from the <c>UPDATE ... SET</c> list of the locked
+    /// source-table upsert (so they don't change on conflict — useful for <c>created_utc</c>
+    /// style columns). Property names
     /// resolve through <see cref="EntityMetadata{T}"/> so callers can use
     /// <c>nameof(...)</c> for compile-time-safe column references.
     /// </summary>
@@ -355,7 +360,7 @@ public sealed class Repository<T> where T : class, new()
 
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 for (var i = 0; i < insertCols.Length; i++)
@@ -364,7 +369,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@p_0_{i}", TypeConverter.ToDbValue(col.Get(insertSeed), col.EffectiveStorageType), col.Attribute));
                 }
                 return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -409,7 +414,7 @@ public sealed class Repository<T> where T : class, new()
 
             var result = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
@@ -417,7 +422,7 @@ public sealed class Repository<T> where T : class, new()
                 if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 return map(reader);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -444,7 +449,7 @@ public sealed class Repository<T> where T : class, new()
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@val", TypeConverter.ToDbValue(value, col.EffectiveStorageType) ?? DBNull.Value);
@@ -453,7 +458,7 @@ public sealed class Repository<T> where T : class, new()
                 var items = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -479,7 +484,7 @@ public sealed class Repository<T> where T : class, new()
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -487,7 +492,7 @@ public sealed class Repository<T> where T : class, new()
                 var items = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -529,12 +534,12 @@ public sealed class Repository<T> where T : class, new()
 
             var (items, total) = await ExecuteAsync(async conn =>
             {
-                await using var countCmd = conn.CreateCommand();
+                await using var countCmd = NewCommand(conn);
                 if (_transactionScope is not null) countCmd.Transaction = _transactionScope.Transaction;
                 countCmd.CommandText = countSql;
                 var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
 
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = dataSql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -542,7 +547,7 @@ public sealed class Repository<T> where T : class, new()
                 var entities = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) entities.Add(map(reader));
                 return (entities, totalCount);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
@@ -562,22 +567,27 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
-    /// <summary>Returns the total row count for the table.</summary>
+    /// <summary>
+    /// Returns the total row count for the table. For an entity carrying
+    /// <see cref="Models.SoftDeleteAttribute"/> soft-deleted rows are excluded, so this agrees
+    /// with <see cref="GetAllAsync"/> and with the total reported by <see cref="GetPagedAsync"/>.
+    /// Use <c>Query&lt;T&gt;().IncludeDeleted().CountAsync()</c> to count every row.
+    /// </summary>
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
         {
             var table = EntityMetadata<T>.QualifiedTableName;
-            var sql = $"SELECT COUNT(*) FROM {table}";
+            var sql = $"SELECT COUNT(*) FROM {table}{SoftWhere()}";
             LogQuery(sql);
 
             var count = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<long>.Success(count);
         }
@@ -605,7 +615,7 @@ public sealed class Repository<T> where T : class, new()
 
             await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 for (var i = 0; i < setCols.Length; i++)
@@ -615,7 +625,7 @@ public sealed class Repository<T> where T : class, new()
                 }
                 cmd.Parameters.AddWithValue("@__pk", TypeConverter.ToDbValue(pk.Get(entity), pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -657,12 +667,12 @@ public sealed class Repository<T> where T : class, new()
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(table);
             return Result<bool>.Success(affected > 0);
@@ -686,13 +696,13 @@ public sealed class Repository<T> where T : class, new()
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@now", DateTime.UtcNow);
                 cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(table);
             return Result<bool>.Success(affected > 0);
@@ -730,13 +740,13 @@ public sealed class Repository<T> where T : class, new()
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@delta", delta);
                 cmd.Parameters.AddWithValue("@id", id);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(table);
             return Result<int>.Success(affected);
@@ -774,7 +784,9 @@ public sealed class Repository<T> where T : class, new()
         try
         {
             var table = EntityMetadata<T>.QualifiedTableName;
-            var (whereClause, parameters) = SqlServerExpressionVisitor.Translate(predicate);
+            var (whereClause, parameters) = SqlServerExpressionVisitor.Translate(
+                predicate, string.Empty, out var inListCount);
+            WarnOnLargeInList(inListCount);
             var sql = $"SELECT * FROM {table} WHERE {whereClause}{SoftAnd()}";
 
             LogQuery(sql);
@@ -782,7 +794,7 @@ public sealed class Repository<T> where T : class, new()
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = NewCommand(conn);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var kv in parameters)
@@ -792,7 +804,7 @@ public sealed class Repository<T> where T : class, new()
                 var items = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -876,12 +888,41 @@ public sealed class Repository<T> where T : class, new()
 
     private static string Q(string identifier) => SqlServerDialect.Quote(identifier);
 
-    private async Task<TResult> ExecuteAsync<TResult>(Func<SqlConnection, Task<TResult>> action)
+    /// <summary>
+    /// Creates a command carrying the configured <c>QueryTimeoutMs</c> for this connection.
+    /// The value overrides the connection string's <c>Command Timeout</c>; 0 leaves it alone.
+    /// </summary>
+    private SqlCommand NewCommand(SqlConnection conn)
+    {
+        var cmd = conn.CreateCommand();
+        if (_connectionManager.QueryCommandTimeoutSeconds(_connectionId) is { } timeoutSeconds)
+            cmd.CommandTimeout = timeoutSeconds;
+        return cmd;
+    }
+
+    private async Task<TResult> ExecuteAsync<TResult>(
+        Func<SqlConnection, Task<TResult>> action,
+        CancellationToken ct = default)
     {
         if (_transactionScope is not null)
             return await action(_transactionScope.Connection).ConfigureAwait(false);
 
-        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
+        // The token has to reach ExecuteWithConnectionAsync, otherwise opening the
+        // connection (and any transient-failure retry around it) ignores cancellation.
+        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
+    }
+
+    // MaxInClauseValues is advisory: the query still runs, but an oversized generated
+    // IN (...) list is logged once, naming the entity and the value count.
+    private void WarnOnLargeInList(int count)
+    {
+        if (count <= 0) return;
+        var max = _connectionManager.GetConfiguration(_connectionId)?.MaxInClauseValues ?? 0;
+        if (max <= 0 || count <= max) return;
+        _logger?.Warning(
+            $"[MSSQL] {typeof(T).Name}: a generated IN (...) list holds {count} values, above the " +
+            $"configured MaxInClauseValues of {max}. The query still runs — consider a join or a " +
+            "temp table if SQL Server rejects it on the 2,100-parameter limit.");
     }
 
     private void LogSlowQuery(string sql, long elapsedMs)

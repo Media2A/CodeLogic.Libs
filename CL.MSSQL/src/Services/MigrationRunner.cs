@@ -39,7 +39,7 @@ public sealed class MigrationRunner
     public MigrationRunner Register(IMigration migration)
     {
         ArgumentNullException.ThrowIfNull(migration);
-        _migrations.Add(migration);
+        AddIfNew(migration);
         return this;
     }
 
@@ -55,9 +55,23 @@ public sealed class MigrationRunner
             if (type.IsAbstract || type.IsInterface) continue;
             if (!typeof(IMigration).IsAssignableFrom(type)) continue;
             if (type.GetConstructor(Type.EmptyTypes) is null) continue;
-            _migrations.Add((IMigration)Activator.CreateInstance(type)!);
+            AddIfNew((IMigration)Activator.CreateInstance(type)!);
         }
         return this;
+    }
+
+    /// <summary>
+    /// Registers a migration unless one with the same id is already present. Registration
+    /// has to be idempotent: scanning an assembly after registering a migration by hand
+    /// would otherwise hold two copies, and since the apply pass filters candidates against
+    /// a snapshot of applied ids taken before it starts, both copies would run.
+    /// </summary>
+    private void AddIfNew(IMigration migration)
+    {
+        var id = MigrationId(migration);
+        if (_migrations.Any(m => string.Equals(MigrationId(m), id, StringComparison.Ordinal)))
+            return;
+        _migrations.Add(migration);
     }
 
     /// <summary>Stable migration ID stored in <c>__migrations.MigrationId</c>.</summary>

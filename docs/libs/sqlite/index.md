@@ -2,7 +2,7 @@
 
 > An embedded SQLite data-access layer for CodeLogic 4 — connection pooling, WAL, attribute-driven table sync, a repository, and a fluent LINQ-shaped query builder.
 
-`CL.SQLite` is the embedded-database sibling of `CL.MySQL2`. Map a plain class with attributes and the library keeps the live table in shape, then read and write through a `Repository<T>` or a fluent `QueryBuilder<T>`. It builds on [Microsoft.Data.Sqlite](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/), pools connections per database, and enables Write-Ahead Logging by default. Every fallible operation returns a `Result` / `Result<T>` — no exceptions for the expected failure paths.
+`CL.SQLite` is the embedded-database member of the `CL.*` data-access family. Map a plain class with attributes and the library keeps the live table in shape, then read and write through a `Repository<T>` or a fluent `QueryBuilder<T>`. It builds on [Microsoft.Data.Sqlite](https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/), pools connections per database, and enables Write-Ahead Logging by default. Every fallible operation returns a `Result` / `Result<T>` — no exceptions for the expected failure paths.
 
 | | |
 |---|---|
@@ -10,6 +10,8 @@
 | **Library class** | `CL.SQLite.SQLiteLibrary` |
 | **Config file** | `config.sqlite.json` |
 | **Dependencies** | Microsoft.Data.Sqlite 9.x |
+
+It is a deliberately smaller and older design than `CL.MySQL2` / `CL.MSSQL` / `CL.PostgreSQL`: the entry points are `GetRepository<T>()` and `GetQueryBuilder<T>()` (not `Query<T>()`), the attributes are `[SQLiteTable]` / `[SQLiteColumn]` (not `[Table]` / `[Column]`), and there is **no** result cache, `SqlFn` helper, typed join, cursor paging, transaction scope, migration *runner*, or soft-delete support here. See [Not included](#not-included).
 
 This overview covers loading, schema sync, the repository, configuration, the migration ledger, the health check, and events. The deep query material lives on its own sub-page:
 
@@ -49,7 +51,7 @@ else
 
 ## Connection pool & WAL
 
-Each named database has its own connection pool. Connections are reused up to `maxPoolSize` (default 10) and retired after about five minutes idle; the pool opens a fresh connection on demand when none is free. Pooling, the WAL journal mode (`useWAL`), and foreign-key enforcement (`enableForeignKeys`) are applied to every connection the pool hands out, so you never configure a raw `SqliteConnection` yourself.
+Each named database has its own connection pool. `maxPoolSize` (default 10) is a hard cap on *concurrently live* connections, not just idle ones: the pool reuses a free connection if it has one, opens a fresh one if it does not, and makes the caller wait once `maxPoolSize` connections are already checked out. A pooled connection that has sat idle for more than five minutes is disposed rather than reused. The WAL journal mode (`useWAL`) and foreign-key enforcement (`enableForeignKeys`) are applied as `PRAGMA` statements when a connection is opened — and so hold for its whole lifetime — so you never configure a raw `SqliteConnection` yourself.
 
 The `ConnectionManager` property exposes the pool for advanced use — active / pooled counts and a connectivity test per connection id.
 
@@ -82,13 +84,19 @@ public sealed class NoteRecord
 | Attribute | Purpose |
 |-----------|---------|
 | `[SQLiteTable("name")]` | Table name (defaults to the class name). |
-| `[SQLiteColumn]` | Maps a property. Settings: `ColumnName`, `DataType`, `Size`, `IsPrimaryKey`, `IsAutoIncrement`, `IsIndexed`, `IsUnique`, `IsNotNull`, `DefaultValue`. |
+| `[SQLiteColumn]` | Maps a property. Settings: `ColumnName`, `DataType`, `IsPrimaryKey`, `IsAutoIncrement`, `IsIndexed`, `IsUnique`, `IsNotNull`, `DefaultValue`, `Size`. |
 | `[SQLiteIndex(cols…)]` | Class-level index (repeatable). Settings: `IsUnique`, `Name`. |
 | `[SQLiteForeignKey(refTable, refColumn)]` | Foreign key with `OnDelete` / `OnUpdate`. |
 
 `ForeignKeyAction` values: `NoAction` (default), `Restrict`, `SetNull`, `SetDefault`, `Cascade`.
 
-`SQLiteDataType` values: `INTEGER`, `REAL`, `TEXT`, `BLOB`, `NUMERIC`, `DATETIME`, `DATE`, `BOOLEAN`, `UUID`. When `DataType` is omitted the column type is inferred from the property type; `DATETIME` / `DATE` / `BOOLEAN` / `UUID` are stored in SQLite's native affinities (`TEXT` / `INTEGER`) and converted automatically on read and write — along with `bool`, `DateTime`, `DateTimeOffset`, `Guid`, and `enum`.
+`SQLiteDataType` values: `INTEGER`, `REAL`, `TEXT`, `BLOB`, `NUMERIC`, `DATETIME`, `DATE`, `BOOLEAN`, `UUID`. `DATETIME` / `DATE` / `UUID` are declared as `TEXT` and `BOOLEAN` as `INTEGER`; values are converted automatically on read and write for `bool`, `DateTime`, `DateTimeOffset`, `Guid`, and `enum`.
+
+`Size`, when set, is appended to the declared type — `[SQLiteColumn(DataType = SQLiteDataType.TEXT, Size = 64)]` emits `"col" TEXT(64)`. SQLite records the declared type but **never enforces the length**, and the modifier does not change the column's type affinity; it is there so the file reads correctly in other tools. `Size = 0` (the default) emits no modifier.
+
+> `DataType` is **not** inferred from the property type. An omitted `DataType` is the enum's default value, `INTEGER`, so a `string` property with no explicit `DataType` is declared `INTEGER`. SQLite's dynamic typing means the text still stores and reads back correctly, but set `DataType` explicitly whenever the declared affinity matters (sorting, comparison, another tool reading the file).
+
+> `DateTimeOffset` is stored as a `yyyy-MM-dd HH:mm:ss.fffzzz` string and read back with its offset preserved. `DateTime` is stored as `yyyy-MM-dd HH:mm:ss.fff`, which carries no offset or kind marker, so a `DateTime` always comes back as `DateTimeKind.Unspecified` — use UTC, or a `DateTimeOffset`, when the zone matters.
 
 ```csharp
 [SQLiteTable("orders")]
@@ -130,6 +138,10 @@ Dictionary<string, Result<TableSyncResult>> ns =
 ```
 
 Every `SyncTableAsync` / `SyncTablesAsync` / `SyncNamespaceAsync` overload takes an optional `connectionId` (default `"Default"`). `TableSyncResult` carries `Success`, `Message`, and an optional `Exception`. The batch overloads return a dictionary keyed by table name so you can inspect each result.
+
+`SyncNamespaceAsync` scans **your calling assembly** and picks up only classes carrying `[SQLiteTable]`. For entities in another assembly, either pass the types to `SyncTablesAsync` or call the overload that names the assembly: `SyncNamespaceAsync(typeof(SomeEntity).Assembly, "MyApp.Entities")`.
+
+A database configured with `skipTableSync: true` short-circuits all three entry points: nothing is read or written and the result reports the sync as skipped.
 
 > Schema sync is **additive** — it creates tables, adds columns, and builds indexes. It never drops or retypes existing columns. For changes that aren't additive, use a migration (below) and run your own DDL.
 
@@ -181,6 +193,8 @@ var repo = db.GetRepository<Membership>();
 Result<Membership?> m = await repo.GetByKeysAsync(CancellationToken.None, 42L, 7L);
 Result             d = await repo.DeleteByKeysAsync(CancellationToken.None, 42L, 7L);
 ```
+
+Schema sync declares a multi-column key as a single table-level constraint — `PRIMARY KEY ("user_id", "group_id")` — with each key column `NOT NULL`. A single-column key stays inline, which is the only form in which SQLite accepts `AUTOINCREMENT`.
 
 ### Repository surface
 
@@ -275,14 +289,14 @@ Auto-generated on first run as `config.sqlite.json` (section `sqlite`). The conf
 |---------|------|---------|-------------|
 | `enabled` | `bool` | `true` | Per-database master switch. |
 | `databasePath` | `string` | `database.db` | Absolute, or relative to the library data directory. |
-| `connectionTimeoutSeconds` | `int` | `30` | Connection open timeout. |
-| `commandTimeoutSeconds` | `int` | `120` | Per-command timeout. |
-| `skipTableSync` | `bool` | `false` | Turn off automatic schema sync for this database. |
-| `cacheMode` | `enum` | `Default` | SQLite cache mode: `Default` / `Private` / `Shared`. |
+| `connectionTimeoutSeconds` | `uint` | `30` | Applied as `Default Timeout` on the connection string. In Microsoft.Data.Sqlite this is the single timeout knob: it is what `SqliteConnection.DefaultTimeout` reports and what every command created from the connection inherits as its `CommandTimeout`. 30 is the provider's own default, so leaving it alone changes nothing. |
+| `commandTimeoutSeconds` | `uint` | `120` | **Not wired, deliberately.** SQLite has no separate command timeout to set — see `connectionTimeoutSeconds` above, which owns the same underlying value. Setting this has no effect; the field is kept only because removing it would break existing config files. |
+| `skipTableSync` | `bool` | `false` | When `true`, `SyncTableAsync` / `SyncTablesAsync` / `SyncNamespaceAsync` do nothing for that database and return a success saying the sync was skipped. |
+| `cacheMode` | `enum` | `Default` | `Default` / `Private` / `Shared`. `Shared` and `Private` are put on the connection string (`Cache=Shared` / `Cache=Private`); `Default` omits the keyword and leaves the provider's own choice in place. |
 | `useWAL` | `bool` | `true` | Set `journal_mode=WAL` for better concurrency. |
-| `enableForeignKeys` | `bool` | `true` | Enforce foreign-key constraints (`PRAGMA foreign_keys`). |
-| `maxPoolSize` | `int` | `10` | Maximum pooled connections per database. |
-| `slowQueryThresholdMs` | `int` | `500` | Threshold above which a query is logged as slow. |
+| `enableForeignKeys` | `bool` | `true` | Enforce foreign-key constraints. `PRAGMA foreign_keys` is sent in **both** directions on every connection, so `false` genuinely disables enforcement (Microsoft.Data.Sqlite would otherwise enable it for you). |
+| `maxPoolSize` | `int` | `10` | Cap on pooled **and** concurrently live connections per database. |
+| `slowQueryThresholdMs` | `int` | `500` | Queries taking at least this long are logged as a warning and published as a `SlowQueryEvent`. Read once per `GetRepository` / `GetQueryBuilder` call; changing it affects only instances created afterwards. |
 
 A database with `enabled: false` is skipped at startup; if no database is enabled the library initializes disabled and the health check reports healthy-but-disabled.
 
@@ -293,6 +307,11 @@ A database with `enabled: false` is skipped at startup; if no database is enable
 | Event | Published when |
 |-------|----------------|
 | `TableSyncedEvent` | A table is reconciled by schema sync (carries `TableName`, `Created`, `Message`, `SyncedAt`). |
+| `SlowQueryEvent` | A repository or query-builder statement takes at least `slowQueryThresholdMs` (carries `TableName`, `Query`, `ElapsedMs`, `DetectedAt`). Published alongside the logger warning. |
+
+## Not included
+
+Compared with the `CL.MySQL2` / `CL.MSSQL` / `CL.PostgreSQL` siblings, this library deliberately does **not** offer: a result cache or cache pools, retention/cleanup workers, a `SqlFn` SQL-function helper, typed joins, cursor-based paging, transaction or unit-of-work scopes, soft delete, bulk insert, or an Up/Down migration runner. There is also no public transaction API — each operation runs on its own pooled connection in SQLite's implicit autocommit mode. For multi-statement atomicity, issue `BEGIN` / `COMMIT` yourself through `ConnectionManager.ExecuteAsync`, which keeps one connection for the duration of the delegate.
 
 ## See also
 

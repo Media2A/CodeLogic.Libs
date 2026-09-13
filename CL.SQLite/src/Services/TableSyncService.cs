@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using CL.SQLite.Events;
 using CL.SQLite.Models;
 using CodeLogic.Core.Events;
@@ -48,6 +49,10 @@ public sealed class TableSyncService
     /// Creates the table if it does not exist, or adds any missing columns if it does.
     /// Indexes declared via attributes are also created.
     /// </summary>
+    /// <remarks>
+    /// When the target connection is configured with <c>SkipTableSync</c>, nothing is read or
+    /// written and the call succeeds with a result saying the sync was skipped.
+    /// </remarks>
     /// <typeparam name="T">The entity type whose table should be synchronized.</typeparam>
     /// <param name="connectionId">Named SQLite connection to sync against.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -59,10 +64,17 @@ public sealed class TableSyncService
         var entityType = typeof(T);
         var tableName = SchemaAnalyzer.GetTableName(entityType);
 
-        _logger?.Info($"[SQLite] Syncing table '{tableName}'...");
+        _logger?.Info($"[SQLite] {string.Format(SQLiteObservability.Strings.TableSyncStarted, tableName)}");
 
         try
         {
+            if (_connectionManager.GetConfiguration(connectionId).SkipTableSync)
+            {
+                var skipped = $"Table sync skipped for '{tableName}': SkipTableSync is set on connection '{connectionId}'";
+                _logger?.Info($"[SQLite] {skipped}");
+                return Result<TableSyncResult>.Success(TableSyncResult.Succeeded(skipped));
+            }
+
             var result = await _connectionManager.ExecuteAsync(async conn =>
             {
                 var tableExists = await _analyzer.TableExistsAsync(conn, tableName).ConfigureAwait(false);
@@ -83,7 +95,7 @@ public sealed class TableSyncService
                         $"Created table {tableName}",
                         ct).ConfigureAwait(false);
 
-                    _logger?.Info($"[SQLite] Created table '{tableName}'");
+                    _logger?.Info($"[SQLite] {string.Format(SQLiteObservability.Strings.TableCreated, tableName)}");
 
                     // Create indexes
                     await SyncIndexesAsync(conn, entityType, tableName, ct).ConfigureAwait(false);
@@ -101,7 +113,7 @@ public sealed class TableSyncService
                         if (existingColumns.Any(c => string.Equals(c, col.ColumnName, StringComparison.OrdinalIgnoreCase)))
                             continue;
 
-                        var typeName = _analyzer.MapDataType(col.DataType);
+                        var typeName = _analyzer.DeclaredType(col);
                         var alterSql = $"ALTER TABLE \"{tableName}\" ADD COLUMN \"{col.ColumnName}\" {typeName}";
 
                         if (col.DefaultValue is not null)
@@ -127,7 +139,7 @@ public sealed class TableSyncService
                         ? $"Updated table '{tableName}': added columns [{string.Join(", ", addedColumns)}]"
                         : $"Table '{tableName}' is up to date";
 
-                    _logger?.Info($"[SQLite] {msg}");
+                    _logger?.Info($"[SQLite] {string.Format(SQLiteObservability.Strings.TableSynced, tableName)} — {msg}");
                     return TableSyncResult.Succeeded(msg);
                 }
             }, connectionId, ct).ConfigureAwait(false);
@@ -145,7 +157,7 @@ public sealed class TableSyncService
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[SQLite] Table sync failed for '{tableName}': {ex.Message}", ex);
+            _logger?.Error($"[SQLite] {string.Format(SQLiteObservability.Strings.TableSyncFailed, tableName, ex.Message)}", ex);
             return Result<TableSyncResult>.Failure(
                 Error.Internal("sqlite.sync_failed", $"Table synchronization failed for {tableName}", ex.Message));
         }
@@ -194,6 +206,35 @@ public sealed class TableSyncService
     /// Synchronizes all entity types in the specified namespace within the calling assembly.
     /// Only types decorated with <see cref="SQLiteTableAttribute"/> are processed.
     /// </summary>
+    /// <remarks>
+    /// The calling assembly is captured here, before any state machine starts — inside an
+    /// <c>async</c> body <see cref="Assembly.GetCallingAssembly"/> sees the async infrastructure
+    /// rather than the caller. Use the
+    /// <see cref="SyncNamespaceAsync(Assembly, string, bool, string, CancellationToken)"/>
+    /// overload to name the assembly explicitly instead of relying on the stack.
+    /// </remarks>
+    /// <param name="namespaceName">The namespace to scan for entity types.</param>
+    /// <param name="includeDerived">
+    /// When <c>true</c>, also includes types in sub-namespaces that start with <paramref name="namespaceName"/>.
+    /// </param>
+    /// <param name="connectionId">Named SQLite connection to sync against.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>
+    /// A dictionary keyed by table name, where each value is the <see cref="Result{T}"/> of that table's sync.
+    /// </returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public Task<Dictionary<string, Result<TableSyncResult>>> SyncNamespaceAsync(
+        string namespaceName,
+        bool includeDerived = false,
+        string connectionId = "Default",
+        CancellationToken ct = default)
+        => SyncNamespaceAsync(Assembly.GetCallingAssembly(), namespaceName, includeDerived, connectionId, ct);
+
+    /// <summary>
+    /// Synchronizes all entity types in the specified namespace within <paramref name="assembly"/>.
+    /// Only types decorated with <see cref="SQLiteTableAttribute"/> are processed.
+    /// </summary>
+    /// <param name="assembly">The assembly to scan.</param>
     /// <param name="namespaceName">The namespace to scan for entity types.</param>
     /// <param name="includeDerived">
     /// When <c>true</c>, also includes types in sub-namespaces that start with <paramref name="namespaceName"/>.
@@ -204,12 +245,14 @@ public sealed class TableSyncService
     /// A dictionary keyed by table name, where each value is the <see cref="Result{T}"/> of that table's sync.
     /// </returns>
     public async Task<Dictionary<string, Result<TableSyncResult>>> SyncNamespaceAsync(
+        Assembly assembly,
         string namespaceName,
         bool includeDerived = false,
         string connectionId = "Default",
         CancellationToken ct = default)
     {
-        var assembly = Assembly.GetCallingAssembly();
+        ArgumentNullException.ThrowIfNull(assembly);
+
         var types = assembly.GetTypes()
             .Where(t => t.IsClass && !t.IsAbstract &&
                         (t.Namespace == namespaceName || (includeDerived && t.Namespace?.StartsWith(namespaceName) == true)) &&

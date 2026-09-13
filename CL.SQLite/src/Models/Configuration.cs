@@ -38,11 +38,23 @@ public class SQLiteDatabaseConfig
         Placeholder = "database.db", RequiresRestart = true, Group = "Connection", Order = 10)]
     public string DatabasePath { get; set; } = "database.db";
 
+    /// <summary>
+    /// Applied as the connection string's <c>Default Timeout</c>. In Microsoft.Data.Sqlite this
+    /// is the only timeout knob: it is what <c>SqliteConnection.DefaultTimeout</c> reports and
+    /// what every command created from the connection inherits.
+    /// </summary>
     [ConfigField(Label = "Connect Timeout (s)", Min = 1, Max = 3600,
+        Description = "Busy/command timeout applied to every connection (the provider default is 30).",
         Group = "Timeouts", Order = 20, Collapsed = true)]
     public uint ConnectionTimeoutSeconds { get; set; } = 30;
 
+    /// <summary>
+    /// Not applied. SQLite exposes no command timeout separate from the connection's
+    /// <c>DefaultTimeout</c>, which <see cref="ConnectionTimeoutSeconds"/> already sets.
+    /// Retained so existing configuration files keep loading.
+    /// </summary>
     [ConfigField(Label = "Command Timeout (s)", Min = 1, Max = 7200,
+        Description = "Not applied — SQLite has no command timeout separate from Connect Timeout. Use that setting.",
         Group = "Timeouts", Order = 21, Collapsed = true)]
     public uint CommandTimeoutSeconds { get; set; } = 120;
 
@@ -70,6 +82,7 @@ public class SQLiteDatabaseConfig
     public int MaxPoolSize { get; set; } = 10;
 
     [ConfigField(Label = "Slow Query Threshold (ms)", Min = 0,
+        Description = "Queries at or above this duration are logged and published as SlowQueryEvent.",
         Group = "Advanced", Order = 44, Collapsed = true)]
     public int SlowQueryThresholdMs { get; set; } = 500;
 

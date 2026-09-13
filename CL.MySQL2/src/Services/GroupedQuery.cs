@@ -127,7 +127,7 @@ public sealed class GroupedQuery<TKey, TSource> where TSource : class, new()
         var limitSql = _limit.HasValue ? $" LIMIT {_limit.Value}" : string.Empty;
         var offsetSql = _offset.HasValue ? $" OFFSET {_offset.Value}" : string.Empty;
 
-        var sql_out = $"SELECT {compiled.SelectList} FROM `{tableName}`{_whereClause} GROUP BY {groupBySql}{orderBySql}{limitSql}{offsetSql}";
+        var sql_out = $"SELECT {compiled.SelectList} FROM {MySqlDialect.Quote(tableName)}{_whereClause} GROUP BY {groupBySql}{orderBySql}{limitSql}{offsetSql}";
 
         return new ProjectedQuery<TSource, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,

@@ -27,8 +27,8 @@ public sealed class ColumnAttribute : Attribute
     public string? Name { get; set; }
 
     /// <summary>
-    /// Former column name, used by schema sync to <c>CHANGE COLUMN</c> (rename in place,
-    /// preserving data) instead of drop-old + add-new. Set this to the previous column
+    /// Former column name. Schema sync emits <c>EXEC sys.sp_rename ... 'COLUMN'</c> (rename in
+    /// place, preserving data) instead of drop-old + add-new. Set this to the previous column
     /// name when you rename a property/column; remove it once every environment has
     /// synced. Default: null (no rename).
     /// </summary>
@@ -199,7 +199,8 @@ public sealed class RetainDaysAttribute : Attribute
 
     /// <summary>
     /// The property name on the entity that holds the timestamp to compare
-    /// (e.g. <c>nameof(FooRecord.CreatedUtc)</c>). Must map to a DATETIME column.
+    /// (e.g. <c>nameof(FooRecord.CreatedUtc)</c>). Must map to a date/time column
+    /// (<c>datetime2</c> by default inference).
     /// </summary>
     public string TimestampColumn { get; }
 
@@ -227,7 +228,7 @@ public sealed class RetainDaysAttribute : Attribute
 /// <see cref="CL.MSSQL.Services.Repository{T}.HardDeleteAsync(object, System.Threading.CancellationToken)"/>.
 /// <para>
 /// The referenced property must be a nullable <see cref="System.DateTime"/> mapped to a
-/// NULL-able <c>DATETIME</c> column. Auto soft-delete filtering applies to single-table
+/// NULL-able date/time column (<c>datetime2</c> by default inference). Auto soft-delete filtering applies to single-table
 /// queries and repository reads — not to joins, subqueries, or bulk
 /// <c>UpdateAsync</c>/<c>DeleteAsync</c> on the query builder.
 /// </para>

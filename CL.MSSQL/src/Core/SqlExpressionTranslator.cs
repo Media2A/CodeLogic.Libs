@@ -1,4 +1,4 @@
-using System.Linq.Expressions;
+﻿using System.Linq.Expressions;
 using System.Reflection;
 
 namespace CL.MSSQL.Core;
@@ -180,7 +180,11 @@ internal static class SqlExpressionTranslator
                         .Select(a => Visit(a).Sql);
                     return ($"CONCAT({string.Join(", ", args)})", typeof(string));
                 }
-                case nameof(SqlFn.Like):       return ($"({Arg(0)} LIKE {Arg(1)})", typeof(bool));
+                // T-SQL has no boolean expression type: a bare `a LIKE b` is a predicate and
+                // is a syntax error anywhere a value is expected. Every caller of this
+                // translator (GROUP BY terms, SELECT lists, UPDATE ... SET) is a value
+                // position, so materialize the predicate as a bit.
+                case nameof(SqlFn.Like):       return ($"CAST(CASE WHEN {Arg(0)} LIKE {Arg(1)} THEN 1 ELSE 0 END AS bit)", typeof(bool));
                 case nameof(SqlFn.Round):      return ($"ROUND({Arg(0)}, {Arg(1)})", typeof(double));
                 case nameof(SqlFn.Floor):      return ($"FLOOR({Arg(0)})", typeof(double));
                 case nameof(SqlFn.Ceiling):    return ($"CEILING({Arg(0)})", typeof(double));

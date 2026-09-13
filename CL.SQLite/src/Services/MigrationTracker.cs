@@ -116,8 +116,14 @@ public sealed class MigrationTracker
             var json = await File.ReadAllTextAsync(_historyFilePath, ct).ConfigureAwait(false);
             return JsonSerializer.Deserialize<List<MigrationRecord>>(json) ?? [];
         }
-        catch
+        catch (Exception ex)
         {
+            // Recovery is unchanged — an unreadable history is treated as empty, and the next
+            // write replaces it — but it is no longer silent: the file is named so the records
+            // being discarded can be recovered from a backup if they mattered.
+            _logger?.Warning(
+                $"[SQLite] Migration history at '{_historyFilePath}' could not be read " +
+                $"({ex.Message}); it is being treated as empty and will be overwritten on the next write.");
             return [];
         }
     }

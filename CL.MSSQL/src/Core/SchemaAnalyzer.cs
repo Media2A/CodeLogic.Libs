@@ -16,12 +16,17 @@ internal sealed class SchemaAnalyzer
     public static string GetSchemaName(Type entityType) => entityType.GetCustomAttribute<TableAttribute>()?.Schema ?? "dbo";
     private static string Qualified(Type type) => SqlServerDialect.Qualify(GetSchemaName(type), GetTableName(type));
 
-    public string GenerateCreateTable(Type entityType)
+    /// <param name="entityType">The entity whose table to emit.</param>
+    /// <param name="defaultStringSize">
+    /// <c>nvarchar</c> length used for a string column with no explicit <c>[Column(Size)]</c>,
+    /// from <c>SqlServerDatabaseConfig.DefaultStringSize</c>.
+    /// </param>
+    public string GenerateCreateTable(Type entityType, int defaultStringSize = 255)
     {
         var schema = GetSchemaName(entityType);
         var table = GetTableName(entityType);
         var properties = MappedProperties(entityType);
-        var definitions = properties.Select(BuildColumnDef).ToList();
+        var definitions = properties.Select(property => BuildColumnDef(property, defaultStringSize)).ToList();
         var pk = properties.Where(p => p.GetCustomAttribute<ColumnAttribute>()?.Primary == true).ToArray();
         if (pk.Length > 0)
             definitions.Add($"CONSTRAINT {SqlServerDialect.Quote($"PK_{table}")} PRIMARY KEY ({string.Join(", ", pk.Select(p => SqlServerDialect.Quote(ColumnName(p))))})");
@@ -49,12 +54,13 @@ internal sealed class SchemaAnalyzer
         return sql.ToString();
     }
 
-    public string ComputeSchemaCrc(Type entityType) => ComputeCrc(NormalizeForCrc(GenerateCreateTable(entityType)));
+    public string ComputeSchemaCrc(Type entityType, int defaultStringSize = 255) =>
+        ComputeCrc(NormalizeForCrc(GenerateCreateTable(entityType, defaultStringSize)));
     public static string ComputeCrc(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..8];
     internal static string NormalizeForCrc(string ddl) => string.Join(' ', ddl.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).ToUpperInvariant();
 
     public async Task<List<string>> GenerateAlterStatementsAsync(Type entityType, SqlConnection connection,
-        SchemaSyncLevel level = SchemaSyncLevel.Safe, CancellationToken ct = default)
+        SchemaSyncLevel level = SchemaSyncLevel.Safe, CancellationToken ct = default, int defaultStringSize = 255)
     {
         var result = new List<string>();
         if (level == SchemaSyncLevel.None) return result;
@@ -95,7 +101,7 @@ internal sealed class SchemaAnalyzer
                 }
                 else
                 {
-                    result.Add($"ALTER TABLE {qualified} ADD {BuildColumnDef(property)};");
+                    result.Add($"ALTER TABLE {qualified} ADD {BuildColumnDef(property, defaultStringSize)};");
                     existing = null;
                 }
             }
@@ -103,7 +109,7 @@ internal sealed class SchemaAnalyzer
             if (existing is not null)
             {
                 var expectedType = NormalizeType(TypeConverter.GetSqlServerType(
-                    attr ?? TypeConverter.InferColumn(property.PropertyType),
+                    attr ?? TypeConverter.InferColumn(property.PropertyType, defaultStringSize),
                     attr?.StorageType ?? StorageType.Default,
                     property.PropertyType));
                 var expectedNullable = IsNullable(property, attr);
@@ -147,7 +153,7 @@ internal sealed class SchemaAnalyzer
                         if (replacementRequired)
                         {
                             result.Add($"ALTER TABLE {qualified} DROP COLUMN {SqlServerDialect.Quote(name)};");
-                            result.Add($"ALTER TABLE {qualified} ADD {BuildColumnDef(property)};");
+                            result.Add($"ALTER TABLE {qualified} ADD {BuildColumnDef(property, defaultStringSize)};");
                         }
                         else
                         {
@@ -304,9 +310,10 @@ internal sealed class SchemaAnalyzer
         return result;
     }
 
-    private static string BuildColumnDef(PropertyInfo property)
+    private static string BuildColumnDef(PropertyInfo property, int defaultStringSize = 255)
     {
-        var attr = property.GetCustomAttribute<ColumnAttribute>() ?? TypeConverter.InferColumn(property.PropertyType);
+        var attr = property.GetCustomAttribute<ColumnAttribute>()
+                   ?? TypeConverter.InferColumn(property.PropertyType, defaultStringSize);
         var nullable = IsNullable(property, attr);
         var parts = new List<string> { SqlServerDialect.Quote(ColumnName(property)), TypeConverter.GetSqlServerType(attr, attr.StorageType, property.PropertyType) };
         if (!string.IsNullOrWhiteSpace(attr.Collation)) parts.Add($"COLLATE {ValidateCollation(attr.Collation)}");

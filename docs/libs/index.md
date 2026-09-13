@@ -141,10 +141,11 @@ var status = await mysql.HealthCheckAsync();
 // status.Message, status.Data (structured metrics)
 ```
 
-### The database trio
+### The database libraries
 
-`CL.MySQL2`, `CL.PostgreSQL`, and `CL.SQLite` share the same shape — `GetRepository<T>()` for CRUD
-and a fluent query builder (`Query<T>()` on MySQL2/PostgreSQL, `GetQueryBuilder<T>()` on SQLite)
-that translates LINQ-style expressions to SQL, plus attribute-driven table sync.
+`CL.MySQL2`, `CL.MSSQL`, `CL.PostgreSQL`, and `CL.SQLite` share the same shape —
+`GetRepository<T>()` for CRUD and a fluent query builder (`Query<T>()` on MySQL2, MSSQL and
+PostgreSQL, `GetQueryBuilder<T>()` on SQLite) that translates LINQ-style expressions to SQL,
+plus attribute-driven table sync.
 
 See the [API Reference](../api/index.md) for the full generated type and member listing.

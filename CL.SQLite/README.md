@@ -67,17 +67,18 @@ public sealed class NoteRecord
 }
 ```
 
-Only properties marked with `[SQLiteColumn]` are mapped. The connection id defaults to `"Default"` on every entry point, so `GetRepository<NoteRecord>()` equals `GetRepository<NoteRecord>("Default")`.
+Only properties marked with `[SQLiteColumn]` are mapped. When `DataType` is left off, the column is declared `INTEGER` — the first `SQLiteDataType` value — rather than being inferred from the property type; SQLite's dynamic typing means text still round-trips through an `INTEGER`-affinity column, but set `DataType` explicitly when the declared affinity matters. The connection id defaults to `"Default"` on every entry point, so `GetRepository<NoteRecord>()` equals `GetRepository<NoteRecord>("Default")`.
 
 ## Features
 
-- **Named connection pools** — a map of databases keyed by connection id, each with its own per-database pool (default `MaxPoolSize` 10) and a 5-minute idle timeout.
+- **Named connection pools** — a map of databases keyed by connection id, each with its own per-database pool. `MaxPoolSize` (default 10) caps both the pooled connections *and* the concurrently live ones, so a caller waits when the cap is reached; pooled connections are discarded after 5 minutes idle.
 - **WAL by default** — `journal_mode=WAL` is set on every connection for better read/write concurrency.
 - **Repository CRUD** — insert / upsert / update / delete, by-id and composite-key lookups, paging, LINQ `Find`, count, and raw SQL — all returning `Result`.
 - **Fluent query builder** — `Where` / `OrderBy` / `ThenBy` / `Select` / `GroupBy`, aggregates, paging, and bulk predicate update / delete translated to SQL.
 - **Attribute-driven schema sync** — `TableSync` creates tables, adds missing columns, and builds indexes to match the entity class; batch-sync by type set or namespace.
 - **Migration ledger** — `MigrationTracker` records and inspects applied migration ids in a JSON history file.
-- **Type conversion** — `bool`, `DateTime`, `DateTimeOffset`, `Guid`, and `enum` are converted automatically on read and write.
+- **Type conversion** — `bool`, `DateTime`, `DateTimeOffset`, `Guid`, and `enum` are converted automatically on read and write. A `DateTimeOffset` is stored as `yyyy-MM-dd HH:mm:ss.fffzzz` and read back with its offset intact.
+- **Events** — `TableSyncedEvent` on every successful sync, and `SlowQueryEvent` for any query at or above `slowQueryThresholdMs`.
 
 ## Configuration
 
@@ -106,14 +107,14 @@ Auto-generated on first run as `config.sqlite.json` (section `sqlite`). The conf
 |---------|---------|-------------|
 | `enabled` | `true` | Disable a database without removing it. |
 | `databasePath` | `database.db` | Absolute, or relative to the library data directory. |
-| `connectionTimeoutSeconds` | `30` | Connection open timeout. |
-| `commandTimeoutSeconds` | `120` | Per-command timeout. |
-| `skipTableSync` | `false` | Turn off automatic schema sync for this database. |
-| `cacheMode` | `Default` | `Default` / `Private` / `Shared`. |
+| `connectionTimeoutSeconds` | `30` | Applied as the connection string's `Default Timeout`, which is also what commands inherit. 30 is the provider's own default. |
+| `commandTimeoutSeconds` | `120` | **Not wired, and deliberately so** — SQLite has one timeout knob, not two: a command's `CommandTimeout` is inherited from the connection's `DefaultTimeout`, which `connectionTimeoutSeconds` already owns. Use that setting. |
+| `skipTableSync` | `false` | When `true`, `SyncTableAsync` / `SyncTablesAsync` touch nothing for that database and report the sync as skipped. |
+| `cacheMode` | `Default` | `Default` / `Private` / `Shared`. `Shared` and `Private` are requested explicitly on the connection string; `Default` leaves the provider's own choice alone. |
 | `useWAL` | `true` | Write-Ahead Logging — better concurrency, recommended. |
-| `enableForeignKeys` | `true` | Enforce foreign-key constraints. |
-| `maxPoolSize` | `10` | Maximum pooled connections per database. |
-| `slowQueryThresholdMs` | `500` | Slow-query warning threshold. |
+| `enableForeignKeys` | `true` | Enforce foreign-key constraints. Both directions are sent as a `PRAGMA`, so `false` really does turn enforcement off. |
+| `maxPoolSize` | `10` | Maximum pooled **and** concurrently live connections per database. |
+| `slowQueryThresholdMs` | `500` | Queries at or above this duration are logged as a warning and published as `SlowQueryEvent`. |
 
 A database with `enabled: false` is skipped at startup; if no database is enabled the library initializes disabled and the health check reports healthy-but-disabled.
 

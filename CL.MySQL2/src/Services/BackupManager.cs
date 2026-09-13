@@ -1,27 +1,44 @@
+using CL.MySQL2.Configuration;
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
 using MySqlConnector;
+using CL.MySQL2.Core;
 
 namespace CL.MySQL2.Services;
 
 /// <summary>
 /// Creates and manages schema backup files for MySQL tables and databases.
 /// Backups contain DDL (CREATE TABLE statements) and are stored as .sql files.
+/// <para>
+/// Files go to <c>DataDirectory/backups</c> unless the connection's
+/// <see cref="MySqlDatabaseConfig.BackupDirectory"/> is set, in which case that directory is
+/// used for both writing and reading back.
+/// </para>
 /// </summary>
 public sealed class BackupManager
 {
     private readonly ConnectionManager _connectionManager;
     private readonly string _dataDirectory;
     private readonly ILogger? _logger;
+    private readonly Func<string, MySqlDatabaseConfig?>? _configLookup;
 
+    /// <param name="connectionManager">The connection manager to use for database access.</param>
+    /// <param name="dataDirectory">Base data directory; backups default to its <c>backups</c> subfolder.</param>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="configLookup">
+    /// Optional delegate resolving per-connection config, so a configured
+    /// <see cref="MySqlDatabaseConfig.BackupDirectory"/> can override the default location.
+    /// </param>
     public BackupManager(
         ConnectionManager connectionManager,
         string dataDirectory,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        Func<string, MySqlDatabaseConfig?>? configLookup = null)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _dataDirectory = dataDirectory ?? throw new ArgumentNullException(nameof(dataDirectory));
         _logger = logger;
+        _configLookup = configLookup;
     }
 
     /// <summary>
@@ -37,7 +54,7 @@ public sealed class BackupManager
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             Directory.CreateDirectory(backupDir);
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
@@ -77,7 +94,7 @@ public sealed class BackupManager
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             Directory.CreateDirectory(backupDir);
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
@@ -112,12 +129,13 @@ public sealed class BackupManager
     /// Removes backup files older than the specified number of days.
     /// </summary>
     /// <param name="olderThanDays">Files older than this many days will be deleted.</param>
+    /// <param name="connectionId">The connection whose backup directory to clean.</param>
     /// <returns>The number of files deleted.</returns>
-    public async Task<Result<int>> CleanupOldBackupsAsync(int olderThanDays = 30)
+    public async Task<Result<int>> CleanupOldBackupsAsync(int olderThanDays = 30, string connectionId = "Default")
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             if (!Directory.Exists(backupDir))
                 return Result<int>.Success(0);
 
@@ -150,9 +168,9 @@ public sealed class BackupManager
     /// Returns the most recent schema backup file for a table, or null if none exists. Backups are
     /// named <c>{table}_{yyyyMMdd_HHmmss}.sql</c> in the backup directory.
     /// </summary>
-    public string? GetLatestBackupFile(string tableName)
+    public string? GetLatestBackupFile(string tableName, string connectionId = "Default")
     {
-        var backupDir = GetBackupDirectory();
+        var backupDir = GetBackupDirectory(connectionId);
         if (!Directory.Exists(backupDir)) return null;
         return Directory.GetFiles(backupDir, $"{tableName}_*.sql")
             .OrderByDescending(f => new FileInfo(f).LastWriteTimeUtc)
@@ -176,17 +194,17 @@ public sealed class BackupManager
     {
         try
         {
-            var file = backupFile ?? GetLatestBackupFile(tableName);
+            var file = backupFile ?? GetLatestBackupFile(tableName, connectionId);
             if (file is null || !File.Exists(file))
                 return Result<bool>.Failure(Error.Internal(
-                    "mysql.restore_not_found", $"No schema backup found for `{tableName}`."));
+                    "mysql.restore_not_found", $"No schema backup found for {MySqlDialect.Quote(tableName)}."));
 
             var content = await File.ReadAllTextAsync(file, ct).ConfigureAwait(false);
             // Keep only the CREATE TABLE statement (strip leading comment lines and trailing ';').
             var createIdx = content.IndexOf("CREATE TABLE", StringComparison.OrdinalIgnoreCase);
             if (createIdx < 0)
                 return Result<bool>.Failure(Error.Internal(
-                    "mysql.restore_invalid", $"Backup file for `{tableName}` has no CREATE TABLE statement."));
+                    "mysql.restore_invalid", $"Backup file for {MySqlDialect.Quote(tableName)} has no CREATE TABLE statement."));
             var createSql = content[createIdx..].TrimEnd().TrimEnd(';');
 
             _logger?.Warning($"[MySQL2] Restoring schema for `{tableName}` from {file} (table will be dropped and recreated).");
@@ -195,7 +213,7 @@ public sealed class BackupManager
             {
                 await using (var drop = conn.CreateCommand())
                 {
-                    drop.CommandText = $"DROP TABLE IF EXISTS `{tableName}`";
+                    drop.CommandText = $"DROP TABLE IF EXISTS {MySqlDialect.Quote(tableName)}";
                     await drop.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
                 await using (var create = conn.CreateCommand())
@@ -218,8 +236,20 @@ public sealed class BackupManager
 
     // ── Private helpers ────────────────────────────────────────────────────────
 
-    private string GetBackupDirectory() =>
-        Path.Combine(_dataDirectory, "backups");
+    /// <summary>
+    /// The backup directory for a connection: its configured <c>BackupDirectory</c> when set,
+    /// otherwise <c>DataDirectory/backups</c>. A relative configured path resolves against the
+    /// data directory, so a bare folder name stays inside the application's own storage.
+    /// </summary>
+    private string GetBackupDirectory(string connectionId = "Default")
+    {
+        var configured = _configLookup?.Invoke(connectionId)?.BackupDirectory;
+        if (string.IsNullOrWhiteSpace(configured))
+            return Path.Combine(_dataDirectory, "backups");
+        return Path.IsPathRooted(configured)
+            ? configured
+            : Path.Combine(_dataDirectory, configured);
+    }
 
     private static async Task<string> GetTableDdlAsync(
         MySqlConnection conn,
@@ -227,7 +257,7 @@ public sealed class BackupManager
         CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SHOW CREATE TABLE `{tableName}`";
+        cmd.CommandText = $"SHOW CREATE TABLE {MySqlDialect.Quote(tableName)}";
         await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         if (await reader.ReadAsync(ct).ConfigureAwait(false))
             return reader.GetString(1);

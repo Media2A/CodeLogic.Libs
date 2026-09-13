@@ -50,7 +50,7 @@ public sealed class TableSyncService
         _events = events;
         _analyzer = new SchemaAnalyzer(logger);
         _migrationTracker = new MigrationTracker(connectionManager, logger);
-        _backupManager = new BackupManager(connectionManager, dataDirectory, logger);
+        _backupManager = new BackupManager(connectionManager, dataDirectory, logger, configLookup);
         _stateStore = new SchemaStateStore(connectionManager, logger);
         _configLookup = configLookup;
         _appVersion = CodeLogicEnvironment.AppVersion;
@@ -112,7 +112,7 @@ public sealed class TableSyncService
         {
             if (level == SchemaSyncLevel.None)
             {
-                operations.Add($"-- sync skipped (SchemaSyncLevel.None) for `{tableName}`");
+                operations.Add($"-- sync skipped (SchemaSyncLevel.None) for {MySqlDialect.Quote(tableName)}");
                 sw.Stop();
                 return Result<SyncResult>.Success(SkipResult(null));
             }
@@ -172,7 +172,7 @@ public sealed class TableSyncService
                     // CREATE TABLE
                     var createSql = _analyzer.GenerateCreateTable(entityType);
                     await ExecuteSqlAsync(createSql, connectionId, ct).ConfigureAwait(false);
-                    operations.Add($"CREATE TABLE `{tableName}`");
+                    operations.Add($"CREATE TABLE {MySqlDialect.Quote(tableName)}");
                     _logger?.Info($"[MySQL2] Created table `{tableName}`");
                 }
                 else
@@ -211,7 +211,7 @@ public sealed class TableSyncService
                             driftPending = true;
                             status = SchemaSyncStatus.DriftPending;
                             _logger?.Warning(
-                                $"[MySQL2] Table `{tableName}`: destructive change(s) deferred under {mode} mode — run Migration mode to complete.");
+                                $"[MySQL2] Table {MySqlDialect.Quote(tableName)}: destructive change(s) deferred under {mode} mode — run Migration mode to complete.");
                         }
                     }
 

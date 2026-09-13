@@ -4,8 +4,8 @@ using Npgsql;
 namespace CL.PostgreSQL.Services;
 
 /// <summary>
-/// Wraps an NpgsqlTransaction with an async-disposable pattern.
-/// When disposed without an explicit CommitAsync or RollbackAsync call,
+/// Wraps a <see cref="NpgsqlTransaction"/> with an async-disposable pattern.
+/// When disposed without an explicit <see cref="CommitAsync"/> or <see cref="RollbackAsync"/> call,
 /// the transaction is automatically rolled back.
 /// </summary>
 public sealed class TransactionScope : IAsyncDisposable
@@ -13,8 +13,13 @@ public sealed class TransactionScope : IAsyncDisposable
     private readonly ILogger? _logger;
     private bool _completed;
 
+    /// <summary>The connection ID this transaction belongs to.</summary>
     internal string ConnectionId { get; }
+
+    /// <summary>The underlying database connection.</summary>
     internal NpgsqlConnection Connection { get; }
+
+    /// <summary>The underlying database transaction.</summary>
     internal NpgsqlTransaction Transaction { get; }
 
     internal TransactionScope(
@@ -29,6 +34,10 @@ public sealed class TransactionScope : IAsyncDisposable
         _logger = logger;
     }
 
+    /// <summary>
+    /// Commits the transaction.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown if already committed or rolled back.</exception>
     public async Task CommitAsync(CancellationToken ct = default)
     {
         if (_completed)
@@ -39,6 +48,10 @@ public sealed class TransactionScope : IAsyncDisposable
         _logger?.Info($"[PostgreSQL] Transaction committed for '{ConnectionId}'");
     }
 
+    /// <summary>
+    /// Rolls back the transaction explicitly.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown if already committed or rolled back.</exception>
     public async Task RollbackAsync(CancellationToken ct = default)
     {
         if (_completed)
@@ -49,6 +62,9 @@ public sealed class TransactionScope : IAsyncDisposable
         _logger?.Info($"[PostgreSQL] Transaction rolled back for '{ConnectionId}'");
     }
 
+    /// <summary>
+    /// Disposes the transaction. Automatically rolls back if not already committed/rolled back.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         if (!_completed)

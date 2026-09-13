@@ -30,7 +30,7 @@ mysql.Query<Order>()
     .Where(o => o.CreatedUtc >= DateTime.UtcNow.AddDays(-30));
 ```
 
-Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`, capped at `MaxInClauseValues`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
+Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`; an empty collection becomes `1 = 0`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
 
 ## Subquery filters — `EXISTS` / `IN`
 
@@ -55,7 +55,7 @@ mysql.Query<Order>()
 - `WhereExists<TInner>` / `WhereNotExists<TInner>` → `[NOT] EXISTS (SELECT 1 FROM inner WHERE …)`.
 - `WhereIn<TInner, TKey>` / `WhereNotIn<TInner, TKey>` → `col [NOT] IN (SELECT innerCol FROM inner [WHERE innerFilter])`.
 
-> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` is silently bypassed on these. `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
+> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` / `.SmartCache` are silently bypassed on these, including on a `.Select(...)` projection taken from such a query (the projection inherits the refusal, so `.WithCache` applied after `.Select` is ignored too). `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
 
 ## Ordering & paging
 
@@ -138,8 +138,12 @@ For ad-hoc joins outside the typed model, the string overload appends a literal 
 
 ```csharp
 mysql.Query<Order>()
-    .Join("customers c", "c.id = t0.customer_id", JoinType.Left);
+    .Join("customers c", "c.id = orders.customer_id", JoinType.Left);
 ```
+
+The base table is *not* aliased on a raw-string join — it appears under its own mapped name
+(`orders` above), so qualify left-side columns with the table name. The `t0` / `t1` aliases
+exist only inside a typed `Join<TRight, TKey, TResult>`.
 
 ## Projections — `Select`
 
@@ -153,7 +157,7 @@ Result<List<OrderSummary>> rows = await mysql.Query<Order>()
     .ToListAsync();
 ```
 
-`ProjectedQuery` exposes `WithCache(ttl)`, `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
+`ProjectedQuery` exposes `WithCache(ttl)`, `WithCache()` (the cache configuration's `DefaultTtlSeconds`), `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
 
 ## Aggregates — `GroupBy`
 
@@ -175,7 +179,29 @@ Result<List<DailyTotal>> daily = await mysql.Query<Order>()
     .ToListAsync();
 ```
 
-Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(...)`, `g.Max(...)`, `g.Count()`, and `g.Any()`.
+Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(...)`, `g.Max(...)`, `g.Count()`, and `g.Any()`. The predicate overloads `g.Count(x => …)` and `g.Any(x => …)` are also translated, each as a `SUM(CASE WHEN … THEN 1 ELSE 0 END)` expression.
+
+`SqlFn` exposes server-side functions for use inside a **grouped** query's key or projection:
+`Year`, `Month`, `Day`, `Hour`, `Minute`, `DayOfWeek`, `Date`, `BucketUtc`, `Coalesce`,
+`IfNull`, `Lower`, `Upper`, `Concat`, `Like`, `Round`, `Floor`, `Ceiling`. They are not
+translated in an ungrouped `Select`, which supports plain column access only — that throws
+`NotSupportedException` when the query is built. Calling one outside a query expression
+throws `InvalidOperationException`; they are markers for the translator, not real methods.
+
+```csharp
+var perDay = await mysql.Query<Order>()
+    .Where(o => o.CreatedUtc >= since)
+    .GroupBy(o => SqlFn.Date(o.CreatedUtc))
+    .Select(g => new { Day = g.Key, Count = g.Count(), Revenue = g.Sum(o => o.Total) })
+    .ToListAsync();
+```
+
+The translations target MySQL: `Year`/`Month`/`Day`/`Hour`/`Minute` become the matching
+`YEAR(x)`-style calls, `Date(x)` becomes `DATE(x)`, `IfNull(a, b)` becomes `IFNULL(a, b)`,
+and `BucketUtc(x, n)` floors a UNIX timestamp to an `n`-second window.
+
+`DayOfWeek` is adjusted to match .NET: MySQL's `DAYOFWEEK` is 1–7 from Sunday, so the
+translation subtracts one to give 0–6.
 
 ## Terminal operations
 
@@ -236,8 +262,9 @@ Result<int> n = await mysql.ExecuteSqlAsync(
     "UPDATE users SET active = 0 WHERE last_seen < @cutoff",
     new Dictionary<string, object?> { ["@cutoff"] = cutoff });
 
-// Single scalar value
-Result<long?> max = await mysql.SqlScalarAsync<long>(
+// Single scalar value — T? on an unconstrained T is just T for a value type,
+// so SqlScalarAsync<long> yields Result<long> (0 when there are no rows).
+Result<long> max = await mysql.SqlScalarAsync<long>(
     "SELECT MAX(id) FROM users");
 ```
 
@@ -245,29 +272,37 @@ Result<long?> max = await mysql.SqlScalarAsync<long>(
 
 `BeginTransactionAsync` returns a `TransactionScope` (an `IAsyncDisposable`). Commit explicitly; if the scope is disposed without a commit it rolls back automatically.
 
+Pass the scope to `GetRepository<T>` or `Query<T>` to enlist typed work in it; without it,
+a repository or builder runs on its own connection and is **not** part of the transaction.
+
 ```csharp
 await using TransactionScope tx = await mysql.BeginTransactionAsync();
-try
-{
-    await mysql.ExecuteSqlAsync("UPDATE accounts SET balance = balance - @amt WHERE id = @from",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@from"] = 1L });
-    await mysql.ExecuteSqlAsync("UPDATE accounts SET balance = balance + @amt WHERE id = @to",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@to"] = 2L });
 
-    await tx.CommitAsync();
-}
-catch
-{
-    await tx.RollbackAsync();   // or just let the scope dispose
-    throw;
-}
+await mysql.GetRepository<Account>(tx).AdjustAsync(1L, a => a.Balance, -100m);
+await mysql.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
+
+await tx.CommitAsync();      // without this, disposal rolls back
 ```
+
+> **The library-level raw SQL helpers do not enlist in a transaction scope.**
+> `SqlQueryAsync` / `ExecuteSqlAsync` / `SqlScalarAsync` take a `connectionId`, not a
+> `TransactionScope`, and each opens its own pooled connection. Calling one inside an
+> `await using TransactionScope` block runs it *outside* the transaction, so a later
+> `RollbackAsync` will not undo it.
+
+The transactional surface is the typed one: `GetRepository<T>(tx)` and `Query<T>(tx)`,
+including the query builder's bulk `UpdateAsync` / `DeleteAsync`. The scope's underlying
+`MySqlConnection` and `MySqlTransaction` are internal, so there is no supported way to issue
+a hand-written statement on them from application code. Where raw SQL genuinely has to be
+transactional, write it as an `IMigration`: `IMigrationContext` exposes the live `Connection`
+and `Transaction` along with `ExecuteAsync` / `QueryAsync` / `ScalarAsync` helpers that
+already run on them.
 
 > Statements inside an explicit transaction scope are **never** transient-retried — the whole transaction is the caller's to retry. The result cache and smart-cache pools are also disabled inside a transaction. See [Performance & Caching](performance.md).
 
 ## Choosing a connection
 
-Every entry point accepts a `connectionId` selecting a named database from `config.mysql.json`; it defaults to `"Default"`. On the builder, `.WithConnection("Reporting")` does the same fluently.
+Every entry point accepts a `connectionId` selecting a named database from `config.mysql.json`; it defaults to `"Default"`. On the builder, `.WithConnection("Reporting")` does the same fluently. (`GetRepository<T>` and `Query<T>` also have a `TransactionScope` overload, which takes its connection from the scope.)
 
 ```csharp
 var reports = mysql.Query<Sale>().WithConnection("Reporting");

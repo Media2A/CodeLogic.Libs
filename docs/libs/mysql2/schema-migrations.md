@@ -8,7 +8,7 @@ CL.MySQL2 reconciles tables in two layers. **Declarative sync** diffs each attri
 
 ## Entity attributes
 
-All attributes live in `CL.MySQL2.Attributes`.
+All attributes live in `CL.MySQL2.Models`.
 
 ### `[Table]`
 
@@ -41,7 +41,7 @@ public DateTime UpdatedUtc { get; set; }
 | `Name` | property name | Column name. |
 | `PreviousName` | — | Rename in place via `CHANGE COLUMN`, preserving data. |
 | `DataType` | inferred | Explicit MySQL type (see `DataType` below). |
-| `Size` | `0` | Length for `VarChar`/`Char`/binary (falls back to `DefaultStringSize`). |
+| `Size` | `0` | Length for `VarChar`/`Char`/binary. `0` on an inferred string column falls back to the configured `DefaultStringSize` (255). |
 | `Precision` / `Scale` | `10` / `2` | For `Decimal`. |
 | `Primary` | `false` | Part of the primary key. |
 | `AutoIncrement` | `false` | `AUTO_INCREMENT`. |
@@ -165,7 +165,7 @@ if (sync.DriftPending)   { /* a drop is deferred; reconcile under Migration when
 
 ## Soft delete
 
-`[SoftDelete(timestampColumn)]` marks a nullable `DateTime` column as the delete marker. `Repository.DeleteAsync` then sets it to `UtcNow` instead of issuing a physical `DELETE`, and single-table reads (`mysql.Query<T>()` terminals and the repository getters) automatically exclude rows where it is set.
+`[SoftDelete(timestampColumn)]` marks a nullable `DateTime` column as the delete marker. `Repository.DeleteAsync` then sets it to a client-side `DateTime.UtcNow` bound as a parameter (the server's `NOW()` is not used) instead of issuing a physical `DELETE`, and single-table reads (`mysql.Query<T>()` terminals and the repository getters `GetByIdAsync`, `GetByColumnAsync`, `GetAllAsync`, `GetPagedAsync` and `FindAsync`) automatically exclude rows where it is set.
 
 ```csharp
 [Table]
@@ -184,6 +184,10 @@ var all = await mysql.Query<Account>().IncludeDeleted().ToListAsync();   // over
 
 > Auto-filtering applies to single-table reads only. It does **not** apply to joins, subquery filters, or the query builder's bulk `UpdateAsync` / `DeleteAsync` — those stay raw so you can target or restore deleted rows.
 
+> `Repository.CountAsync()` applies the filter like every other repository read, so it agrees
+> with `GetAllAsync()` and `GetPagedAsync()`. Use `mysql.Query<T>().IncludeDeleted().CountAsync()`
+> to count soft-deleted rows as well.
+
 ## Retention
 
 `[RetainDays(days, timestampColumn)]` opts an entity into a background `RetentionWorker` that deletes rows older than `days` in batches (`BatchSize` default 5000) until drained.
@@ -197,6 +201,20 @@ public class AuditLog
     [Column] public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
 }
 ```
+
+Each pass issues `DELETE FROM table WHERE col < @cutoff LIMIT BatchSize` in a loop until a
+statement deletes fewer rows than `BatchSize`; the cutoff is computed client-side as
+`DateTime.UtcNow.AddDays(-days)` and bound as a parameter.
+
+The worker is created during library start, waits 5 minutes, then runs every 24 hours. Its
+entry list is **live**: registration happens inside `SyncTableAsync<T>` / `SyncSchemaAsync`, and
+an entity registered after `CodeLogic.StartAsync()` — the usual order — is picked up as soon as
+it is registered, starting the loop if it was not already running. There is no need to sync
+retained entities before start.
+
+`mysql.RunRetentionOnceAsync()` (or `RetentionWorker.RunOnceAsync()` on a worker you own)
+performs a single purge pass and returns the number of rows deleted — useful for a maintenance
+command, or for a test that should not wait out the timer.
 
 ## Imperative migrations
 
@@ -260,13 +278,15 @@ Result<MigrationRunResult> rolled =
 
 ## Backups & restore
 
-`SyncTableAsync` / `SyncSchemaAsync` take a schema backup before destructive work (controlled by `createBackup`, written to `BackupDirectory`). The `BackupManager` snapshots are DDL-only.
+`SyncTableAsync` / `SyncSchemaAsync` take a schema backup before altering an existing table (controlled by `createBackup`, and always taken in `Migration` mode). Snapshots are DDL-only, captured with `SHOW CREATE TABLE`, and written as `{table}_{yyyyMMdd_HHmmss}.sql` to `DataDirectory/backups`, or to the connection's `BackupDirectory` when that field is set (a relative path resolves under the data directory).
 
 `RestoreSchemaAsync` replays a backup snapshot and clears the table's `__schema_state` row so the next sync reconciles from scratch:
 
 ```csharp
-Result<bool> restored = await mysql.RestoreSchemaAsync("users");                 // latest backup
-Result<bool> fromFile = await mysql.RestoreSchemaAsync("users", "users_2026-06-20.sql");
+Result<bool> restored = await mysql.RestoreSchemaAsync("users");   // latest backup for the table
+// backupFile is a file path, not a bare name — it is passed to File.Exists as given
+Result<bool> fromFile = await mysql.RestoreSchemaAsync(
+    "users", Path.Combine(dataDirectory, "backups", "users_20260620_141530.sql"));
 ```
 
 > Restore replays DDL only — rows in the dropped/recreated table are lost. Use it to recover schema shape, not data.

@@ -3,39 +3,51 @@ namespace CL.PostgreSQL.Models;
 /// <summary>
 /// Represents a page of results from a paged query.
 /// </summary>
+/// <typeparam name="T">The entity type.</typeparam>
 public sealed class PagedResult<T>
 {
+    /// <summary>The items on the current page.</summary>
     public List<T> Items { get; init; } = [];
+
+    /// <summary>The 1-based page number.</summary>
     public int PageNumber { get; init; }
+
+    /// <summary>The maximum number of items per page.</summary>
     public int PageSize { get; init; }
+
+    /// <summary>Total number of items across all pages.</summary>
     public long TotalItems { get; init; }
+
+    /// <summary>Total number of pages.</summary>
     public int TotalPages => PageSize > 0 ? (int)Math.Ceiling((double)TotalItems / PageSize) : 0;
+
+    /// <summary>True when there is a page before this one.</summary>
     public bool HasPreviousPage => PageNumber > 1;
+
+    /// <summary>True when there is a page after this one.</summary>
     public bool HasNextPage => PageNumber < TotalPages;
 }
 
-/// <summary>A single WHERE predicate clause for use in dynamic queries.</summary>
-public sealed class WhereCondition
+/// <summary>
+/// Represents one forward-only page from a cursor-paged query.
+/// </summary>
+/// <typeparam name="T">The entity type.</typeparam>
+public sealed class CursorPagedResult<T>
 {
-    public required string Column { get; init; }
-    public string Operator { get; init; } = "=";
-    public object? Value { get; init; }
-    public string LogicalOperator { get; init; } = "AND";
-}
+    /// <summary>The items returned for this page.</summary>
+    public List<T> Items { get; init; } = [];
 
-/// <summary>Specifies an ORDER BY clause for a query.</summary>
-public sealed class OrderByClause
-{
-    public required string Column { get; init; }
-    public SortOrder Order { get; init; } = SortOrder.Asc;
-}
+    /// <summary>The requested maximum number of items for the page.</summary>
+    public int PageSize { get; init; }
 
-/// <summary>Specifies a JOIN clause for a query.</summary>
-public sealed class JoinClause
-{
-    public JoinType Type { get; init; } = JoinType.Inner;
-    public required string Table { get; init; }
-    public required string Condition { get; init; }
+    /// <summary>
+    /// The opaque cursor to pass to <c>After</c> for the next page, or <see langword="null"/>
+    /// when this is the final page.
+    /// </summary>
+    public string? NextCursor { get; init; }
+
+    /// <summary>True when another page is available.</summary>
+    public bool HasNextPage => NextCursor is not null;
 }
 
 /// <summary>SQL JOIN types.</summary>
@@ -47,31 +59,38 @@ public enum JoinType
     Cross
 }
 
-/// <summary>Describes a SQL aggregate function applied to a column.</summary>
-public sealed class AggregateFunction
-{
-    public AggregateType Type { get; init; }
-    public required string Column { get; init; }
-    public required string Alias { get; init; }
-}
-
-/// <summary>SQL aggregate function types.</summary>
-public enum AggregateType
-{
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max
-}
-
-/// <summary>The result of a table synchronization operation.</summary>
+/// <summary>
+/// The result of a table synchronization operation.
+/// </summary>
 public sealed class SyncResult
 {
+    /// <summary>Whether the sync completed without errors.</summary>
     public bool Success { get; init; }
+
+    /// <summary>The name of the table that was synced.</summary>
     public string TableName { get; init; } = string.Empty;
-    public string SchemaName { get; init; } = "public";
+
+    /// <summary>DDL operations performed (e.g., "CREATE TABLE", "ADD COLUMN x").</summary>
     public List<string> Operations { get; init; } = [];
+
+    /// <summary>Any non-fatal errors encountered during the sync.</summary>
     public List<string> Errors { get; init; } = [];
+
+    /// <summary>How long the sync took.</summary>
     public TimeSpan Duration { get; init; }
+
+    /// <summary>
+    /// True when the table was skipped via the <c>__schema_state</c> CRC fast-path
+    /// (the model is unchanged), so no <c>pg_catalog</c> diffing or DDL ran.
+    /// </summary>
+    public bool Skipped { get; init; }
+
+    /// <summary>The model's computed schema CRC, when available.</summary>
+    public string? SchemaCrc { get; init; }
+
+    /// <summary>
+    /// True when an additive (Production) sync left a destructive change deferred
+    /// (the table was flagged <c>DriftPending</c> for a later Migration pass).
+    /// </summary>
+    public bool DriftPending { get; init; }
 }

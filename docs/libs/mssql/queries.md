@@ -30,7 +30,7 @@ mssql.Query<Order>()
     .Where(o => o.CreatedUtc >= DateTime.UtcNow.AddDays(-30));
 ```
 
-Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`, capped at `MaxInClauseValues`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
+Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), `Contains` over a collection (→ `IN (...)`; an empty collection becomes `1 = 0`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables and `DateTime.UtcNow`-relative expressions are parameterized.
 
 ## Subquery filters — `EXISTS` / `IN`
 
@@ -55,7 +55,7 @@ mssql.Query<Order>()
 - `WhereExists<TInner>` / `WhereNotExists<TInner>` → `[NOT] EXISTS (SELECT 1 FROM inner WHERE …)`.
 - `WhereIn<TInner, TKey>` / `WhereNotIn<TInner, TKey>` → `col [NOT] IN (SELECT innerCol FROM inner [WHERE innerFilter])`.
 
-> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` is silently bypassed on these. `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
+> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` / `.SmartCache` are bypassed on these (with a logged warning), and the refusal carries through `.Select(...)` and `.GroupBy(...)` to the resulting `ProjectedQuery`, so `.WhereExists(...).Select(...).WithCache(ttl)` also executes uncached. `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
 
 ## Ordering & paging
 
@@ -153,7 +153,7 @@ Result<List<OrderSummary>> rows = await mssql.Query<Order>()
     .ToListAsync();
 ```
 
-`ProjectedQuery` exposes `WithCache(ttl)`, `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
+`ProjectedQuery` exposes `WithCache(ttl)`, `WithCache()` (the configured `DefaultTtlSeconds`), `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
 
 ## Aggregates — `GroupBy`
 
@@ -177,6 +177,33 @@ Result<List<DailyTotal>> daily = await mssql.Query<Order>()
 
 Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(...)`, `g.Max(...)`, `g.Count()`, and `g.Any()`.
 
+`SqlFn` exposes server-side functions for use inside a **grouped** query's key or projection:
+`Year`, `Month`, `Day`, `Hour`, `Minute`, `DayOfWeek`, `Date`, `BucketUtc`, `Coalesce`,
+`IfNull`, `Lower`, `Upper`, `Concat`, `Like`, `Round`, `Floor`, `Ceiling`. They are not
+translated in an ungrouped `Select`, which supports plain column access only — that throws
+`NotSupportedException` when the query is built. Calling one outside a query expression
+throws `InvalidOperationException`; they are markers for the translator, not real methods.
+
+```csharp
+var perDay = await mssql.Query<Order>()
+    .Where(o => o.CreatedUtc >= since)
+    .GroupBy(o => SqlFn.Date(o.CreatedUtc))
+    .Select(g => new { Day = g.Key, Count = g.Count(), Revenue = g.Sum(o => o.Total) })
+    .ToListAsync();
+```
+
+The translations target T-SQL: `Year`/`Month`/`Day`/`Hour`/`Minute` become
+`DATEPART(part, x)`, `Date(x)` becomes `CONVERT(date, x)`, `IfNull(a, b)` becomes
+`COALESCE(a, b)`, and `BucketUtc(x, n)` floors a UNIX timestamp to an `n`-second window
+with `DATEDIFF_BIG`/`DATEADD`.
+
+`DayOfWeek` counts days from a known Sunday rather than using `DATEPART(weekday, …)`,
+whose result would otherwise shift with the session's `SET DATEFIRST`. It always returns
+0–6 from Sunday, matching .NET's `DayOfWeek`.
+
+`Like` returns a `bit`: T-SQL has no boolean expression type, so the predicate is wrapped
+in `CAST(CASE WHEN … THEN 1 ELSE 0 END AS bit)` to be legal in a key or projection.
+
 ## Terminal operations
 
 | Terminal | Returns | SQL |
@@ -185,7 +212,7 @@ Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(.
 | `FirstOrDefaultAsync(ct)` | `Result<T?>` | `SELECT TOP (1) …` |
 | `ToPagedListAsync(page, pageSize, ct)` | `Result<PagedResult<T>>` | data page + `COUNT(*)` |
 | `ToCursorPagedListAsync(pageSize, ct)` | `Result<CursorPagedResult<T>>` | keyset page + one lookahead row |
-| `CountAsync(ct)` | `Result<long>` | `SELECT COUNT(*)` |
+| `CountAsync(ct)` | `Result<long>` | `SELECT COUNT(*)` (soft-delete filtered unless `IncludeDeleted()`) |
 | `MaxAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MAX(col)` |
 | `MinAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MIN(col)` |
 | `SumAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT SUM(col)` |
@@ -245,23 +272,25 @@ Result<long?> max = await mssql.SqlScalarAsync<long>(
 
 `BeginTransactionAsync` returns a `TransactionScope` (an `IAsyncDisposable`). Commit explicitly; if the scope is disposed without a commit it rolls back automatically.
 
+Pass the scope to `GetRepository<T>` or `Query<T>` to enlist typed work in it; without it,
+a repository or builder runs on its own connection and is **not** part of the transaction.
+
 ```csharp
 await using TransactionScope tx = await mssql.BeginTransactionAsync();
-try
-{
-    await mssql.ExecuteSqlAsync("UPDATE accounts SET balance = balance - @amt WHERE id = @from",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@from"] = 1L });
-    await mssql.ExecuteSqlAsync("UPDATE accounts SET balance = balance + @amt WHERE id = @to",
-        new Dictionary<string, object?> { ["@amt"] = 100m, ["@to"] = 2L });
 
-    await tx.CommitAsync();
-}
-catch
-{
-    await tx.RollbackAsync();   // or just let the scope dispose
-    throw;
-}
+await mssql.GetRepository<Account>(tx).AdjustAsync(1L, a => a.Balance, -100m);
+await mssql.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
+
+await tx.CommitAsync();      // without this, disposal rolls back
 ```
+
+> **Raw SQL cannot join a transaction scope.** `SqlQueryAsync` / `ExecuteSqlAsync` /
+> `SqlScalarAsync` take a `connectionId`, not a `TransactionScope`, and always open their own
+> connection — so calling them while a scope is open runs them *outside* that transaction
+> (and they may block on the locks it holds). Keep transactional work on the repository and
+> the query builder, both of which accept the scope. A raw statement that must be
+> transactional belongs in an `IMigration`, whose `IMigrationContext` exposes the runner's
+> `Connection` and `Transaction` directly.
 
 > Statements inside an explicit transaction scope are **never** transient-retried — the whole transaction is the caller's to retry. The result cache and smart-cache pools are also disabled inside a transaction. See [Performance & Caching](performance.md).
 

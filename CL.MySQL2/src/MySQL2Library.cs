@@ -45,6 +45,10 @@ public sealed class MySQL2Library : ILibrary
     private MigrationRunner? _migrationRunner;
     private MySQL2Strings? _strings;
     private bool _isEnabled;
+
+    // Last aggregate health reported, so HealthChangedEvent fires on a transition rather
+    // than on every poll. Null until the first check.
+    private bool? _lastHealthy;
     private RetentionWorker? _retentionWorker;
     private readonly HashSet<Type> _registeredEntities = new();
 
@@ -149,7 +153,25 @@ public sealed class MySQL2Library : ILibrary
         QueryCache.Configure(
             enabled: cacheConfig.Enabled,
             maxEntries: cacheConfig.MaxEntries,
-            timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds);
+            timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds,
+            defaultTtlSeconds: cacheConfig.DefaultTtlSeconds,
+            publishEvents: cacheConfig.PublishEvents);
+
+        // Per-database overrides of the global cache switch, and the N+1 detector threshold.
+        foreach (var kvp in enabledDbs)
+        {
+            QueryCache.SetConnectionOverride(kvp.Key, kvp.Value.CacheEnabledOverride);
+            QueryObservability.ConfigureN1Detection(kvp.Key, kvp.Value.N1DetectorThreshold);
+        }
+
+        // DDL/SQL generation is static and not connection-scoped, so it takes its knobs from
+        // the Default database when there is one, else the first enabled database.
+        var generationSource = enabledDbs.FirstOrDefault(kvp => kvp.Key == "Default").Value
+                               ?? enabledDbs[0].Value;
+        SqlGenerationOptions.Configure(
+            generationSource.DefaultStringSize,
+            generationSource.MaxInClauseValues,
+            context.Logger);
 
         // Wire the smart-cache pool registry so its background timers log to the
         // app's logger and so it can be cleanly disposed on stop.
@@ -190,7 +212,10 @@ public sealed class MySQL2Library : ILibrary
             context.Logger.Warning($"[MySQL2] Could not retrieve server info: {ex.Message}");
         }
 
-        // Start the retention worker if any registered entity carries [RetainDays].
+        // The retention worker exists from start onwards, but most applications sync their
+        // schema (and therefore register their entities) AFTER CodeLogic.StartAsync(). Its
+        // entry list is therefore live: RegisterEntity feeds it later arrivals and starts the
+        // loop the first time a [RetainDays] entity shows up. Start() is idempotent.
         _retentionWorker = new RetentionWorker(
             _connectionManager, context.Logger, _registeredEntities);
         if (_retentionWorker.HasWork) _retentionWorker.Start();
@@ -212,6 +237,13 @@ public sealed class MySQL2Library : ILibrary
         // Stop every smart-cache pool's background timer.
         await SmartCachePoolRegistry.DisposeAllAsync().ConfigureAwait(false);
 
+        // Drop the process-wide registrations installed at init so a restart (or another
+        // library instance) does not inherit this one's per-connection settings.
+        QueryObservability.ResetN1Detection();
+        if (_config is not null)
+            foreach (var id in _config.Databases.Keys)
+                QueryCache.SetConnectionOverride(id, null);
+
         _migrationRunner = null;
         _tableSyncService = null;
         _connectionManager = null;
@@ -223,6 +255,29 @@ public sealed class MySQL2Library : ILibrary
     // ── Health check ──────────────────────────────────────────────────────────
 
     /// <inheritdoc/>
+
+    /// <summary>
+    /// Publishes <see cref="Events.HealthChangedEvent"/> when the aggregate health state
+    /// differs from the last one reported. Fire-and-forget: a subscriber must never be able
+    /// to fail a health check.
+    /// </summary>
+    private async Task ReportHealthAsync(bool healthy, string message)
+    {
+        if (_lastHealthy == healthy) return;
+        _lastHealthy = healthy;
+        if (_context?.Events is null) return;
+        try
+        {
+            await _context.Events.PublishAsync(
+                new Events.HealthChangedEvent("Default", healthy, message, DateTime.UtcNow))
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // A broken subscriber must not turn a healthy library into an unhealthy one.
+        }
+    }
+
     public async Task<HealthStatus> HealthCheckAsync()
     {
         if (!_isEnabled)
@@ -265,6 +320,7 @@ public sealed class MySQL2Library : ILibrary
 
             if (failedConnections.Count == 0)
             {
+                await ReportHealthAsync(true, "all connections operational").ConfigureAwait(false);
                 return new HealthStatus
                 {
                     Status = HealthStatusLevel.Healthy,
@@ -275,6 +331,7 @@ public sealed class MySQL2Library : ILibrary
 
             if (failedConnections.Count < connectionIds.Count)
             {
+                await ReportHealthAsync(false, $"failed connections: {string.Join(", ", failedConnections)}").ConfigureAwait(false);
                 return new HealthStatus
                 {
                     Status = HealthStatusLevel.Degraded,
@@ -285,6 +342,7 @@ public sealed class MySQL2Library : ILibrary
                 };
             }
 
+            await ReportHealthAsync(false, $"failed connections: {string.Join(", ", failedConnections)}").ConfigureAwait(false);
             return new HealthStatus
             {
                 Status = HealthStatusLevel.Unhealthy,
@@ -343,13 +401,13 @@ public sealed class MySQL2Library : ILibrary
     public Repository<T> GetRepository<T>(string connectionId = "Default") where T : class, new()
     {
         var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        var dbConfig = config?.Databases.TryGetValue(connectionId, out var cfg) == true ? cfg : null;
         return new Repository<T>(
             ConnectionManager,
             _context?.Logger,
             connectionId,
-            config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
-                ? dbConfig.SlowQueryThresholdMs
-                : 1000);
+            dbConfig?.SlowQueryThresholdMs ?? 1000,
+            dbConfig?.MaxBatchInsertSize ?? 500);
     }
 
     /// <summary>
@@ -368,6 +426,50 @@ public sealed class MySQL2Library : ILibrary
                 ? dbConfig.SlowQueryThresholdMs
                 : 1000);
     }
+
+    /// <summary>
+    /// Creates a <see cref="Repository{T}"/> that runs inside an existing transaction.
+    /// Every operation is enlisted on the scope's connection, so it commits or rolls back
+    /// with it rather than on its own connection.
+    /// </summary>
+    /// <typeparam name="T">The entity type.</typeparam>
+    /// <param name="transactionScope">The scope from <see cref="BeginTransactionAsync"/>.</param>
+    public Repository<T> GetRepository<T>(TransactionScope transactionScope) where T : class, new()
+    {
+        ArgumentNullException.ThrowIfNull(transactionScope);
+        var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        var dbConfig = config?.Databases.TryGetValue(transactionScope.ConnectionId, out var cfg) == true ? cfg : null;
+        return new Repository<T>(
+            ConnectionManager,
+            _context?.Logger,
+            transactionScope,
+            dbConfig?.SlowQueryThresholdMs ?? 1000,
+            dbConfig?.MaxBatchInsertSize ?? 500);
+    }
+
+    /// <summary>
+    /// Creates a fluent <see cref="QueryBuilder{T}"/> that runs inside an existing transaction.
+    /// </summary>
+    /// <typeparam name="T">The entity type.</typeparam>
+    /// <param name="transactionScope">The scope from <see cref="BeginTransactionAsync"/>.</param>
+    public QueryBuilder<T> Query<T>(TransactionScope transactionScope) where T : class, new()
+    {
+        ArgumentNullException.ThrowIfNull(transactionScope);
+        var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        return new QueryBuilder<T>(
+            ConnectionManager,
+            _context?.Logger,
+            transactionScope,
+            config?.Databases.TryGetValue(transactionScope.ConnectionId, out var dbConfig) == true
+                ? dbConfig.SlowQueryThresholdMs
+                : 1000);
+    }
+
+    /// <summary>
+    /// The event bus this library publishes on. Internal: exposed so tests can assert the
+    /// observability events actually fire, without widening the public surface.
+    /// </summary>
+    internal CodeLogic.Core.Events.IEventBus? Events => _context?.Events;
 
     // ── Raw SQL escape hatch ─────────────────────────────────────────────────
 
@@ -438,6 +540,7 @@ public sealed class MySQL2Library : ILibrary
             var result = await ConnectionManager.ExecuteWithConnectionAsync(async conn =>
             {
                 await using var cmd = conn.CreateCommand();
+                ConnectionManager.ApplyCommandTimeout(cmd, connectionId);
                 cmd.CommandText = sql;
                 if (parameters is not null)
                     foreach (var kv in parameters)
@@ -448,7 +551,7 @@ public sealed class MySQL2Library : ILibrary
             sw.Stop();
             QueryObservability.RecordExecuted(connectionId, sql, sw.ElapsedMilliseconds, rowCount: -1, cacheHit: false);
             if (sw.ElapsedMilliseconds >= threshold)
-                QueryObservability.RecordSlow(connectionId, sql, sw.ElapsedMilliseconds);
+                QueryObservability.RecordSlow(ConnectionManager, connectionId, sql, sw.ElapsedMilliseconds, parameters);
 
             return Result<TOut>.Success(result);
         }
@@ -479,9 +582,32 @@ public sealed class MySQL2Library : ILibrary
         bool createBackup = true,
         string connectionId = "Default") where T : class
     {
-        _registeredEntities.Add(typeof(T));
+        RegisterEntity(typeof(T));
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
     }
+
+    /// <summary>
+    /// Records an entity type as registered with the library and, when it carries
+    /// <see cref="RetainDaysAttribute"/>, hands it to the retention worker and starts the
+    /// worker if it is not already running. Registration happening after
+    /// <c>CodeLogic.StartAsync()</c> is the normal case, so the worker cannot snapshot its
+    /// entry list at construction time.
+    /// </summary>
+    private void RegisterEntity(Type entityType)
+    {
+        _registeredEntities.Add(entityType);
+        var worker = _retentionWorker;
+        if (worker is null) return;            // pre-start: OnStartAsync picks it up
+        if (worker.TryRegister(entityType)) worker.Start();
+    }
+
+    /// <summary>
+    /// Runs one retention pass immediately over every registered <see cref="RetainDaysAttribute"/>
+    /// entity and returns the number of rows removed. The background loop waits five minutes
+    /// after start and then runs daily; this is the operator-triggered equivalent.
+    /// </summary>
+    public Task<int> RunRetentionOnceAsync(CancellationToken ct = default) =>
+        _retentionWorker?.RunOnceAsync(ct) ?? Task.FromResult(0);
 
     /// <summary>
     /// Syncs an entire set of entity types as one pass under a single cross-node lock, honoring
@@ -508,7 +634,7 @@ public sealed class MySQL2Library : ILibrary
     {
         var types = entities as IReadOnlyList<Type> ?? entities.ToList();
         foreach (var t in types)
-            _registeredEntities.Add(t);
+            RegisterEntity(t);
         return TableSync.SyncTablesAsync(types, createBackup, connectionId, ct);
     }
 
@@ -597,8 +723,8 @@ public sealed class MySQL2Library : ILibrary
     /// <param name="refreshEvery">How often the pool re-runs every registered query.</param>
     /// <param name="maxIdleFires">
     /// Drop a registered entry after this many consecutive refresh ticks with
-    /// no read. Default 3 — at a 30-second refresh interval, an unread entry
-    /// is dropped after ~90 seconds, bounding cardinality on parameterized queries.
+    /// no read. Default 10 — at a 30-second refresh interval, an unread entry
+    /// is dropped after ~5 minutes, bounding cardinality on parameterized queries.
     /// </param>
     /// <param name="warmUp">
     /// Optional warm-up callback. When supplied, the pool runs it once as a
