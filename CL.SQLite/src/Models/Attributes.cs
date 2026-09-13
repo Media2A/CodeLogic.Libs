@@ -26,6 +26,11 @@ public sealed class SQLiteColumnAttribute : Attribute
     public bool IsAutoIncrement { get; set; } = false;
     public string? ColumnName { get; set; }
     public SQLiteDataType DataType { get; set; }
+    /// <summary>
+    /// Optional length appended to the declared type in generated DDL (<c>TEXT(64)</c>).
+    /// SQLite records the declared type but never enforces the length, and the length does
+    /// not change the column's type affinity. <c>0</c> (the default) emits no modifier.
+    /// </summary>
     public int Size { get; set; } = 0;
     public bool IsNotNull { get; set; } = false;
     public string? DefaultValue { get; set; }

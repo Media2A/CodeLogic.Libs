@@ -154,6 +154,12 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <summary>
     /// Restricts the SELECT column list to those referenced in <paramref name="selector"/>.
     /// </summary>
+    /// <remarks>
+    /// Both a single-member selector (<c>o =&gt; o.Total</c>) and an anonymous-type selector
+    /// (<c>o =&gt; new { o.Id, o.Total }</c>) resolve each projected member back to the source
+    /// entity's mapped <see cref="SQLiteColumnAttribute.ColumnName"/>, and every emitted name is
+    /// double-quoted, so renamed columns and reserved words are both handled.
+    /// </remarks>
     /// <param name="selector">Expression identifying the column(s) to include in the SELECT clause.</param>
     /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> Select(Expression<Func<T, object?>> selector)
@@ -165,6 +171,14 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <summary>
     /// Adds a GROUP BY clause for the column selected by <paramref name="keySelector"/>.
     /// </summary>
+    /// <remarks>
+    /// GROUP BY reaches the row-returning terminals (<see cref="ToListAsync"/> and
+    /// <see cref="ToPagedListAsync"/>) and <see cref="CountAsync"/>, which then counts groups
+    /// rather than rows. The typed aggregates (<see cref="SumAsync{TResult}"/>,
+    /// <see cref="MinAsync{TResult}"/>, <see cref="MaxAsync{TResult}"/>) throw
+    /// <see cref="NotSupportedException"/> on a grouped builder, because a per-group aggregate
+    /// has no single scalar answer — read the grouped rows with <see cref="ToListAsync"/> instead.
+    /// </remarks>
     /// <param name="keySelector">Expression identifying the column to group by.</param>
     /// <returns>This builder instance for fluent chaining.</returns>
     public QueryBuilder<T> GroupBy<TKey>(Expression<Func<T, TKey>> keySelector)
@@ -212,6 +226,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     /// <summary>
     /// Executes the query with LIMIT 1 and returns the first matching entity, or <c>null</c> if none found.
+    /// The LIMIT applies to this call only: the builder is left untouched and can be reused.
     /// </summary>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="Result{T}"/> containing the first entity or <c>null</c>.</returns>
@@ -219,8 +234,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
-            Limit(1);
-            var (sql, parms) = BuildSelectSql();
+            var (sql, parms) = BuildSelectSql(limitOverride: 1);
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
@@ -263,7 +277,11 @@ public sealed class QueryBuilder<T> where T : class, new()
             var (whereClause, parms) = BuildWhereSql();
             var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM \"{tableName}\"{whereClause}{groupBySql}";
+            // With a GROUP BY, COUNT(*) would return the first group's row count; the total a
+            // caller is paging through is the number of groups, so the grouped query is wrapped.
+            var countSql = groupBySql.Length == 0
+                ? $"SELECT COUNT(*) FROM \"{tableName}\"{whereClause}"
+                : $"SELECT COUNT(*) FROM (SELECT 1 FROM \"{tableName}\"{whereClause}{groupBySql})";
             var (dataSql, dataParms) = BuildSelectSql(page, pageSize);
             LogQuery(dataSql);
 
@@ -303,17 +321,26 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <summary>
     /// Executes a COUNT(*) query using the current WHERE conditions and returns the total row count.
     /// </summary>
+    /// <remarks>
+    /// On a builder carrying <see cref="GroupBy{TKey}"/> the count is the <i>number of groups</i>
+    /// — the grouped query is wrapped in <c>SELECT COUNT(*) FROM (…)</c> — matching the
+    /// <c>TotalItems</c> reported by <see cref="ToPagedListAsync"/> for the same builder.
+    /// </remarks>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>A <see cref="Result{T}"/> containing the number of matching rows.</returns>
+    /// <returns>A <see cref="Result{T}"/> containing the number of matching rows, or groups.</returns>
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
         {
             var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
-            var sql = $"SELECT COUNT(*) FROM \"{tableName}\"{whereClause}";
+            var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
+            var sql = groupBySql.Length == 0
+                ? $"SELECT COUNT(*) FROM \"{tableName}\"{whereClause}"
+                : $"SELECT COUNT(*) FROM (SELECT 1 FROM \"{tableName}\"{whereClause}{groupBySql})";
 
             LogQuery(sql);
+            var sw = Stopwatch.StartNew();
             var count = await _connectionManager.ExecuteAsync<long>(async conn =>
             {
                 await using var cmd = BuildCommand(conn, sql, parms);
@@ -321,6 +348,8 @@ public sealed class QueryBuilder<T> where T : class, new()
                 return result is null ? 0L : Convert.ToInt64(result);
             }, _connectionId, ct).ConfigureAwait(false);
 
+            sw.Stop();
+            LogSlowQuery(sql, sw.ElapsedMilliseconds);
             return Result<long>.Success(count);
         }
         catch (Exception ex)
@@ -336,6 +365,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <param name="selector">Expression identifying the numeric column to sum.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="Result{T}"/> containing the sum value.</returns>
+    /// <exception cref="NotSupportedException">The builder carries a <see cref="GroupBy{TKey}"/>.</exception>
     public Task<Result<TResult>> SumAsync<TResult>(
         Expression<Func<T, TResult>> selector,
         CancellationToken ct = default)
@@ -347,6 +377,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <param name="selector">Expression identifying the column to find the maximum value of.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="Result{T}"/> containing the maximum value.</returns>
+    /// <exception cref="NotSupportedException">The builder carries a <see cref="GroupBy{TKey}"/>.</exception>
     public Task<Result<TResult>> MaxAsync<TResult>(
         Expression<Func<T, TResult>> selector,
         CancellationToken ct = default)
@@ -358,6 +389,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     /// <param name="selector">Expression identifying the column to find the minimum value of.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>A <see cref="Result{T}"/> containing the minimum value.</returns>
+    /// <exception cref="NotSupportedException">The builder carries a <see cref="GroupBy{TKey}"/>.</exception>
     public Task<Result<TResult>> MinAsync<TResult>(
         Expression<Func<T, TResult>> selector,
         CancellationToken ct = default)
@@ -409,12 +441,19 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             var tableName = GetTableName();
             var (whereClause, whereParms) = BuildWhereSql();
-            var setClauses = string.Join(", ", updates.Keys.Select(k => $"\"{k}\" = @upd_{k}"));
-            var sql = $"UPDATE \"{tableName}\" SET {setClauses}{whereClause}";
-
+            // Positional parameter names: a column name is an arbitrary quoted identifier and
+            // need not be a legal parameter token (the WHERE parameters are named @qb_n, so the
+            // two sets cannot collide).
             var allParms = new Dictionary<string, object?>(whereParms);
+            var setClauses = new List<string>();
             foreach (var kv in updates)
-                allParms[$"@upd_{kv.Key}"] = kv.Value;
+            {
+                var paramName = $"@p{setClauses.Count}";
+                setClauses.Add($"\"{kv.Key}\" = {paramName}");
+                allParms[paramName] = kv.Value;
+            }
+
+            var sql = $"UPDATE \"{tableName}\" SET {string.Join(", ", setClauses)}{whereClause}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
@@ -439,7 +478,8 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     private (string Sql, Dictionary<string, object?> Params) BuildSelectSql(
         int? page = null,
-        int? pageSize = null)
+        int? pageSize = null,
+        int? limitOverride = null)
     {
         var tableName = GetTableName();
         var selectCols = _selectColumns ?? "*";
@@ -447,10 +487,14 @@ public sealed class QueryBuilder<T> where T : class, new()
         var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
         var orderBySql = _orderBys.Count > 0 ? $" ORDER BY {string.Join(", ", _orderBys)}" : string.Empty;
 
-        int? effectiveLimit = page.HasValue ? pageSize : _limit;
+        int? effectiveLimit = page.HasValue ? pageSize : (limitOverride ?? _limit);
         int? effectiveOffset = page.HasValue ? (page.Value - 1) * (pageSize ?? 0) : _offset;
 
-        var limitSql = effectiveLimit.HasValue ? $" LIMIT {effectiveLimit.Value}" : string.Empty;
+        // SQLite's grammar is LIMIT expr [OFFSET expr] — a bare OFFSET is a syntax error, so an
+        // offset with no limit is emitted as the idiomatic "no upper bound" form LIMIT -1.
+        var limitSql = effectiveLimit.HasValue
+            ? $" LIMIT {effectiveLimit.Value}"
+            : effectiveOffset.HasValue ? " LIMIT -1" : string.Empty;
         var offsetSql = effectiveOffset.HasValue ? $" OFFSET {effectiveOffset.Value}" : string.Empty;
 
         var sql = $"SELECT {selectCols} FROM \"{tableName}\"{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
@@ -502,26 +546,10 @@ public sealed class QueryBuilder<T> where T : class, new()
 
             if (prop is null || !prop.CanWrite) continue;
             var raw = reader.IsDBNull(i) ? null : reader.GetValue(i);
-            prop.SetValue(entity, ConvertFromDbValue(raw, prop.PropertyType));
+            prop.SetValue(entity, SQLiteValueConverter.FromDbValue(raw, prop.PropertyType));
         }
 
         return entity;
-    }
-
-    private static object? ConvertFromDbValue(object? value, Type targetType)
-    {
-        if (value is null || value is DBNull) return null;
-        var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
-        if (underlying == typeof(bool)) return Convert.ToInt64(value) != 0;
-        if (underlying == typeof(int)) return Convert.ToInt32(value);
-        if (underlying == typeof(long)) return Convert.ToInt64(value);
-        if (underlying == typeof(double)) return Convert.ToDouble(value);
-        if (underlying == typeof(float)) return Convert.ToSingle(value);
-        if (underlying == typeof(decimal)) return Convert.ToDecimal(value);
-        if (underlying == typeof(DateTime) && value is string dtStr) return DateTime.Parse(dtStr);
-        if (underlying == typeof(Guid) && value is string guidStr) return Guid.Parse(guidStr);
-        if (underlying.IsEnum) return Enum.ToObject(underlying, Convert.ToInt64(value));
-        try { return Convert.ChangeType(value, underlying); } catch { return value; }
     }
 
     private async Task<Result<TResult>> ExecuteAggregateAsync<TResult>(
@@ -529,6 +557,14 @@ public sealed class QueryBuilder<T> where T : class, new()
         Expression<Func<T, TResult>> selector,
         CancellationToken ct)
     {
+        // A grouped aggregate has one value per group, which will not fit in a single scalar
+        // Result. Silently dropping the grouping would answer a question nobody asked.
+        if (_groupBys.Count > 0)
+            throw new NotSupportedException(
+                $"{func} cannot be combined with GroupBy: a grouped aggregate yields one value " +
+                "per group, not a single scalar. Use ToListAsync (or RawQueryAsync) to read the " +
+                "grouped rows instead.");
+
         try
         {
             var col = SQLiteExpressionVisitor.ParseOrderBy(selector);
@@ -565,8 +601,10 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     private void LogSlowQuery(string sql, long elapsedMs)
     {
-        if (elapsedMs >= _slowQueryThresholdMs)
-            _logger?.Warning($"[SQLite] Slow query ({elapsedMs}ms): {sql}");
+        if (elapsedMs < _slowQueryThresholdMs) return;
+
+        _logger?.Warning($"[SQLite] {string.Format(SQLiteObservability.Strings.SlowQueryDetected, elapsedMs, sql)}");
+        SQLiteObservability.RecordSlowQuery(GetTableName(), sql, elapsedMs);
     }
 
     private void LogQuery(string sql)
