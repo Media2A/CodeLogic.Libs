@@ -177,6 +177,28 @@ Result<List<DailyTotal>> daily = await mysql.Query<Order>()
 
 Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(...)`, `g.Max(...)`, `g.Count()`, and `g.Any()`.
 
+`SqlFn` exposes server-side functions for use inside a **grouped** query's key or projection:
+`Year`, `Month`, `Day`, `Hour`, `Minute`, `DayOfWeek`, `Date`, `BucketUtc`, `Coalesce`,
+`IfNull`, `Lower`, `Upper`, `Concat`, `Like`, `Round`, `Floor`, `Ceiling`. They are not
+translated in an ungrouped `Select`, which supports plain column access only — that throws
+`NotSupportedException` when the query is built. Calling one outside a query expression
+throws `InvalidOperationException`; they are markers for the translator, not real methods.
+
+```csharp
+var perDay = await mysql.Query<Order>()
+    .Where(o => o.CreatedUtc >= since)
+    .GroupBy(o => SqlFn.Date(o.CreatedUtc))
+    .Select(g => new { Day = g.Key, Count = g.Count(), Revenue = g.Sum(o => o.Total) })
+    .ToListAsync();
+```
+
+The translations target MySQL: `Year`/`Month`/`Day`/`Hour`/`Minute` become the matching
+`YEAR(x)`-style calls, `Date(x)` becomes `DATE(x)`, `IfNull(a, b)` becomes `IFNULL(a, b)`,
+and `BucketUtc(x, n)` floors a UNIX timestamp to an `n`-second window.
+
+`DayOfWeek` is adjusted to match .NET: MySQL's `DAYOFWEEK` is 1–7 from Sunday, so the
+translation subtracts one to give 0–6.
+
 ## Terminal operations
 
 | Terminal | Returns | SQL |
@@ -244,6 +266,20 @@ Result<long?> max = await mysql.SqlScalarAsync<long>(
 ## Transactions
 
 `BeginTransactionAsync` returns a `TransactionScope` (an `IAsyncDisposable`). Commit explicitly; if the scope is disposed without a commit it rolls back automatically.
+
+Pass the scope to `GetRepository<T>` or `Query<T>` to enlist typed work in it; without it,
+a repository or builder runs on its own connection and is **not** part of the transaction.
+
+```csharp
+await using TransactionScope tx = await mysql.BeginTransactionAsync();
+
+await mysql.GetRepository<Account>(tx).AdjustAsync(1L, a => a.Balance, -100m);
+await mysql.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
+
+await tx.CommitAsync();      // without this, disposal rolls back
+```
+
+Raw SQL inside the same scope:
 
 ```csharp
 await using TransactionScope tx = await mysql.BeginTransactionAsync();

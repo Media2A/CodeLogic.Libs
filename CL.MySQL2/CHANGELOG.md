@@ -6,6 +6,12 @@ NuGet package version of `CodeLogic.MySQL2`.
 
 ## 2026-09-13
 
+### Documentation
+
+- The README's transaction example still built a `Repository<T>` by hand; it now uses the
+  `GetRepository<T>(tx)` / `Query<T>(tx)` accessors added in this release.
+- Documented `SqlFn` and transaction-scoped queries in the queries guide.
+
 ### Fixed (configuration validation)
 
 - `MySqlDatabaseConfig.Validate` checked only host, port, database and username. An

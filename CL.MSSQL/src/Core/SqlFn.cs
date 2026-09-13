@@ -13,31 +13,32 @@ public static class SqlFn
 {
     // ── Date/time ─────────────────────────────────────────────────────────────
 
-    /// <summary>SQL Server <c>YEAR(d)</c>.</summary>
+    /// <summary>SQL Server <c>DATEPART(year, d)</c>.</summary>
     public static int Year(DateTime d) => throw OutsideQuery(nameof(Year));
-    /// <summary>SQL Server <c>MONTH(d)</c>.</summary>
+    /// <summary>SQL Server <c>DATEPART(month, d)</c>.</summary>
     public static int Month(DateTime d) => throw OutsideQuery(nameof(Month));
-    /// <summary>SQL Server <c>DAY(d)</c>.</summary>
+    /// <summary>SQL Server <c>DATEPART(day, d)</c>.</summary>
     public static int Day(DateTime d) => throw OutsideQuery(nameof(Day));
-    /// <summary>SQL Server <c>HOUR(d)</c>.</summary>
+    /// <summary>SQL Server <c>DATEPART(hour, d)</c>.</summary>
     public static int Hour(DateTime d) => throw OutsideQuery(nameof(Hour));
-    /// <summary>SQL Server <c>MINUTE(d)</c>.</summary>
+    /// <summary>SQL Server <c>DATEPART(minute, d)</c>.</summary>
     public static int Minute(DateTime d) => throw OutsideQuery(nameof(Minute));
 
     /// <summary>
     /// Day of week, matching .NET's <c>DayOfWeek</c> numbering (0 = Sunday … 6 = Saturday).
-    /// SQL Server's <c>DAYOFWEEK</c> is 1 = Sunday, so the translator emits <c>DAYOFWEEK(d) - 1</c>.
+    /// <c>DATEPART(weekday, d)</c> is deliberately not used: its result shifts with the
+    /// session's <c>SET DATEFIRST</c>. The translator counts days from a known Sunday instead,
+    /// so the value is the same on any connection.
     /// </summary>
     public static int DayOfWeek(DateTime d) => throw OutsideQuery(nameof(DayOfWeek));
 
-    /// <summary>SQL Server <c>DATE(d)</c> — strips the time component.</summary>
+    /// <summary>SQL Server <c>CONVERT(date, d)</c> — strips the time component.</summary>
     public static DateTime Date(DateTime d) => throw OutsideQuery(nameof(Date));
 
     /// <summary>
     /// Rounds <paramref name="d"/> down to the nearest <paramref name="seconds"/>-wide
-    /// bucket. Translates to
-    /// <c>FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(d)/seconds)*seconds)</c>. Use for time-
-    /// series bucketing in <c>GroupBy</c> keys.
+    /// bucket, by flooring the epoch-second offset with <c>DATEDIFF_BIG</c> and adding it
+    /// back with <c>DATEADD</c>. Use for time-series bucketing in <c>GroupBy</c> keys.
     /// </summary>
     public static DateTime BucketUtc(DateTime d, int seconds) => throw OutsideQuery(nameof(BucketUtc));
 
@@ -45,7 +46,8 @@ public static class SqlFn
 
     /// <summary>SQL Server <c>COALESCE(a, b, ...)</c>.</summary>
     public static T Coalesce<T>(params T[] values) => throw OutsideQuery(nameof(Coalesce));
-    /// <summary>SQL Server <c>IFNULL(v, fallback)</c>.</summary>
+    /// <summary>Substitutes <paramref name="fallback"/> for a null <paramref name="value"/>.
+    /// T-SQL has no <c>IFNULL</c>, so this emits <c>COALESCE(v, fallback)</c>.</summary>
     public static T IfNull<T>(T value, T fallback) => throw OutsideQuery(nameof(IfNull));
 
     // ── String ────────────────────────────────────────────────────────────────
@@ -60,6 +62,10 @@ public static class SqlFn
     /// SQL Server <c>s LIKE pattern</c>. Unlike the <c>Contains</c>/<c>StartsWith</c>/<c>EndsWith</c>
     /// visitor shortcuts, this passes <paramref name="pattern"/> through untouched — the
     /// caller supplies <c>%</c>/<c>_</c> wildcards directly.
+    /// <para>
+    /// T-SQL has no boolean expression type, so in a key or projection the predicate is
+    /// materialized as <c>CAST(CASE WHEN s LIKE pattern THEN 1 ELSE 0 END AS bit)</c>.
+    /// </para>
     /// </summary>
     public static bool Like(string s, string pattern) => throw OutsideQuery(nameof(Like));
 

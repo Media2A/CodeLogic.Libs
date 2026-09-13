@@ -194,6 +194,10 @@ Reads filter `"deleted_utc" IS NULL`; `DeleteAsync` stamps it instead of removin
 window in batches. Because PostgreSQL has no `DELETE … LIMIT`, each batch selects rows by
 `ctid` with `FOR UPDATE SKIP LOCKED`, so concurrent passes do not block one another.
 
+The worker runs on a timer once the library starts. `RetentionWorker.RunOnceAsync()` performs
+a single purge pass synchronously and returns the number of rows deleted — useful for a
+maintenance command, or for a test that should not wait out the timer.
+
 ## Backups & restore
 
 ```csharp

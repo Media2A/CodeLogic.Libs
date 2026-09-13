@@ -2,6 +2,15 @@
 
 ## 2026-09-13
 
+### Documentation
+
+- Corrected the `SqlFn` XML documentation, which had been copied from the MySQL library and
+  named functions T-SQL does not have (`HOUR`, `MINUTE`, `DATE`, `DAYOFWEEK`, `IFNULL`,
+  `FROM_UNIXTIME`). It now describes the `DATEPART`/`CONVERT`/`COALESCE` SQL actually emitted.
+- Documented `SqlFn` and the transaction-scoped `GetRepository<T>(tx)` / `Query<T>(tx)`
+  accessors in the queries guide, and added the missing soft-delete and retention sections to
+  the schema guide — the index page had linked to them all along.
+
 ### Added
 
 - `GetRepository<T>(TransactionScope)` and `Query<T>(TransactionScope)`.

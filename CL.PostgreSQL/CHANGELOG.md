@@ -5,6 +5,12 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ## 2026-09-13
 
+### Documentation
+
+- Corrected the `SqlFn` XML documentation for the date-part helpers, which still described
+  MySQL's `DAYOFWEEK(d) - 1` adjustment. PostgreSQL's `EXTRACT(DOW …)` already matches .NET's
+  numbering and no adjustment is applied.
+
 ### Fixed (found while completing PostgreSQL coverage)
 
 - **A migration registered twice ran twice.** `Register` and `RegisterFrom` both appended

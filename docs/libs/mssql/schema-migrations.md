@@ -53,6 +53,52 @@ mssql.SetSyncMode(SyncMode.Production);
 
 Schema inspection uses `sys.schemas`, `sys.tables`, `sys.columns`, `sys.types`, indexes, defaults, checks, foreign keys, and extended properties. Model CRC and reconciliation status are stored in `[dbo].[__schema_state]` using UTC timestamps. `PreviousName` invokes `sys.sp_rename` for in-place column renames.
 
+## Soft delete
+
+`[SoftDelete(timestampColumn)]` marks a nullable `DateTime` column as the delete marker.
+`Repository.DeleteAsync` then sets it to `DateTime.UtcNow` instead of issuing a physical
+`DELETE`, and single-table reads (`mssql.Query<T>()` terminals and the repository getters)
+automatically exclude rows where it is set.
+
+```csharp
+[Table(Name = "accounts", Schema = "dbo")]
+[SoftDelete(nameof(DeletedUtc))]
+public class Account
+{
+    [Column(DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(DataType = DataType.DateTime2)] public DateTime? DeletedUtc { get; set; }
+}
+
+await repo.DeleteAsync(id);             // stamps DeletedUtc
+await repo.HardDeleteAsync(id);         // physically removes the row
+
+var all = await mssql.Query<Account>().IncludeDeleted().ToListAsync();   // override the filter
+```
+
+> Auto-filtering applies to single-table reads only. It does **not** apply to joins, subquery
+> filters, or the query builder's bulk `UpdateAsync` / `DeleteAsync` — those stay raw so you can
+> target or restore deleted rows.
+
+## Retention
+
+`[RetainDays(days, timestampColumn)]` opts an entity into a background `RetentionWorker` that
+deletes rows older than `days` in bounded `DELETE TOP (@batch)` passes (`BatchSize` default
+5000) until drained.
+
+```csharp
+[Table(Name = "audit_log", Schema = "dbo")]
+[RetainDays(90, nameof(CreatedUtc), BatchSize = 10000)]
+public class AuditLog
+{
+    [Column(DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(DataType = DataType.DateTime2)] public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+}
+```
+
+The worker runs on a timer once the library starts. `RetentionWorker.RunOnceAsync()` performs
+a single purge pass synchronously and returns the number of rows deleted — useful for a
+maintenance command, or for a test that should not wait out the timer.
+
 ## Imperative migrations
 
 Implement `IMigration` or derive from `Migration`, register instances, then inspect or execute the ordered plan.

@@ -177,6 +177,33 @@ Result<List<DailyTotal>> daily = await mssql.Query<Order>()
 
 Inside the projection use `g.Key`, `g.Sum(x => …)`, `g.Average(...)`, `g.Min(...)`, `g.Max(...)`, `g.Count()`, and `g.Any()`.
 
+`SqlFn` exposes server-side functions for use inside a **grouped** query's key or projection:
+`Year`, `Month`, `Day`, `Hour`, `Minute`, `DayOfWeek`, `Date`, `BucketUtc`, `Coalesce`,
+`IfNull`, `Lower`, `Upper`, `Concat`, `Like`, `Round`, `Floor`, `Ceiling`. They are not
+translated in an ungrouped `Select`, which supports plain column access only — that throws
+`NotSupportedException` when the query is built. Calling one outside a query expression
+throws `InvalidOperationException`; they are markers for the translator, not real methods.
+
+```csharp
+var perDay = await mssql.Query<Order>()
+    .Where(o => o.CreatedUtc >= since)
+    .GroupBy(o => SqlFn.Date(o.CreatedUtc))
+    .Select(g => new { Day = g.Key, Count = g.Count(), Revenue = g.Sum(o => o.Total) })
+    .ToListAsync();
+```
+
+The translations target T-SQL: `Year`/`Month`/`Day`/`Hour`/`Minute` become
+`DATEPART(part, x)`, `Date(x)` becomes `CONVERT(date, x)`, `IfNull(a, b)` becomes
+`COALESCE(a, b)`, and `BucketUtc(x, n)` floors a UNIX timestamp to an `n`-second window
+with `DATEDIFF_BIG`/`DATEADD`.
+
+`DayOfWeek` counts days from a known Sunday rather than using `DATEPART(weekday, …)`,
+whose result would otherwise shift with the session's `SET DATEFIRST`. It always returns
+0–6 from Sunday, matching .NET's `DayOfWeek`.
+
+`Like` returns a `bit`: T-SQL has no boolean expression type, so the predicate is wrapped
+in `CAST(CASE WHEN … THEN 1 ELSE 0 END AS bit)` to be legal in a key or projection.
+
 ## Terminal operations
 
 | Terminal | Returns | SQL |
@@ -244,6 +271,20 @@ Result<long?> max = await mssql.SqlScalarAsync<long>(
 ## Transactions
 
 `BeginTransactionAsync` returns a `TransactionScope` (an `IAsyncDisposable`). Commit explicitly; if the scope is disposed without a commit it rolls back automatically.
+
+Pass the scope to `GetRepository<T>` or `Query<T>` to enlist typed work in it; without it,
+a repository or builder runs on its own connection and is **not** part of the transaction.
+
+```csharp
+await using TransactionScope tx = await mssql.BeginTransactionAsync();
+
+await mssql.GetRepository<Account>(tx).AdjustAsync(1L, a => a.Balance, -100m);
+await mssql.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
+
+await tx.CommitAsync();      // without this, disposal rolls back
+```
+
+Raw SQL inside the same scope:
 
 ```csharp
 await using TransactionScope tx = await mssql.BeginTransactionAsync();

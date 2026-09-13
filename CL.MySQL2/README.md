@@ -252,15 +252,15 @@ Result<int> affected = await mysql.ExecuteSqlAsync(
 Result<long?> count = await mysql.SqlScalarAsync<long>("SELECT COUNT(*) FROM users");
 ```
 
-`BeginTransactionAsync` returns an async-disposable transaction that rolls back automatically unless committed. Bind repositories or query builders to it through their transaction-aware constructors:
+`BeginTransactionAsync` returns an async-disposable transaction that rolls back automatically unless committed. Pass the scope to `GetRepository<T>` or `Query<T>` to enlist that work in it:
 
 ```csharp
 await using TransactionScope tx = await mysql.BeginTransactionAsync();
-var accounts = new Repository<Account>(
-    mysql.ConnectionManager, logger: null, transactionScope: tx);
+var accounts = mysql.GetRepository<Account>(tx);
 
 await accounts.AdjustAsync(1L, a => a.Balance, -100m);
 await accounts.AdjustAsync(2L, a => a.Balance, 100m);
+await mysql.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
 await tx.CommitAsync();
 ```
 

@@ -13,20 +13,21 @@ public static class SqlFn
 {
     // ── Date/time ─────────────────────────────────────────────────────────────
 
-    /// <summary>PostgreSQL <c>YEAR(d)</c>.</summary>
+    /// <summary>PostgreSQL <c>EXTRACT(YEAR FROM d)::int</c>, evaluated in UTC.</summary>
     public static int Year(DateTime d) => throw OutsideQuery(nameof(Year));
-    /// <summary>PostgreSQL <c>MONTH(d)</c>.</summary>
+    /// <summary>PostgreSQL <c>EXTRACT(MONTH FROM d)::int</c>, evaluated in UTC.</summary>
     public static int Month(DateTime d) => throw OutsideQuery(nameof(Month));
-    /// <summary>PostgreSQL <c>DAY(d)</c>.</summary>
+    /// <summary>PostgreSQL <c>EXTRACT(DAY FROM d)::int</c>, evaluated in UTC.</summary>
     public static int Day(DateTime d) => throw OutsideQuery(nameof(Day));
-    /// <summary>PostgreSQL <c>HOUR(d)</c>.</summary>
+    /// <summary>PostgreSQL <c>EXTRACT(HOUR FROM d)::int</c>, evaluated in UTC.</summary>
     public static int Hour(DateTime d) => throw OutsideQuery(nameof(Hour));
-    /// <summary>PostgreSQL <c>MINUTE(d)</c>.</summary>
+    /// <summary>PostgreSQL <c>EXTRACT(MINUTE FROM d)::int</c>, evaluated in UTC.</summary>
     public static int Minute(DateTime d) => throw OutsideQuery(nameof(Minute));
 
     /// <summary>
     /// Day of week, matching .NET's <c>DayOfWeek</c> numbering (0 = Sunday … 6 = Saturday).
-    /// PostgreSQL's <c>DAYOFWEEK</c> is 1 = Sunday, so the translator emits <c>DAYOFWEEK(d) - 1</c>.
+    /// PostgreSQL's <c>EXTRACT(DOW …)</c> already uses that numbering, so no adjustment is
+    /// applied here — unlike the MySQL library, whose <c>DAYOFWEEK</c> is 1-based.
     /// </summary>
     public static int DayOfWeek(DateTime d) => throw OutsideQuery(nameof(DayOfWeek));
 

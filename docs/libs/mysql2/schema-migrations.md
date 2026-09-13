@@ -198,6 +198,10 @@ public class AuditLog
 }
 ```
 
+The worker runs on a timer once the library starts. `RetentionWorker.RunOnceAsync()` performs
+a single purge pass synchronously and returns the number of rows deleted — useful for a
+maintenance command, or for a test that should not wait out the timer.
+
 ## Imperative migrations
 
 When a change can't be expressed declaratively — seed data, data backfills, splitting a column — write an `IMigration`. Migrations run in `MigrationVersion` order over a `__migrations` tracking table, each in its own transaction, under the shared lock, gated by the app version.
