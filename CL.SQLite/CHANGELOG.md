@@ -7,6 +7,19 @@ All notable changes to **CodeLogic.SQLite** are documented here. Versions follow
 
 ### Fixed
 
+- **A bulk `UpdateAsync` dictionary key could escape its quoted identifier.** Keys were
+  interpolated into the `SET` clause verbatim, so a key containing a double quote could
+  close its own identifier and append an assignment to a column the caller never named.
+  Keys are now resolved against the entity's mapped columns — by column name or property
+  name — and only the resolved name is quoted; an unmapped key is rejected. This matches
+  what the three sibling libraries already did through `RequireColumn`.
+- **A `Guid` or `DateTime` primary key could not be read back or deleted.** `InsertAsync`
+  wrote key values through the value converter while `GetByIdAsync`, `GetByKeysAsync` and
+  `DeleteByKeysAsync` bound them raw, and the provider maps a raw `Guid` to a BLOB — so the
+  lookup never matched the row that had just been written, returning "not found" and
+  deleting nothing. All key paths now use the same converter as the write path.
+- Bulk `UpdateAsync` values also go through the value converter, so the bulk path and the
+  repository write the same representation for the same column.
 - **`ids.Contains(x.Id)` on a `List<T>` or `HashSet<T>` threw** with
   `InvalidOperationException: variable 'x' ... referenced from scope '', but it is not
   defined`. Two shapes reach the membership branch with their operands in opposite

@@ -448,9 +448,15 @@ public sealed class QueryBuilder<T> where T : class, new()
             var setClauses = new List<string>();
             foreach (var kv in updates)
             {
+                // Resolve through the entity's mapped columns rather than trusting the key.
+                // A key is an arbitrary caller-supplied string: interpolated straight into the
+                // SET list it can close its own quoted identifier and append assignments the
+                // caller never asked for. Resolving also gives us the property type, so the
+                // value goes through the same converter the repository writes with.
+                var column = RequireColumn(kv.Key);
                 var paramName = $"@p{setClauses.Count}";
-                setClauses.Add($"\"{kv.Key}\" = {paramName}");
-                allParms[paramName] = kv.Value;
+                setClauses.Add($"\"{column.ColumnName}\" = {paramName}");
+                allParms[paramName] = SQLiteValueConverter.ToDbValue(kv.Value, column.Property.PropertyType);
             }
 
             var sql = $"UPDATE \"{tableName}\" SET {string.Join(", ", setClauses)}{whereClause}";
@@ -591,6 +597,27 @@ public sealed class QueryBuilder<T> where T : class, new()
             _logger?.Error($"[SQLite] QueryBuilder aggregate failed: {ex.Message}", ex);
             return Result<TResult>.Failure(Error.FromException(ex, "sqlite.query_failed"));
         }
+    }
+
+    /// <summary>
+    /// Resolves a caller-supplied key to a mapped column on <typeparamref name="T"/>, by
+    /// column name or by property name. Throws when the key names nothing, so an unmapped
+    /// or hostile key is rejected before it can reach the SQL text.
+    /// </summary>
+    private static (string ColumnName, PropertyInfo Property) RequireColumn(string key)
+    {
+        foreach (var prop in typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            var attr = prop.GetCustomAttribute<SQLiteColumnAttribute>();
+            if (attr is null) continue;
+            var columnName = string.IsNullOrWhiteSpace(attr.ColumnName) ? prop.Name : attr.ColumnName;
+            if (string.Equals(columnName, key, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prop.Name, key, StringComparison.OrdinalIgnoreCase))
+                return (columnName, prop);
+        }
+
+        throw new ArgumentException(
+            $"'{key}' is not a mapped column on '{typeof(T).Name}'.", nameof(key));
     }
 
     private static string GetTableName()

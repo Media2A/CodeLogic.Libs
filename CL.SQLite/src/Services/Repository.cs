@@ -189,7 +189,7 @@ public sealed class Repository<T> where T : class, new()
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", id ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@id", ConvertKey(id) ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapFromReader(reader) : null;
             }, _connectionId, ct).ConfigureAwait(false);
@@ -404,7 +404,7 @@ public sealed class Repository<T> where T : class, new()
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", id ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@id", ConvertKey(id) ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }, _connectionId, ct).ConfigureAwait(false);
 
@@ -684,6 +684,17 @@ public sealed class Repository<T> where T : class, new()
             })
             .ToArray();
 
+    /// <summary>
+    /// Converts a primary-key value the same way the write path does, so a lookup matches
+    /// what was stored. Falls back to the raw value when the entity has no single key.
+    /// </summary>
+    private object? ConvertKey(object? id)
+    {
+        if (id is null) return null;
+        var pk = GetPrimaryKeyColumns().FirstOrDefault();
+        return pk.Property is null ? id : SQLiteValueConverter.ToDbValue(id, pk.Property.PropertyType);
+    }
+
     private static (string Clause, Dictionary<string, object?> Parameters) BuildPrimaryKeyWhere(
         List<(string ColumnName, PropertyInfo Property)> pkCols,
         object[] values)
@@ -695,7 +706,11 @@ public sealed class Repository<T> where T : class, new()
         {
             var paramName = $"@pk{i}";
             clauses.Add($"\"{pkCols[i].ColumnName}\" = {paramName}");
-            parameters[paramName] = values[i];
+            // Through the same converter InsertAsync writes with: a raw Guid binds as a
+            // BLOB and a raw DateTime in the provider's own format, neither of which
+            // matches what was stored, so the lookup silently found nothing.
+            parameters[paramName] = SQLiteValueConverter.ToDbValue(
+                values[i], pkCols[i].Property.PropertyType);
         }
 
         return (string.Join(" AND ", clauses), parameters);
