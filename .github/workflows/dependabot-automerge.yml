@@ -67,4 +67,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr comment "${{ github.event.pull_request.html_url }}" --body \
-            "Not auto-merged: this is either a major version bump or a database provider update. Both can change behaviour in ways a green suite will not catch, so this one wants a human. Merge it normally and the promote workflow will publish it."
+            "Not auto-merged: ${{ steps.decide.outputs.reason }}. Merge it normally once you are happy and the promote workflow will publish it."
