@@ -291,6 +291,15 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ### Fixed
 
+- **Retention purged every entity against the `Default` connection.** The registered-entity
+  set recorded types with no connection association, so an entity synced against a named
+  connection was purged from the wrong database — in practice the `DELETE` hit a database
+  where the table did not exist, the failure was caught and logged, and the retention the
+  `[RetainDays]` attribute described silently never happened. Registrations now carry the
+  connection they were made against, and the same entity synced to two connections is two
+  registrations. Only reachable since the worker began running at all in this same release.
+  `RetentionWorker.Register(Type, string)` and a `Registrations` view are added; the existing
+  type-only overload keeps its meaning and registers against the worker's own connection.
 - **`ids.Contains(x.Id)` on a `List<T>` or `HashSet<T>` threw instead of emitting `IN`.**
   The expression visitor's first `Contains` case matched any single-argument instance call,
   so a collection membership test took the string `LIKE` branch and tried to emit the

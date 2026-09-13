@@ -50,7 +50,7 @@ public sealed class PostgreSQLLibrary : ILibrary
     // than on every poll. Null until the first check.
     private bool? _lastHealthy;
     private RetentionWorker? _retentionWorker;
-    private readonly HashSet<Type> _registeredEntities = new();
+    private readonly HashSet<(Type Type, string ConnectionId)> _registeredEntities = new();
     private readonly Lock _registrationLock = new();
 
     // ── Phase 1: Configure ────────────────────────────────────────────────────
@@ -204,7 +204,9 @@ public sealed class PostgreSQLLibrary : ILibrary
         RetentionWorker worker;
         lock (_registrationLock)
         {
-            worker = new RetentionWorker(_connectionManager, context.Logger, _registeredEntities);
+            worker = new RetentionWorker(_connectionManager, context.Logger, []);
+            foreach (var (type, connectionId) in _registeredEntities)
+                worker.Register(type, connectionId);
             _retentionWorker = worker;
         }
         if (worker.HasWork) worker.Start();
@@ -585,7 +587,7 @@ public sealed class PostgreSQLLibrary : ILibrary
         bool createBackup = true,
         string connectionId = "Default") where T : class
     {
-        RegisterEntity(typeof(T));
+        RegisterEntity(typeof(T), connectionId);
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
     }
 
@@ -595,17 +597,17 @@ public sealed class PostgreSQLLibrary : ILibrary
     /// worker if this is the first entity with a retention policy. <c>Start()</c> is
     /// idempotent, so calling this on every sync is free once the loop is running.
     /// </summary>
-    private void RegisterEntity(Type entityType)
+    private void RegisterEntity(Type entityType, string connectionId)
     {
         RetentionWorker? worker;
         lock (_registrationLock)
         {
-            _registeredEntities.Add(entityType);
+            _registeredEntities.Add((entityType, connectionId));
             worker = _retentionWorker;
         }
 
         if (worker is null) return;          // not started yet; OnStartAsync picks it up
-        if (worker.Register(entityType)) worker.Start();
+        if (worker.Register(entityType, connectionId)) worker.Start();
     }
 
     /// <summary>
@@ -633,7 +635,7 @@ public sealed class PostgreSQLLibrary : ILibrary
     {
         var types = entities as IReadOnlyList<Type> ?? entities.ToList();
         foreach (var t in types)
-            RegisterEntity(t);
+            RegisterEntity(t, connectionId);
         return TableSync.SyncTablesAsync(types, createBackup, connectionId, ct);
     }
 

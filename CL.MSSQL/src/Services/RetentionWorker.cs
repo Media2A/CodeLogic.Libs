@@ -12,7 +12,7 @@ namespace CL.MSSQL.Services;
 /// <see cref="RetainDaysAttribute"/>. Runs once per 24 hours; on first start it runs
 /// after a short delay so library startup isn't blocked by a potentially long delete.
 /// <para>
-/// The entity set is <b>live</b>: <see cref="TryRegister"/> may be called at any
+/// The entity set is <b>live</b>: <see cref="TryRegister(Type, string)"/> may be called at any
 /// time — including long after <see cref="Start"/> — and the running loop picks the new
 /// entity up on its next pass. The library registers every entity passed to
 /// <c>SyncTableAsync</c> / <c>SyncSchemaAsync</c>, which normally happens after
@@ -32,7 +32,9 @@ public sealed class RetentionWorker : IAsyncDisposable
     private readonly ILogger? _logger;
     // Live entry set: safe to mutate while LoopAsync reads it. The loop enumerates a
     // snapshot of the values each pass, so a registration mid-pass lands on the next one.
-    private readonly ConcurrentDictionary<Type, RetainDaysAttribute> _entries = new();
+    // Keyed by (entity, connection): the same entity can be synced against more than one
+    // named connection, and each must be purged on the connection it was registered with.
+    private readonly ConcurrentDictionary<(Type Type, string ConnectionId), RetainDaysAttribute> _entries = new();
     private readonly string _connectionId;
     private readonly object _startLock = new();
     private CancellationTokenSource? _cts;
@@ -60,16 +62,26 @@ public sealed class RetentionWorker : IAsyncDisposable
     /// was not already registered), which is the caller's cue to <see cref="Start"/>. Safe to
     /// call while the background loop is running.
     /// </summary>
-    public bool TryRegister(Type entityType)
+    public bool TryRegister(Type entityType) => TryRegister(entityType, _connectionId);
+
+    /// <summary>
+    /// As <see cref="TryRegister(Type)"/>, but records the connection the entity was
+    /// registered against so the purge runs against that database rather than the default.
+    /// </summary>
+    public bool TryRegister(Type entityType, string connectionId)
     {
         ArgumentNullException.ThrowIfNull(entityType);
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
         var attr = entityType.GetCustomAttribute<RetainDaysAttribute>();
         if (attr is null) return false;
-        return _entries.TryAdd(entityType, attr);
+        return _entries.TryAdd((entityType, connectionId), attr);
     }
 
     /// <summary>The entity types currently covered by a retention policy.</summary>
-    public IReadOnlyCollection<Type> Entities => _entries.Keys.ToArray();
+    public IReadOnlyCollection<Type> Entities => _entries.Keys.Select(k => k.Type).Distinct().ToArray();
+
+    /// <summary>The (entity, connection) pairs currently covered by a retention policy.</summary>
+    public IReadOnlyCollection<(Type Type, string ConnectionId)> Registrations => _entries.Keys.ToArray();
 
     /// <summary>Whether any registered entity has a retention policy to run.</summary>
     public bool HasWork => !_entries.IsEmpty;
@@ -102,17 +114,17 @@ public sealed class RetentionWorker : IAsyncDisposable
         {
             // Snapshot per pass so registrations made while the pass runs are picked up on
             // the next one rather than invalidating the enumeration.
-            foreach (var (entityType, attr) in _entries.ToArray())
+            foreach (var (key, attr) in _entries.ToArray())
             {
                 if (ct.IsCancellationRequested) return;
                 try
                 {
-                    await PurgeEntityAsync(entityType, attr, ct).ConfigureAwait(false);
+                    await PurgeEntityAsync(key.Type, attr, key.ConnectionId, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { return; }
                 catch (Exception ex)
                 {
-                    _logger?.Warning($"[MSSQL] Retention purge failed for {entityType.Name}: {ex.Message}");
+                    _logger?.Warning($"[MSSQL] Retention purge failed for {key.Type.Name} on connection '{key.ConnectionId}': {ex.Message}");
                 }
             }
 
@@ -129,12 +141,13 @@ public sealed class RetentionWorker : IAsyncDisposable
     public async Task<int> RunOnceAsync(CancellationToken ct = default)
     {
         var total = 0;
-        foreach (var (entityType, attr) in _entries.ToArray())
-            total += await PurgeEntityAsync(entityType, attr, ct).ConfigureAwait(false);
+        foreach (var (key, attr) in _entries.ToArray())
+            total += await PurgeEntityAsync(key.Type, attr, key.ConnectionId, ct).ConfigureAwait(false);
         return total;
     }
 
-    private async Task<int> PurgeEntityAsync(Type entityType, RetainDaysAttribute attr, CancellationToken ct)
+    private async Task<int> PurgeEntityAsync(
+        Type entityType, RetainDaysAttribute attr, string connectionId, CancellationToken ct)
     {
         // Resolve column name via reflection — EntityMetadata<T> isn't reachable without
         // a type parameter, so we do the minimum lookup ourselves.
@@ -162,7 +175,7 @@ public sealed class RetentionWorker : IAsyncDisposable
                 cmd.Parameters.Add(new SqlParameter("@cutoff", System.Data.SqlDbType.DateTime2) { Value = cutoff });
                 cmd.Parameters.Add(new SqlParameter("@batch", System.Data.SqlDbType.Int) { Value = attr.BatchSize });
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, _connectionId, ct).ConfigureAwait(false);
+            }, connectionId, ct).ConfigureAwait(false);
 
             totalDeleted += affected;
 
