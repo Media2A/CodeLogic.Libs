@@ -4,6 +4,9 @@
 
 ### Added
 
+- `RetentionWorker.RunOnceAsync()` is now public; it already existed but was internal, so
+  the three libraries now expose the same retention surface.
+
 - `GetRepository<T>(TransactionScope)` and `Query<T>(TransactionScope)`.
   `BeginTransactionAsync` returned a scope that neither accessor took, so callers had to
   construct `Repository<T>` by hand to do any work inside a transaction.

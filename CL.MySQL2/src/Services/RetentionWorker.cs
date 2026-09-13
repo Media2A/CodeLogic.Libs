@@ -46,6 +46,20 @@ public sealed class RetentionWorker : IAsyncDisposable
     /// <summary>Whether any registered entity has a retention policy to run.</summary>
     public bool HasWork => _entries.Count > 0;
 
+    /// <summary>
+    /// Runs one retention pass immediately over every registered entity and returns the
+    /// number of rows removed. The background loop only wakes once a day behind an initial
+    /// delay, so this is the entry point for an operator-triggered purge — and the only way
+    /// to exercise the pass deterministically in a test.
+    /// </summary>
+    public async Task<int> RunOnceAsync(CancellationToken ct = default)
+    {
+        var removed = 0;
+        foreach (var (entityType, attr) in _entries)
+            removed += await PurgeEntityAsync(entityType, attr, ct).ConfigureAwait(false);
+        return removed;
+    }
+
     public void Start()
     {
         if (!HasWork || _loop is not null) return;
@@ -81,7 +95,7 @@ public sealed class RetentionWorker : IAsyncDisposable
         }
     }
 
-    private async Task PurgeEntityAsync(Type entityType, RetainDaysAttribute attr, CancellationToken ct)
+    private async Task<int> PurgeEntityAsync(Type entityType, RetainDaysAttribute attr, CancellationToken ct)
     {
         // Resolve column name via reflection — EntityMetadata<T> isn't reachable without
         // a type parameter, so we do the minimum lookup ourselves.
@@ -121,6 +135,8 @@ public sealed class RetentionWorker : IAsyncDisposable
             _logger?.Info($"[MySQL2] Retention purge: deleted {totalDeleted} row(s) from `{tableName}` older than {attr.Days} days.");
             QueryCache.Invalidate(tableName);
         }
+
+        return totalDeleted;
     }
 
     public async ValueTask DisposeAsync()

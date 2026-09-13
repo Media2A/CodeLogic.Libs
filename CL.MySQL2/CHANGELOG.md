@@ -8,6 +8,9 @@ NuGet package version of `CodeLogic.MySQL2`.
 
 ### Added
 
+- `RetentionWorker.RunOnceAsync()` — the retention pass was only reachable from a
+  background loop that wakes once a day, so there was no way to trigger a purge on demand.
+
 - `GetRepository<T>(TransactionScope)` and `Query<T>(TransactionScope)`.
   `BeginTransactionAsync` returned a scope that neither accessor took, so callers had to
   construct `Repository<T>` by hand to do any work inside a transaction.

@@ -82,7 +82,12 @@ public sealed class RetentionWorker : IAsyncDisposable
         }
     }
 
-    internal async Task<int> RunOnceAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Runs one retention pass immediately over every registered entity and returns the
+    /// number of rows removed. The background loop only wakes once a day behind an initial
+    /// delay, so this is the entry point for an operator-triggered purge.
+    /// </summary>
+    public async Task<int> RunOnceAsync(CancellationToken ct = default)
     {
         var total = 0;
         foreach (var (entityType, attr) in _entries)

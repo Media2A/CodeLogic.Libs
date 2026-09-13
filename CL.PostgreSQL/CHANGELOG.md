@@ -13,6 +13,10 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ### Added
 
+- `RetentionWorker.RunOnceAsync()` — the retention pass was only reachable from a
+  background loop that wakes once a day behind an initial delay, so there was no way for an
+  operator to trigger a purge (or for a test to exercise one deterministically).
+
 - Query cache with table-version invalidation, named smart-cache pools with background
   refresh, and a pluggable cache store / coordinator for multi-node deployments.
 - Database-backed migrations: `IMigration`, `MigrationRunner`, `IMigrationContext`,
