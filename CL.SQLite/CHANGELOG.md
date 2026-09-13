@@ -3,6 +3,19 @@
 All notable changes to **CodeLogic.SQLite** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-09-13
+
+### Fixed
+
+- **`ids.Contains(x.Id)` on a `List<T>` or `HashSet<T>` threw** with
+  `InvalidOperationException: variable 'x' ... referenced from scope '', but it is not
+  defined`. Two shapes reach the membership branch with their operands in opposite
+  positions — the static `Enumerable.Contains(collection, item)` and the one-argument
+  instance `collection.Contains(item)` — but both read the collection from the first
+  argument, so the instance form was handed the item expression (a lambda parameter) to
+  evaluate. Arrays were unaffected because they bind to the static form. Since a
+  `List<T>` is the idiomatic way to write an IN clause in C#, this broke ordinary usage.
+
 ## 2026-09-12
 
 ### Changed

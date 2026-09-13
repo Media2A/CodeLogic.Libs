@@ -176,9 +176,14 @@ internal static class SQLiteExpressionVisitor
 
         if (expr.Method.Name == "Contains" && expr.Method.DeclaringType != typeof(string))
         {
-            // list.Contains(x.Prop)
-            var collection = GetValue(expr.Arguments[0]);
-            var col = GetQuotedColumn(expr.Arguments.Count > 1 ? expr.Arguments[1] : expr.Object!);
+            // Two shapes reach here, with the operands in opposite positions:
+            //   static  Enumerable.Contains(collection, item) -> Arguments[0], Arguments[1]
+            //   instance collection.Contains(item)            -> Object,       Arguments[0]
+            // Reading the collection from Arguments[0] in both cases fed the instance form
+            // the item expression, i.e. a lambda parameter, which the compiler rejects.
+            var isStatic = expr.Arguments.Count > 1;
+            var collection = GetValue(isStatic ? expr.Arguments[0] : expr.Object!);
+            var col = GetQuotedColumn(isStatic ? expr.Arguments[1] : expr.Arguments[0]);
             if (collection is System.Collections.IEnumerable items)
             {
                 var inParams = new List<string>();
