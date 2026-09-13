@@ -155,18 +155,29 @@ internal static class SqlExpressionTranslator
         {
             string Arg(int i) => Visit(mc.Arguments[i]).Sql;
 
+            // Reads a timestamptz as its UTC wall-clock, so date parts do not swing with
+            // the server's session TimeZone.
+            string Utc(int i) => $"({Arg(i)}) AT TIME ZONE 'UTC'";
+
             switch (mc.Method.Name)
             {
                 // EXTRACT returns numeric in PostgreSQL, so each is cast back to int.
-                case nameof(SqlFn.Year):       return ($"EXTRACT(YEAR FROM {Arg(0)})::int", typeof(int));
-                case nameof(SqlFn.Month):      return ($"EXTRACT(MONTH FROM {Arg(0)})::int", typeof(int));
-                case nameof(SqlFn.Day):        return ($"EXTRACT(DAY FROM {Arg(0)})::int", typeof(int));
-                case nameof(SqlFn.Hour):       return ($"EXTRACT(HOUR FROM {Arg(0)})::int", typeof(int));
-                case nameof(SqlFn.Minute):     return ($"EXTRACT(MINUTE FROM {Arg(0)})::int", typeof(int));
+                //
+                // "AT TIME ZONE 'UTC'" matters: EXTRACT over a timestamptz uses the session
+                // TimeZone, so on a server set to, say, Europe/Paris an instant stored as
+                // 15:09 UTC reports hour 16 — and around midnight the day, month and year
+                // shift too. The library writes every DateTime as UTC, so date parts read
+                // back in UTC. A column declared explicitly as DataType.Timestamp (no zone)
+                // opts out of that convention and is interpreted as the session sees it.
+                case nameof(SqlFn.Year):       return ($"EXTRACT(YEAR FROM {Utc(0)})::int", typeof(int));
+                case nameof(SqlFn.Month):      return ($"EXTRACT(MONTH FROM {Utc(0)})::int", typeof(int));
+                case nameof(SqlFn.Day):        return ($"EXTRACT(DAY FROM {Utc(0)})::int", typeof(int));
+                case nameof(SqlFn.Hour):       return ($"EXTRACT(HOUR FROM {Utc(0)})::int", typeof(int));
+                case nameof(SqlFn.Minute):     return ($"EXTRACT(MINUTE FROM {Utc(0)})::int", typeof(int));
                 // PostgreSQL DOW is already 0..6 starting Sunday, matching .NET DayOfWeek,
                 // so unlike MySQL's DAYOFWEEK no -1 adjustment is needed.
-                case nameof(SqlFn.DayOfWeek):  return ($"EXTRACT(DOW FROM {Arg(0)})::int", typeof(int));
-                case nameof(SqlFn.Date):       return ($"({Arg(0)})::date", typeof(DateTime));
+                case nameof(SqlFn.DayOfWeek):  return ($"EXTRACT(DOW FROM {Utc(0)})::int", typeof(int));
+                case nameof(SqlFn.Date):       return ($"({Utc(0)})::date", typeof(DateTime));
                 // to_timestamp(floor(extract(epoch from d) / n) * n) is the PostgreSQL spelling
                 // of the MySQL FROM_UNIXTIME/UNIX_TIMESTAMP bucket round-trip.
                 case nameof(SqlFn.BucketUtc):  return ($"to_timestamp(floor(EXTRACT(EPOCH FROM {Arg(0)}) / {Arg(1)}) * {Arg(1)})", typeof(DateTime));
@@ -187,7 +198,9 @@ internal static class SqlExpressionTranslator
                     return ($"CONCAT({string.Join(", ", args)})", typeof(string));
                 }
                 case nameof(SqlFn.Like):       return ($"({Arg(0)} LIKE {Arg(1)})", typeof(bool));
-                case nameof(SqlFn.Round):      return ($"ROUND({Arg(0)}, {Arg(1)})", typeof(double));
+                // PostgreSQL has no round(double precision, integer) — the two-argument form
+                // is numeric-only — so the value is cast for the call and back for the result.
+                case nameof(SqlFn.Round):      return ($"ROUND(({Arg(0)})::numeric, {Arg(1)})::double precision", typeof(double));
                 case nameof(SqlFn.Floor):      return ($"FLOOR({Arg(0)})", typeof(double));
                 case nameof(SqlFn.Ceiling):    return ($"CEILING({Arg(0)})", typeof(double));
                 default:

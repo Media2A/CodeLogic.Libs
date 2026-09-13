@@ -262,7 +262,15 @@ public sealed class ConnectionManager
         return await ExecuteWithConnectionAsync(async conn =>
         {
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT VERSION(), @@version_comment, DATABASE(), @@hostname";
+            // version() is the full banner; the remaining MySQL spellings have no
+            // PostgreSQL equivalent: @@version_comment -> the server's compile-time
+            // settings, DATABASE() -> current_database(), @@hostname -> inet_server_addr(),
+            // which is NULL over a Unix socket and so is coalesced.
+            cmd.CommandText =
+                "SELECT version(), " +
+                "current_setting('server_version') , " +
+                "current_database(), " +
+                "COALESCE(host(inet_server_addr()), 'localhost')";
             await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (await reader.ReadAsync(ct).ConfigureAwait(false))
             {

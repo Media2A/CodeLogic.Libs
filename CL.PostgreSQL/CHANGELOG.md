@@ -5,6 +5,21 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ## 2026-09-13
 
+### Fixed (SQL functions)
+
+- **`SqlFn.Round(value, digits)` generated invalid SQL.** PostgreSQL's two-argument
+  `round` accepts `numeric` only, so `round(double precision, integer)` does not exist.
+  The value is now cast for the call and back for the result.
+- **Date-part functions read the session time zone, not UTC.** `EXTRACT` over a
+  `timestamptz` uses the server's `TimeZone` setting, so on a server set to `Europe/Paris`
+  an instant stored as 15:09 UTC reported hour 16 — and around midnight the day, month and
+  year shifted too. Since the library writes every `DateTime` as UTC, `Year`, `Month`,
+  `Day`, `Hour`, `Minute`, `DayOfWeek` and `Date` now read back in UTC.
+- `ConnectionManager.GetServerInfoAsync` still ran the MySQL query
+  `SELECT VERSION(), @@version_comment, DATABASE(), @@hostname`, which PostgreSQL rejects
+  outright. Replaced with `version()`, `current_setting`, `current_database()` and
+  `inet_server_addr()`.
+
 ### Fixed (schema scoping)
 
 - **The schema-state sentinel was keyed on the bare table name.** Two entities with the
