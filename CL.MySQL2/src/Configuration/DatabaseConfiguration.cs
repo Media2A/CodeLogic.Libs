@@ -330,6 +330,21 @@ public sealed class MySqlDatabaseConfig
         if (string.IsNullOrWhiteSpace(Username))
             errors.Add("Username is required");
 
+        // Bounds the other two libraries already check. Without them an inverted pool range
+        // or a negative timeout is accepted here and only fails later, as a driver error at
+        // connection time rather than a configuration error at startup.
+        if (MinPoolSize < 0)
+            errors.Add("MinPoolSize cannot be negative");
+
+        if (MaxPoolSize < 1 || MaxPoolSize < MinPoolSize)
+            errors.Add("MaxPoolSize must be positive and at least MinPoolSize");
+
+        if (ConnectionTimeout < 0 || CommandTimeout < 0)
+            errors.Add("Connection and command timeouts cannot be negative");
+
+        if (MaxBatchInsertSize < 1)
+            errors.Add("MaxBatchInsertSize must be positive");
+
         return errors.Count > 0
             ? ConfigValidationResult.Invalid(errors)
             : ConfigValidationResult.Valid();

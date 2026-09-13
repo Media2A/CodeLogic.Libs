@@ -6,6 +6,13 @@ NuGet package version of `CodeLogic.MySQL2`.
 
 ## 2026-09-13
 
+### Fixed (configuration validation)
+
+- `MySqlDatabaseConfig.Validate` checked only host, port, database and username. An
+  inverted pool range, a negative timeout or a zero batch size passed validation and then
+  failed later as a driver error at connection time rather than a configuration error at
+  startup. It now applies the same bounds `CL.MSSQL` and `CL.PostgreSQL` already did.
+
 ### Fixed
 
 - **A migration registered twice ran twice.** `Register` and `RegisterFrom` both appended

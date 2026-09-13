@@ -437,6 +437,12 @@ public sealed class MySQL2Library : ILibrary
                 : 1000);
     }
 
+    /// <summary>
+    /// The event bus this library publishes on. Internal: exposed so tests can assert the
+    /// observability events actually fire, without widening the public surface.
+    /// </summary>
+    internal CodeLogic.Core.Events.IEventBus? Events => _context?.Events;
+
     // ── Raw SQL escape hatch ─────────────────────────────────────────────────
 
     /// <summary>
