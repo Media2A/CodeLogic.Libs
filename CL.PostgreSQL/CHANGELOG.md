@@ -102,7 +102,7 @@ defects that only execution could surface were fixed in the process:
   string. It is the internal `"char"` type, which Npgsql will not return as one, and this
   broke every `ALTER` path. Both now cast to `text` in SQL.
 - A `daterange` column returns `NpgsqlRange<DateTime>`, so a property declared
-  `NpgsqlRange<DateOnly>` failed with `Cannot convert NpgsqlRange\`1 to NpgsqlRange\`1` — a
+  `NpgsqlRange<DateOnly>` failed with a message naming both sides as ``NpgsqlRange`1`` — a
   message that names neither type usefully. Range bounds are now converted element-wise,
   and conversion failures report full generic type names.
 
