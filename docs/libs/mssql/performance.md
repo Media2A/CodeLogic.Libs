@@ -127,7 +127,7 @@ Queries slower than `SlowQueryThresholdMs` publish a `SlowQueryEvent`. When enab
 // Subscribe on the CodeLogic event bus
 events.Subscribe<SlowQueryEvent>(e =>
 {
-    logger.Warn($"Slow query {e.Duration.TotalMilliseconds:n0}ms\n{e.ExplainJson}");
+    logger.Warn($"Slow query {e.ElapsedMs:n0}ms\n{e.ExplainJson}");
 });
 ```
 

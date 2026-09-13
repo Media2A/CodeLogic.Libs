@@ -230,6 +230,10 @@ public sealed class PostgreSQLRuntimeFixture : IAsyncLifetime
         if (!init.Success)
             throw new InvalidOperationException($"CodeLogic init failed: {init.Message}");
 
+        // allowDestructiveSync stays at the production default. With it enabled every sync
+        // in the suite runs at SchemaSyncLevel.Full, which silently hides whether production
+        // mode actually defers drops — a test asserting that safety would pass for the wrong
+        // reason. Tests that want a destructive reconcile opt in with SetSyncMode(Developer).
         var cfgDir = Path.Combine(TempDir, "Libraries", "CL.PostgreSQL");
         Directory.CreateDirectory(cfgDir);
         File.WriteAllText(Path.Combine(cfgDir, "config.postgresql.json"), $$"""
@@ -242,7 +246,7 @@ public sealed class PostgreSQLRuntimeFixture : IAsyncLifetime
               "database": "{{db}}",
               "username": "{{user}}",
               "password": "{{pass}}",
-              "allowDestructiveSync": true
+              "allowDestructiveSync": false
             }
           }
         }

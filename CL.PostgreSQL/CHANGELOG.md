@@ -86,6 +86,11 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ### Verified against a live server
 
+Every integration test runs against PostgreSQL 18.4 (156 tests, none skipped), covering
+all 45 `DataType` members, every inferred CLR mapping, value round-trips, the full set of
+`ALTER` operations, both sync modes, migrations, caching, retention and the observability
+events. Three defects only execution could surface were fixed:
+
 Every integration test now runs against PostgreSQL 18.4 (115 tests, none skipped). Two
 defects that only execution could surface were fixed in the process:
 
@@ -96,6 +101,10 @@ defects that only execution could surface were fixed in the process:
 - The catalog readers in `SchemaAnalyzer` and `BackupManager` read `a.attidentity` as a
   string. It is the internal `"char"` type, which Npgsql will not return as one, and this
   broke every `ALTER` path. Both now cast to `text` in SQL.
+- A `daterange` column returns `NpgsqlRange<DateTime>`, so a property declared
+  `NpgsqlRange<DateOnly>` failed with `Cannot convert NpgsqlRange\`1 to NpgsqlRange\`1` — a
+  message that names neither type usefully. Range bounds are now converted element-wise,
+  and conversion failures report full generic type names.
 
 ### Added (API)
 

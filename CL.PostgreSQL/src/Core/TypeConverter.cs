@@ -197,6 +197,11 @@ internal static class TypeConverter
                 return GuidFromBytes(raw).ToString();
         }
 
+        // Ranges: PostgreSQL's daterange comes back as NpgsqlRange<DateTime>, so a property
+        // declared NpgsqlRange<DateOnly> needs its bounds converting rather than the whole
+        // value rejected.
+        if (TryConvertRange(dbValue, underlyingType, out var convertedRange)) return convertedRange;
+
         // Standard conversions
         try
         {
@@ -206,12 +211,69 @@ internal static class TypeConverter
         {
             // Hard fail: silent fallthrough to the raw DB value is a data-corruption trap
             // (prior behaviour). Surface a helpful message instead so it's obvious which
-            // column and which conversion went wrong.
+            // column and which conversion went wrong. Full type names, because two different
+            // closed generics both render as "NpgsqlRange`1" under Name.
             throw new InvalidCastException(
-                $"Cannot convert DB value '{dbValue}' (type {dbValue.GetType().Name}) " +
-                $"to CLR type '{underlyingType.Name}'.", ex);
+                $"Cannot convert DB value '{dbValue}' (type {Describe(dbValue.GetType())}) " +
+                $"to CLR type '{Describe(underlyingType)}'.", ex);
         }
     }
+
+    /// <summary>
+    /// Converts an <c>NpgsqlRange&lt;TFrom&gt;</c> to an <c>NpgsqlRange&lt;TTo&gt;</c> by
+    /// converting each bound. Npgsql picks the bound type for a range from the range type
+    /// itself, so it does not always match the CLR type the property declares.
+    /// </summary>
+    private static bool TryConvertRange(object dbValue, Type targetType, out object? converted)
+    {
+        converted = null;
+        var sourceType = dbValue.GetType();
+
+        if (!sourceType.IsGenericType || !targetType.IsGenericType) return false;
+        if (sourceType.GetGenericTypeDefinition() != typeof(NpgsqlRange<>)) return false;
+        if (targetType.GetGenericTypeDefinition() != typeof(NpgsqlRange<>)) return false;
+
+        var fromElement = sourceType.GetGenericArguments()[0];
+        var toElement = targetType.GetGenericArguments()[0];
+        if (fromElement == toElement) { converted = dbValue; return true; }
+
+        // NpgsqlRange exposes its bounds and their inclusivity/infinity as properties; the
+        // six-argument constructor takes them back in the same shape.
+        object? Read(string name) => sourceType.GetProperty(name)!.GetValue(dbValue);
+
+        var lowerInfinite = (bool)Read("LowerBoundInfinite")!;
+        var upperInfinite = (bool)Read("UpperBoundInfinite")!;
+
+        var lower = lowerInfinite ? DefaultOf(toElement) : ConvertBound(Read("LowerBound"), toElement);
+        var upper = upperInfinite ? DefaultOf(toElement) : ConvertBound(Read("UpperBound"), toElement);
+
+        var ctor = targetType.GetConstructor(
+            [toElement, typeof(bool), typeof(bool), toElement, typeof(bool), typeof(bool)]);
+        if (ctor is null) return false;
+
+        converted = ctor.Invoke([
+            lower, (bool)Read("LowerBoundIsInclusive")!, lowerInfinite,
+            upper, (bool)Read("UpperBoundIsInclusive")!, upperInfinite,
+        ]);
+        return true;
+    }
+
+    private static object? DefaultOf(Type t) => t.IsValueType ? Activator.CreateInstance(t) : null;
+
+    private static object? ConvertBound(object? value, Type target)
+    {
+        if (value is null) return DefaultOf(target);
+        if (target.IsInstanceOfType(value)) return value;
+        if (value is DateTime dt && target == typeof(DateOnly)) return DateOnly.FromDateTime(dt);
+        if (value is DateOnly d && target == typeof(DateTime)) return d.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        return Convert.ChangeType(value, target);
+    }
+
+    /// <summary>Renders a type name including generic arguments, for diagnostics.</summary>
+    private static string Describe(Type type) =>
+        type.IsGenericType
+            ? $"{type.Name[..type.Name.IndexOf('`')]}<{string.Join(", ", type.GetGenericArguments().Select(Describe))}>"
+            : type.Name;
 
     /// <summary>
     /// Infers a <see cref="ColumnAttribute"/> — not just a DataType — for a CLR type
