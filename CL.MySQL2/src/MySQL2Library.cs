@@ -369,6 +369,44 @@ public sealed class MySQL2Library : ILibrary
                 : 1000);
     }
 
+    /// <summary>
+    /// Creates a <see cref="Repository{T}"/> that runs inside an existing transaction.
+    /// Every operation is enlisted on the scope's connection, so it commits or rolls back
+    /// with it rather than on its own connection.
+    /// </summary>
+    /// <typeparam name="T">The entity type.</typeparam>
+    /// <param name="transactionScope">The scope from <see cref="BeginTransactionAsync"/>.</param>
+    public Repository<T> GetRepository<T>(TransactionScope transactionScope) where T : class, new()
+    {
+        ArgumentNullException.ThrowIfNull(transactionScope);
+        var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        return new Repository<T>(
+            ConnectionManager,
+            _context?.Logger,
+            transactionScope,
+            config?.Databases.TryGetValue(transactionScope.ConnectionId, out var dbConfig) == true
+                ? dbConfig.SlowQueryThresholdMs
+                : 1000);
+    }
+
+    /// <summary>
+    /// Creates a fluent <see cref="QueryBuilder{T}"/> that runs inside an existing transaction.
+    /// </summary>
+    /// <typeparam name="T">The entity type.</typeparam>
+    /// <param name="transactionScope">The scope from <see cref="BeginTransactionAsync"/>.</param>
+    public QueryBuilder<T> Query<T>(TransactionScope transactionScope) where T : class, new()
+    {
+        ArgumentNullException.ThrowIfNull(transactionScope);
+        var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        return new QueryBuilder<T>(
+            ConnectionManager,
+            _context?.Logger,
+            transactionScope,
+            config?.Databases.TryGetValue(transactionScope.ConnectionId, out var dbConfig) == true
+                ? dbConfig.SlowQueryThresholdMs
+                : 1000);
+    }
+
     // ── Raw SQL escape hatch ─────────────────────────────────────────────────
 
     /// <summary>

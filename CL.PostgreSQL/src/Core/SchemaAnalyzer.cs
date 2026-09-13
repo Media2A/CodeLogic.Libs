@@ -512,7 +512,7 @@ internal sealed class SchemaAnalyzer
                    pg_catalog.format_type(a.atttypid, a.atttypmod),
                    NOT a.attnotnull                                AS is_nullable,
                    pg_catalog.pg_get_expr(d.adbin, d.adrelid)      AS col_default,
-                   a.attidentity,
+                   a.attidentity::text AS identity_kind,
                    coll.collname,
                    pg_catalog.col_description(c.oid, a.attnum)     AS col_comment
             FROM pg_catalog.pg_attribute a

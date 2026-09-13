@@ -90,8 +90,11 @@ public sealed class SchemaSyncLock : IAsyncDisposable
             // avoid that but returns immediately, turning a slow peer into a skipped sync.
             await using (var timeout = conn.CreateCommand())
             {
-                timeout.CommandText = "SET lock_timeout = @ms";
-                timeout.Parameters.AddWithValue("@ms", Math.Max(0, timeoutSeconds) * 1000);
+                // set_config(), not SET: the SET command is parsed before parameters are
+                // bound, so "SET lock_timeout = $1" is a syntax error. set_config is an
+                // ordinary function call and takes the value as a bound argument.
+                timeout.CommandText = "SELECT set_config('lock_timeout', @ms, false)";
+                timeout.Parameters.AddWithValue("@ms", (Math.Max(0, timeoutSeconds) * 1000).ToString());
                 await timeout.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
 

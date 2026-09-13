@@ -265,7 +265,7 @@ public sealed class BackupManager
                        pg_catalog.format_type(a.atttypid, a.atttypmod) AS coltype,
                        a.attnotnull,
                        pg_catalog.pg_get_expr(d.adbin, d.adrelid)      AS coldefault,
-                       a.attidentity,
+                       a.attidentity::text AS identity_kind,
                        coll.collname
                 FROM pg_catalog.pg_attribute a
                 JOIN pg_catalog.pg_class c      ON c.oid = a.attrelid
