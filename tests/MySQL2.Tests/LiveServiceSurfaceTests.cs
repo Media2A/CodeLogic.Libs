@@ -286,7 +286,7 @@ public sealed class LiveServiceSurfaceTests
         Assert.True(await tracker.HasMigrationBeenAppliedAsync(id));
         // Recording twice must not duplicate.
         Assert.True(await tracker.RecordMigrationAsync(id, "probe", "crc123"));
-        Assert.Single((await tracker.GetAppliedMigrationsAsync()).Where(m => m.MigrationId == id));
+        Assert.Single(await tracker.GetAppliedMigrationsAsync(), m => m.MigrationId == id);
 
         Assert.True(await tracker.RemoveMigrationRecordAsync(id));
         Assert.False(await tracker.HasMigrationBeenAppliedAsync(id));

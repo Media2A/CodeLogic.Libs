@@ -2,35 +2,33 @@
 
 ## 2026-09-13
 
+### Added
+
+- `GetRepository<T>(TransactionScope)` and `Query<T>(TransactionScope)`.
+  `BeginTransactionAsync` returned a scope that neither accessor took, so callers had to
+  construct `Repository<T>` by hand to do any work inside a transaction.
+- `RetentionWorker.RunOnceAsync()` is now public; it already existed but was internal, so
+  the three libraries now expose the same retention surface.
+
 ### Fixed
 
+- **`SqlFn.Like` in a projection, `GROUP BY` key or `UPDATE ... SET` was a syntax error.**
+  T-SQL has no boolean expression type, so the emitted `a LIKE b` is a predicate and is
+  rejected anywhere a value is expected (`Incorrect syntax near the keyword 'LIKE'`). It
+  now materializes as `CAST(CASE WHEN a LIKE b THEN 1 ELSE 0 END AS bit)`. `Where(...)`
+  was never affected — it takes a different translation path.
 - **A migration registered twice ran twice.** `Register` and `RegisterFrom` both appended
   unconditionally, so pairing `RegisterMigrationsFrom(assembly)` with an explicit
   `RegisterMigration(...)` held two copies, and both passed the apply filter. Registration
   now deduplicates by migration id.
 - **`HealthChangedEvent` was declared but never raised.** It is now published on a health
   state transition.
-
-### Fixed
-
 - **The schema-state sentinel was keyed on the bare table name**, so two entities with the
   same table name in different schemas shared one row and masked each other's CRC. The key
   is now `schema.table`; `SchemaStateStore` resolves an unqualified name against `dbo`, so
   the public diagnostic API still accepts a bare table name.
 - Restoring a table from backup cleared the sentinel by the bare name, which no longer
-  matches the qualified key and left a stale CRC behind.
-
-### Added
-
-- `RetentionWorker.RunOnceAsync()` is now public; it already existed but was internal, so
-  the three libraries now expose the same retention surface.
-
-- `GetRepository<T>(TransactionScope)` and `Query<T>(TransactionScope)`.
-  `BeginTransactionAsync` returned a scope that neither accessor took, so callers had to
-  construct `Repository<T>` by hand to do any work inside a transaction.
-
-### Fixed
-
+  matched the qualified key and left a stale CRC behind.
 - `Contains()` over an empty collection emitted `IN ()`, which is a syntax error. It now
   emits `1 = 0`.
 - Cancellation tokens are forwarded to connection acquisition, so opening a connection can

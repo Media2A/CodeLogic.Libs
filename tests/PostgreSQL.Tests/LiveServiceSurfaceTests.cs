@@ -146,7 +146,7 @@ public sealed class LiveServiceSurfaceTests
         Assert.True(await tracker.RecordMigrationAsync(id, "probe", "crc123"));
 
         var applied = await tracker.GetAppliedMigrationsAsync();
-        Assert.Single(applied.Where(m => m.MigrationId == id));
+        Assert.Single(applied, m => m.MigrationId == id);
 
         Assert.True(await tracker.RemoveMigrationRecordAsync(id));
         Assert.False(await tracker.HasMigrationBeenAppliedAsync(id));
