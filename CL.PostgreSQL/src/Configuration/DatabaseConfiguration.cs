@@ -116,8 +116,14 @@ public sealed class PostgreSqlDatabaseConfig
         RequiresRestart = true, Group = "Security", Order = 40)]
     public PostgreSqlSslMode SslMode { get; set; } = PostgreSqlSslMode.Prefer;
 
-    /// <summary>Path to a client certificate (PEM) for certificate authentication. Optional.</summary>
-    [ConfigField(Label = "Client Certificate Path", Description = "Optional path to a client certificate (PEM).",
+    /// <summary>
+    /// Path to a client certificate (PEM) for certificate authentication. Optional.
+    /// Maps to Npgsql's <c>SslCertificate</c> connection-string option; pair it with
+    /// <see cref="SslKeyPath"/> (Npgsql's <c>SslKey</c>). The CA bundle used to verify the
+    /// <i>server</i> is <see cref="SslRootCertificatePath"/> instead.
+    /// </summary>
+    [ConfigField(Label = "Client Certificate Path",
+        Description = "Optional path to a client certificate (PEM). Maps to Npgsql's SslCertificate.",
         RequiresRestart = true, Group = "Security", Order = 41)]
     public string? SslCertificatePath { get; set; }
 
@@ -135,14 +141,20 @@ public sealed class PostgreSqlDatabaseConfig
     public string? SslRootCertificatePath { get; set; }
 
     /// <summary>
-    /// The <c>search_path</c> applied to every connection. Default: "public".
+    /// The schema entities map to on this connection, and the <c>search_path</c> applied to
+    /// every connection. Default: "public".
     /// <para>
-    /// This does <b>not</b> change where an entity is mapped: a type without
-    /// <c>[Table(Schema = …)]</c> always resolves to the literal <c>public</c> schema, and
-    /// every generated statement is schema-qualified with that.
+    /// An entity <b>without</b> <c>[Table(Schema = …)]</c> is created in, and every generated
+    /// statement qualified with, this schema; an entity that declares one keeps it. The
+    /// schema is created (<c>CREATE SCHEMA IF NOT EXISTS</c>) on first sync if missing.
+    /// </para>
+    /// <para>
+    /// Two named connections may configure different schemas — resolution is per connection.
     /// </para>
     /// </summary>
-    [ConfigField(Label = "Default Schema", RequiresRestart = true, Group = "Advanced", Order = 50, Collapsed = true)]
+    [ConfigField(Label = "Default Schema",
+        Description = "Schema unqualified entities are created in and queried through, and the connection search_path. Created if missing.",
+        RequiresRestart = true, Group = "Advanced", Order = 50, Collapsed = true)]
     public string DefaultSchema { get; set; } = "public";
 
     /// <summary>
@@ -217,8 +229,8 @@ public sealed class PostgreSqlDatabaseConfig
         };
 
     /// <summary>
-    /// Intended override for the schema-backup directory. <b>Not currently applied:</b>
-    /// <see cref="Services.BackupManager"/> always writes to <c>DataDirectory/backups</c>.
+    /// Override for the schema-backup directory used by <see cref="Services.BackupManager"/>.
+    /// Blank / null keeps the default <c>DataDirectory/backups</c>.
     /// </summary>
     [ConfigField(Label = "Backup Directory", Description = "Override where schema backups are stored. Blank = default data/backups folder.",
         Group = "Schema Sync", Order = 62, Collapsed = true)]
@@ -231,9 +243,9 @@ public sealed class PostgreSqlDatabaseConfig
     public int SlowQueryThresholdMs { get; set; } = 1000;
 
     /// <summary>
-    /// Intended per-database override for the global cache switch. <b>Not currently
-    /// applied:</b> nothing reads this value, so <see cref="CacheConfiguration.Enabled"/>
-    /// governs every database.
+    /// Per-database override for the global cache switch. Null (the default) inherits
+    /// <see cref="CacheConfiguration.Enabled"/>; a non-null value wins over it for queries
+    /// on this connection.
     /// </summary>
     [ConfigField(Label = "Cache Enabled Override",
         Description = "Override the global cache switch for this database only. Leave empty to inherit.",
@@ -241,43 +253,46 @@ public sealed class PostgreSqlDatabaseConfig
     public bool? CacheEnabledOverride { get; set; } = null;
 
     /// <summary>
-    /// Intended default per-query timeout in milliseconds. <b>Not currently applied:</b>
-    /// nothing reads this value — <see cref="CommandTimeout"/> (in seconds) is the timeout
-    /// that actually reaches the connection string.
+    /// Per-command timeout in milliseconds, applied to every command the library creates
+    /// (rounded up to whole seconds, the unit ADO.NET exposes). 0 means no timeout.
+    /// Default: 30000, which matches both <see cref="CommandTimeout"/> and Npgsql's own
+    /// 30-second default, so the effective timeout is unchanged unless you change this.
     /// </summary>
     [ConfigField(Label = "Query Timeout (ms)", Min = 0,
-        Description = "Intended per-query timeout in ms. Not currently applied; use Command Timeout.",
+        Description = "Per-command timeout applied to commands this library creates. 0 = no timeout.",
         Group = "Timeouts", Order = 32, Collapsed = true)]
     public int QueryTimeoutMs { get; set; } = 30_000;
 
     /// <summary>
-    /// Intended chunk size for the batched <c>InsertManyAsync</c> / <c>UpsertManyAsync</c>
-    /// statements. <b>Not currently applied:</b> <c>GetRepository&lt;T&gt;()</c> does not pass
-    /// it through, so <see cref="Services.Repository{T}"/> uses its own default of 500 rows
-    /// (further capped by PostgreSQL's 65535-parameter ceiling).
+    /// Chunk size for the batched <c>InsertManyAsync</c> / <c>UpsertManyAsync</c> statements,
+    /// passed to <see cref="Services.Repository{T}"/> by <c>GetRepository&lt;T&gt;()</c>.
+    /// Default: 500 rows, further capped by PostgreSQL's 65535-parameter ceiling.
     /// </summary>
     [ConfigField(Label = "Max Batch Insert Size", Min = 1, Max = 10_000,
-        Description = "Rows per batched INSERT. Not currently applied; the repository default of 500 is used.",
+        Description = "Rows per batched INSERT / UPSERT, capped by PostgreSQL's 65535-parameter limit.",
         Group = "Performance", Order = 80, Collapsed = true)]
     public int MaxBatchInsertSize { get; set; } = 500;
 
     /// <summary>
-    /// Intended ceiling on the number of values in a generated <c>IN (...)</c> list.
-    /// <b>Advisory only:</b> the expression translator emits every value in a single
-    /// <c>IN</c> list and does not consult this setting, so a large <c>Contains</c>
-    /// collection is sent as-is.
+    /// Advisory ceiling on the number of values in a generated <c>IN (...)</c> list. A wider
+    /// list is still sent whole — nothing is chunked and nothing throws — but a warning is
+    /// logged once per query build naming the entity and the value count, so an accidental
+    /// 50 000-element <c>Contains</c> is visible instead of silent.
     /// </summary>
     [ConfigField(Label = "Max IN-Clause Values", Min = 1, Max = 65_000,
-        Description = "Advisory ceiling on generated IN lists; not currently enforced.",
+        Description = "Warn (once per query) when a generated IN list is wider than this. The list is still sent whole.",
         Group = "Performance", Order = 81, Collapsed = true)]
     public int MaxInClauseValues { get; set; } = 1_000;
 
     /// <summary>
-    /// Intended per-connection prepared-statement cache size. <b>Not currently applied:</b>
-    /// nothing reads this value, so Npgsql's own default is in force.
+    /// <b>Obsolete.</b> Statement caching is Npgsql's concern and is configured on the
+    /// connection string via <c>Max Auto Prepare</c> and <c>Auto Prepare Min Usages</c>.
+    /// Nothing reads this value.
     /// </summary>
+    [Obsolete("Statement caching is configured on the Npgsql connection string " +
+              "(Max Auto Prepare / Auto Prepare Min Usages), not here. This value is not read.")]
     [ConfigField(Label = "Prepared Statement Cache Size", Min = 0,
-        Description = "Prepared statements kept per connection. Not currently applied.",
+        Description = "Obsolete — set Npgsql's 'Max Auto Prepare' / 'Auto Prepare Min Usages' on the connection string instead.",
         Group = "Performance", Order = 82, Collapsed = true)]
     public int PreparedStatementCacheSize { get; set; } = 256;
 
@@ -303,30 +318,38 @@ public sealed class PostgreSqlDatabaseConfig
     public int TransientRetryBaseDelayMs { get; set; } = 50;
 
     /// <summary>
-    /// Intended threshold for the N+1 detector: warn when one query template fires this
-    /// many times inside a single request scope. <b>Not currently applied:</b> no
-    /// request-scope counting is implemented and <c>N1QueryDetectedEvent</c> is never
-    /// published, so this setting has no effect at any value.
+    /// Threshold for the N+1 detector: publish <c>N1QueryDetectedEvent</c> when the same
+    /// normalized query template executes this many times on this connection inside a
+    /// one-second rolling window. Fires once per window per template.
+    /// <b>0 (the default) disables the detector entirely</b>, at which point it costs a
+    /// single bool read per query.
     /// </summary>
     [ConfigField(Label = "N+1 Detector Threshold", Min = 0,
-        Description = "Intended N+1 warning threshold. The detector is not implemented; no effect.",
+        Description = "Publish N1QueryDetectedEvent when one query template repeats this often within a second. 0 disables.",
         Group = "Observability", Order = 90, Collapsed = true)]
     public int N1DetectorThreshold { get; set; } = 0;
 
     /// <summary>
-    /// Intended to capture <c>EXPLAIN (FORMAT JSON)</c> for a slow query and attach it to
-    /// the <c>SlowQueryEvent</c>. <b>Not currently applied:</b> no call site runs EXPLAIN,
-    /// so <c>SlowQueryEvent.ExplainJson</c> is always null whatever this is set to.
+    /// When true, a query that crosses <see cref="SlowQueryThresholdMs"/> has
+    /// <c>EXPLAIN (FORMAT JSON)</c> run against it on a separate connection and the plan
+    /// attached to <c>SlowQueryEvent.ExplainJson</c>.
+    /// <para>
+    /// Default: <b>false</b>. Strictly best-effort — the plan is fetched off the query path,
+    /// never inside the caller's transaction scope, and any failure leaves the event's
+    /// payload null rather than surfacing. Statements EXPLAIN cannot accept (DDL, batches)
+    /// are skipped.
+    /// </para>
     /// </summary>
     [ConfigField(Label = "Capture EXPLAIN On Slow",
-        Description = "Intended EXPLAIN capture on slow queries. Not currently implemented.",
+        Description = "Run EXPLAIN (FORMAT JSON) for slow queries and attach the plan to SlowQueryEvent. Best-effort; off by default.",
         Group = "Observability", Order = 91, Collapsed = true)]
-    public bool CaptureExplainOnSlowQuery { get; set; } = true;
+    public bool CaptureExplainOnSlowQuery { get; set; } = false;
 
     /// <summary>
-    /// Intended default <c>varchar</c> length for a string property with no explicit
-    /// <c>[Column(Size = …)]</c>. <b>Not currently applied:</b> type inference uses its own
-    /// hard-coded default of 255, which this value merely happens to match.
+    /// Default <c>varchar</c> length for a string property with no explicit
+    /// <c>[Column(Size = …)]</c>, threaded into type inference by schema sync.
+    /// Default: 255 — the same length inference used before, so nothing changes unless
+    /// you change this.
     /// </summary>
     [ConfigField(Label = "Default String Size", Min = 1, Max = 65_535,
         Description = "Default VARCHAR length for string columns without an explicit Size.",
@@ -409,6 +432,8 @@ public sealed class PostgreSqlDatabaseConfig
 
         if (string.IsNullOrWhiteSpace(DefaultSchema))
             errors.Add("DefaultSchema is required");
+        else if (DefaultSchema.AsSpan().IndexOfAny('"', '\0', '\n') >= 0 || DefaultSchema.Contains('\r'))
+            errors.Add("DefaultSchema contains a character that is not permitted in a PostgreSQL identifier");
 
         if (SslMode is PostgreSqlSslMode.VerifyCA or PostgreSqlSslMode.VerifyFull
             && !string.IsNullOrWhiteSpace(SslRootCertificatePath)

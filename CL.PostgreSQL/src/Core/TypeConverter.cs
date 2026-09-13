@@ -15,16 +15,22 @@ internal static class TypeConverter
     /// (e.g. "character varying(255)", "numeric(10,2)", "timestamp with time zone").
     /// When <paramref name="storageType"/> is not <see cref="StorageType.Default"/> it overrides
     /// the <see cref="ColumnAttribute.DataType"/>.
+    /// <para>
+    /// <paramref name="defaultStringSize"/> is the <c>varchar</c> length used for a string
+    /// column that declares no explicit <c>Size</c>. Callers inside schema sync pass the
+    /// connection's configured <c>DefaultStringSize</c>; the parameter defaults to 255, which
+    /// is also the configuration default.
+    /// </para>
     /// </summary>
     public static string GetPostgreSqlType(ColumnAttribute column, StorageType storageType = StorageType.Default,
-        Type? clrType = null)
+        Type? clrType = null, int defaultStringSize = 255)
     {
         if (storageType != StorageType.Default)
             return GetStorageTypeDdl(column, storageType, clrType);
 
-        column = ResolveColumn(column, clrType);
+        column = ResolveColumn(column, clrType, defaultStringSize);
 
-        var size = column.Size > 0 ? column.Size : 255;
+        var size = column.Size > 0 ? column.Size : defaultStringSize;
         return column.DataType switch
         {
             DataType.SmallInt        => "smallint",
@@ -425,11 +431,11 @@ internal static class TypeConverter
     /// inferred data type plus any size/unsigned facets the declaration left at their
     /// defaults. A column that declares its type explicitly is returned unchanged.
     /// </summary>
-    public static ColumnAttribute ResolveColumn(ColumnAttribute column, Type? clrType)
+    public static ColumnAttribute ResolveColumn(ColumnAttribute column, Type? clrType, int defaultStringSize = 255)
     {
         if (column.DataType != DataType.Unspecified || clrType is null) return column;
 
-        var inferred = InferColumn(clrType);
+        var inferred = InferColumn(clrType, defaultStringSize);
         return new ColumnAttribute
         {
             Name       = column.Name,

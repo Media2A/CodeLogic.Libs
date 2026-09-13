@@ -39,8 +39,27 @@ public static class QueryCache
     /// <summary>Current quantization window. 0 = off.</summary>
     internal static int TimeQuantizeSeconds { get; private set; } = 60;
 
+    /// <summary>
+    /// Default cache lifetime used by the parameterless <c>WithCache()</c> overloads.
+    /// Mirrors <c>CacheConfiguration.DefaultTtlSeconds</c> (60 seconds by default).
+    /// </summary>
+    public static TimeSpan DefaultTtl { get; private set; } = TimeSpan.FromSeconds(60);
+
     /// <summary>Whether the cache is enabled globally.</summary>
     internal static bool Enabled { get; private set; } = true;
+
+    /// <summary>
+    /// Whether <see cref="Events.CacheHitEvent"/> / <see cref="Events.CacheMissEvent"/> are
+    /// published. Mirrors <c>CacheConfiguration.PublishEvents</c>; true by default.
+    /// </summary>
+    internal static bool PublishEvents { get; private set; } = true;
+
+    /// <summary>
+    /// Resolves the effective enabled state for a connection: the per-database
+    /// <c>CacheEnabledOverride</c> when set, otherwise the global <see cref="Enabled"/>.
+    /// </summary>
+    internal static bool IsEnabledFor(string? connectionId) =>
+        Core.PostgreSqlRuntimeOptions.For(connectionId).CacheEnabledOverride ?? Enabled;
 
     /// <summary>Replace the underlying store (e.g. with a Redis adapter).</summary>
     public static void UseStore(ICacheStore store) =>
@@ -62,10 +81,14 @@ public static class QueryCache
     internal static ICacheCoordinator Coordinator => _coordinator;
 
     /// <summary>Apply runtime configuration from <see cref="Configuration.CacheConfiguration"/>.</summary>
-    public static void Configure(bool enabled, int maxEntries, int timeQuantizeSeconds)
+    public static void Configure(
+        bool enabled, int maxEntries, int timeQuantizeSeconds,
+        bool publishEvents = true, int defaultTtlSeconds = 60)
     {
         Enabled = enabled;
+        PublishEvents = publishEvents;
         TimeQuantizeSeconds = Math.Max(0, timeQuantizeSeconds);
+        DefaultTtl = TimeSpan.FromSeconds(Math.Max(1, defaultTtlSeconds));
         if (_store is InProcessCacheStore inProc) inProc.Configure(maxEntries);
     }
 
@@ -86,12 +109,13 @@ public static class QueryCache
         string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl,
         string? connectionId = null)
     {
-        if (!Enabled) return await factory().ConfigureAwait(false);
+        // A per-database CacheEnabledOverride wins over the global switch; null inherits.
+        if (!IsEnabledFor(connectionId)) return await factory().ConfigureAwait(false);
 
         var (found, value) = await _store.TryGetAsync(cacheKey).ConfigureAwait(false);
         if (found && !IsFailureResult(value))
         {
-            if (connectionId is not null)
+            if (connectionId is not null && PublishEvents)
                 QueryObservability.RecordCacheHit(connectionId, tableName, cacheKey);
             return (T)value!;
         }
@@ -101,7 +125,7 @@ public static class QueryCache
         if (found)
             await _store.EvictAsync(cacheKey).ConfigureAwait(false);
 
-        if (connectionId is not null)
+        if (connectionId is not null && PublishEvents)
             QueryObservability.RecordCacheMiss(connectionId, tableName, cacheKey);
 
         // Single-flight: the first caller to miss creates the in-flight task; concurrent

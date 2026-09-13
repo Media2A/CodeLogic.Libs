@@ -344,9 +344,16 @@ public sealed class QueryBuilder<T> where T : class, new()
 
         var sql = $"SELECT {compiled.SelectList} FROM {MySqlDialect.Quote(tableName)}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
 
+        // A subquery-filtered query is not cacheable — the cache stamps an entry with a single
+        // table's version, so a mutation on the EXISTS / IN inner table could not invalidate it.
+        // ShouldCache / ShouldSmartCache refuse it here; the flag travels with the projection so
+        // a later .WithCache(...) on the ProjectedQuery is refused too.
         return new ProjectedQuery<T, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl, _smartCachePool);
+            _slowQueryThresholdMs, sql, parms, compiled,
+            _hasSubqueryWhere ? null : _cacheTtl,
+            _hasSubqueryWhere ? null : _smartCachePool,
+            _hasSubqueryWhere);
     }
 
     /// <summary>
@@ -391,6 +398,14 @@ public sealed class QueryBuilder<T> where T : class, new()
         _cacheTtl = ttl;
         return this;
     }
+
+    /// <summary>
+    /// Enable result caching using the configured <c>mysql.cache</c>
+    /// <see cref="Configuration.CacheConfiguration.DefaultTtlSeconds"/> (default 60s).
+    /// Equivalent to <c>WithCache(TimeSpan.FromSeconds(DefaultTtlSeconds))</c> — same
+    /// invalidation and transaction rules as the explicit-TTL overload.
+    /// </summary>
+    public QueryBuilder<T> WithCache() => WithCache(QueryCache.DefaultTtl);
 
     /// <summary>
     /// Opt this query into a named <see cref="SmartCachePool"/>. The pool's
@@ -508,7 +523,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, parameters: parms);
         return Result<List<T>>.Success(list);
     }
 
@@ -577,7 +592,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, parameters: parms);
         return Result<T?>.Success(result);
     }
 
@@ -637,7 +652,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
+        LogSlowQuery(dataSql, sw.ElapsedMilliseconds, parameters: parms);
 
         return Result<PagedResult<T>>.Success(new PagedResult<T>
         {
@@ -728,7 +743,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count);
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count, parms);
 
         var hasNextPage = items.Count > pageSize;
         if (hasNextPage)
@@ -1107,6 +1122,7 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         var cmd = conn.CreateCommand();
         if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+        _connectionManager.ApplyCommandTimeout(cmd, _connectionId);
         cmd.CommandText = sql;
         foreach (var kv in parms)
             cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
@@ -1155,11 +1171,13 @@ public sealed class QueryBuilder<T> where T : class, new()
     private static void EnsureValidColumn(string column) =>
         _ = EntityMetadata<T>.RequireColumn(column);
 
-    private void LogSlowQuery(string sql, long elapsedMs, int rowCount = -1)
+    private void LogSlowQuery(
+        string sql, long elapsedMs, int rowCount = -1,
+        IReadOnlyDictionary<string, object?>? parameters = null)
     {
         QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
+            QueryObservability.RecordSlow(_connectionManager, _connectionId, sql, elapsedMs, parameters);
     }
 
     private void LogQuery(string sql)

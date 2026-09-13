@@ -153,19 +153,23 @@ pg.ConnectionManager.RegisterConfiguration(new PostgreSqlDatabaseConfig
 | `database` / `username` / `password` | `""` | Connection credentials. |
 | `sslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, `VerifyFull`. |
 | `sslCertificatePath` / `sslKeyPath` / `sslRootCertificatePath` | `null` | Client certificate, its key, and the CA bundle for `VerifyCA` / `VerifyFull`. |
-| `defaultSchema` | `public` | Applied as the connection's `search_path`. It does not move entities: a `[Table]` without a `Schema` is always mapped to the literal `public` schema. |
+| `defaultSchema` | `public` | The schema unqualified entities live in, and the connection's `search_path`. A `[Table]` without a `Schema` is created in — and every statement for it qualified with — this schema; `[Table(Schema = "…")]` still wins. The schema is created (`CREATE SCHEMA IF NOT EXISTS`) on first sync if missing. **Changing it moves where your tables are read and written** — see the migration note in the changelog. |
 | `applicationName` | `null` | Reported to the server; visible in `pg_stat_activity`. |
 | `minPoolSize` / `maxPoolSize` | `1` / `100` | Connection-pool bounds. |
 | `connectionLifetime` | `300` | Seconds a pooled connection may sit idle before being closed. |
 | `connectionTimeout` / `commandTimeout` | `30` / `30` | Seconds to wait opening a connection / running a command. |
 | `syncMode` | `production` | See [Schema & Migrations](schema-migrations.md). |
-| `maxBatchInsertSize` | `500` | Intended rows per batched insert. Not currently read — the repository's own 500-row default applies, capped further by the parameter limit. |
-| `maxInClauseValues` | `1000` | Advisory only. Generated `IN` lists are not chunked; every value is emitted in one list. |
+| `queryTimeoutMs` | `30000` | Command timeout applied to every command the library creates, rounded up to whole seconds. `0` = no timeout. Matches Npgsql's own 30-second default. |
+| `maxBatchInsertSize` | `500` | Rows per batched insert / upsert, capped further by PostgreSQL's 65535-parameter limit. |
+| `maxInClauseValues` | `1000` | Warn (at most once per query build, naming the entity and the count) when a generated `IN` list is wider than this. The list is still emitted whole — nothing is chunked and nothing throws. |
 | `slowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
-| `captureExplainOnSlowQuery` | `true` | Reserved. `EXPLAIN` capture is not implemented; `SlowQueryEvent.ExplainJson` is always null. |
-| `n1DetectorThreshold` | `0` | Reserved. The N+1 detector is not implemented; the setting has no effect. |
+| `captureExplainOnSlowQuery` | `false` | Run `EXPLAIN (FORMAT JSON)` for a slow query and attach the plan to `SlowQueryEvent.ExplainJson`. Best-effort: fetched off the query path, never inside the caller's transaction, and a failure leaves the payload null. |
+| `n1DetectorThreshold` | `0` | Publish `N1QueryDetectedEvent` when one normalized query template runs this many times on the connection inside a one-second window. `0` disables the detector. |
 | `transientRetryCount` / `transientRetryBaseDelayMs` | `3` / `50` | Retry policy for SQLSTATE `40001`, `40P01` and `55P03`. |
-| `defaultStringSize` | `255` | Reserved. Type inference uses a hard-coded 255; changing this has no effect. |
+| `defaultStringSize` | `255` | `varchar` length used for a string column with no explicit `[Column(Size = …)]`. |
+| `cacheEnabledOverride` | `null` | Per-database override of `postgresql.cache.enabled`. `null` inherits the global switch. |
+| `backupDirectory` | `null` | Where schema backups for this connection are written. `null` keeps `DataDirectory/backups`. |
+| `preparedStatementCacheSize` | `256` | **Obsolete** — statement caching is Npgsql's, configured on the connection string (`Max Auto Prepare`, `Auto Prepare Min Usages`). Not read. |
 
 ### TLS
 
@@ -192,8 +196,11 @@ Points where PostgreSQL behaves differently from the MySQL and SQL Server librar
 
 - **Identifiers are case-sensitive.** Everything is emitted double-quoted, so
   `[Column(Name = "userId")]` is a different column from `userid`. Prefer `snake_case`.
-- **Schemas are namespaces inside a database.** The connection picks the database;
-  `[Table(Schema = "…")]` picks the schema. Every generated statement is schema-qualified.
+- **Schemas are namespaces inside a database.** The connection picks the database and, via
+  `defaultSchema`, the schema for entities that do not name one; `[Table(Schema = "…")]`
+  overrides it per entity. Every generated statement is schema-qualified, and resolution is
+  per connection — two named connections may map the same entity types into different
+  schemas.
 - **`DateTime` maps to `timestamptz`.** Values with `DateTimeKind.Unspecified` are treated
   as UTC on the way in, since that is what the rest of the stack produces.
 - **`OnUpdateCurrentTimestamp` becomes a trigger.** PostgreSQL has no such column clause,
@@ -217,7 +224,7 @@ Events published on the framework bus (`CL.PostgreSQL.Events`):
 | `DatabaseConnectedEvent` / `DatabaseDisconnectedEvent` | A connection opens or closes. |
 | `TableSyncedEvent` | A table is created or altered; carries the schema, table and statements. |
 | `QueryExecutedEvent` | After every query — SQL, elapsed ms, row count, cache-hit flag. |
-| `SlowQueryEvent` | A query crosses `slowQueryThresholdMs`. (`ExplainJson` is reserved and always null.) |
+| `SlowQueryEvent` | A query crosses `slowQueryThresholdMs`. `ExplainJson` carries the plan when `captureExplainOnSlowQuery` is on and the capture succeeded, else null. |
 | `CacheHitEvent` / `CacheMissEvent` | A cached read is served or falls through. |
-| `N1QueryDetectedEvent` | Declared for future use — the detector is not implemented, so this is never published. |
+| `N1QueryDetectedEvent` | One query template repeats `n1DetectorThreshold` times on a connection within a second. Fires once per window per template; never when the threshold is `0` (the default). |
 | `HealthChangedEvent` | Health state transitions. |

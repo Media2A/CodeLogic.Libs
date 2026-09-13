@@ -143,23 +143,24 @@ Two files are written on first run.
 | `MinPoolSize` / `MaxPoolSize` | `1` / `100` | Pool bounds. |
 | `ConnectionLifetime` | `300` | Seconds before a pooled connection is recycled. |
 | `ConnectionTimeout` / `CommandTimeout` | `30` / `30` | Seconds. |
-| `EnableSsl` | `false` | Sets `SslMode=Required`. `AllowPublicKeyRetrieval` is applied too; `SslCertificatePath` is not. |
+| `EnableSsl` | `false` | Sets `SslMode=Required`. `AllowPublicKeyRetrieval` is applied too. |
+| `SslCertificatePath` | `null` | PEM CA file used to verify the server certificate. Applied only when `EnableSsl` is true, as MySqlConnector's `SslCa`; raises the SSL mode to `VerifyCA`. |
 | `CharacterSet` / `Collation` | `utf8mb4` / `utf8mb4_unicode_ci` | `CharacterSet` goes into the connection string; `Collation` is informational only. |
 | `SyncMode` | `Production` | `Developer` · `Production` · `Migration`. See [Schema & Migrations](schema-migrations.md). |
 | `SchemaSyncLevel` | `Safe` | Low-level cap: `None` · `Safe` · `Additive` · `Full`. |
 | `AllowDestructiveSync` | `false` | Legacy flag honoured under `SyncMode` mapping. |
-| `BackupDirectory` | `null` | Not applied — backups always go to `DataDirectory/backups`. |
+| `BackupDirectory` | `null` | Blank = `DataDirectory/backups`. When set, backups for this connection are written to and read from that directory (a relative path resolves under the data directory). |
 | `SlowQueryThresholdMs` | `1000` | Threshold for `SlowQueryEvent`. |
-| `CaptureExplainOnSlowQuery` | `true` | Not applied — no `EXPLAIN` is run; `SlowQueryEvent.ExplainJson` is always null. |
-| `QueryTimeoutMs` | `30000` | Not applied — `CommandTimeout` governs command timeouts. |
-| `MaxBatchInsertSize` | `500` | Not applied — insert/upsert chunking is fixed at 500 rows. |
-| `MaxInClauseValues` | `1000` | Not applied — generated `IN (...)` lists are uncapped. |
-| `PreparedStatementCacheSize` | `256` | Not applied — not written into the connection string. |
+| `CaptureExplainOnSlowQuery` | `false` | When true, a slow query also runs `EXPLAIN FORMAT=JSON` on a separate connection and attaches the plan to `SlowQueryEvent.ExplainJson`. Best-effort; see [Performance](performance.md). |
+| `QueryTimeoutMs` | `30000` | Command timeout for the commands the library creates, rounded up to whole seconds. 0 = inherit the connection string's `CommandTimeout`. The default equals that 30s default. |
+| `MaxBatchInsertSize` | `500` | Rows per batched `INSERT` in `InsertManyAsync` / `UpsertManyAsync`. |
+| `MaxInClauseValues` | `1000` | Advisory. A generated `IN (...)` list above this logs one warning per query build naming the entity and the count; nothing is chunked or rejected. |
+| `PreparedStatementCacheSize` | `256` | **Obsolete and ignored.** Statement caching is configured on the MySqlConnector connection string (`IgnorePrepare=false`). |
 | `TransientRetryCount` | `3` | Deadlock/lock-wait retries (0 disables). |
 | `TransientRetryBaseDelayMs` | `50` | Base backoff; exponential + jitter. |
-| `N1DetectorThreshold` | `0` | Not applied — the N+1 detector is not wired up. |
-| `CacheEnabledOverride` | `null` | Not applied — only the global cache switch is honoured. |
-| `DefaultStringSize` | `255` | Not applied — inferred string columns are always `VARCHAR(255)`. |
+| `N1DetectorThreshold` | `0` | Publish `N1QueryDetectedEvent` when one normalized query template repeats this many times on the connection within a one-second window. 0 disables. |
+| `CacheEnabledOverride` | `null` | Per-database override of the global cache switch. Null inherits it. |
+| `DefaultStringSize` | `255` | VARCHAR length for an inferred string column with no explicit `Size`. Applied process-wide from the `Default` database (DDL generation is not connection-scoped). |
 
 `config.mysql.cache.json` (section `mysql.cache`) controls the result cache.
 
@@ -167,10 +168,10 @@ Two files are written on first run.
 |---------|---------|-------|
 | `Enabled` | `true` | Global cache switch. |
 | `MaxEntries` | `10000` | Entry ceiling. |
-| `MaxMemoryMb` | `256` | Advisory only — eviction is by entry count, not memory. |
-| `DefaultTtlSeconds` | `60` | Not applied — `WithCache` always takes an explicit `TimeSpan`. |
+| `MaxMemoryMb` | `256` | **Obsolete and ignored.** The in-process store evicts by entry count — use `MaxEntries`. |
+| `DefaultTtlSeconds` | `60` | TTL used by the parameterless `WithCache()` overload on the query builder and on a projection. |
 | `TimeQuantizeSeconds` | `60` | Quantization bucket for DateTime params (see [Performance](performance.md)). |
-| `PublishEvents` | `true` | Not applied — hit/miss events publish whenever an event bus is bound. |
+| `PublishEvents` | `true` | Publish `CacheHitEvent` / `CacheMissEvent`. False keeps the cache working but silences the events. |
 
 Full caching behaviour is on the [Performance & Caching](performance.md) page.
 
@@ -195,10 +196,10 @@ All events implement `IEvent` and publish to the CodeLogic event bus.
 | `DatabaseDisconnectedEvent` | A connection is closed or lost. |
 | `TableSyncedEvent` | A table is reconciled by schema sync. |
 | `QueryExecutedEvent` | Any query completes (carries a `CacheHit` flag). |
-| `SlowQueryEvent` | A query exceeds `SlowQueryThresholdMs`. Its `ExplainJson` field is always null — plan capture is not implemented. |
+| `SlowQueryEvent` | A query exceeds `SlowQueryThresholdMs`. `ExplainJson` carries the `EXPLAIN FORMAT=JSON` plan when `CaptureExplainOnSlowQuery` is on and the statement can be explained; null otherwise. |
 | `CacheHitEvent` | A cached result satisfies a read. |
 | `CacheMissEvent` | A cacheable read misses the cache. |
-| `N1QueryDetectedEvent` | Declared but never published — the N+1 detector is not implemented. |
+| `N1QueryDetectedEvent` | One query template repeats `N1DetectorThreshold` times within a second on a connection (0, the default, disables detection). |
 | `HealthChangedEvent` | The health status transitions. |
 
 ## See also

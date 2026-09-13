@@ -51,6 +51,7 @@ public sealed class PostgreSQLLibrary : ILibrary
     private bool? _lastHealthy;
     private RetentionWorker? _retentionWorker;
     private readonly HashSet<Type> _registeredEntities = new();
+    private readonly Lock _registrationLock = new();
 
     // ── Phase 1: Configure ────────────────────────────────────────────────────
 
@@ -153,7 +154,9 @@ public sealed class PostgreSQLLibrary : ILibrary
         QueryCache.Configure(
             enabled: cacheConfig.Enabled,
             maxEntries: cacheConfig.MaxEntries,
-            timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds);
+            timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds,
+            publishEvents: cacheConfig.PublishEvents,
+            defaultTtlSeconds: cacheConfig.DefaultTtlSeconds);
 
         // Wire the smart-cache pool registry so its background timers log to the
         // app's logger and so it can be cleanly disposed on stop.
@@ -194,10 +197,17 @@ public sealed class PostgreSQLLibrary : ILibrary
             context.Logger.Warning($"[PostgreSQL] Could not retrieve server info: {ex.Message}");
         }
 
-        // Start the retention worker if any registered entity carries [RetainDays].
-        _retentionWorker = new RetentionWorker(
-            _connectionManager, context.Logger, _registeredEntities);
-        if (_retentionWorker.HasWork) _retentionWorker.Start();
+        // Create the retention worker and hand it whatever is already registered. The
+        // documented flows register entities AFTER StartAsync, so the worker's entry list
+        // stays live and RegisterForRetention starts it (idempotently) the first time a
+        // [RetainDays] entity shows up.
+        RetentionWorker worker;
+        lock (_registrationLock)
+        {
+            worker = new RetentionWorker(_connectionManager, context.Logger, _registeredEntities);
+            _retentionWorker = worker;
+        }
+        if (worker.HasWork) worker.Start();
 
         context.Logger.Info(_strings?.LibraryStarted ?? "PostgreSQL library started");
     }
@@ -212,6 +222,13 @@ public sealed class PostgreSQLLibrary : ILibrary
         if (_retentionWorker is not null)
             await _retentionWorker.DisposeAsync().ConfigureAwait(false);
         _retentionWorker = null;
+        lock (_registrationLock) _registeredEntities.Clear();
+
+        // Drop the per-connection runtime knobs and the N+1 bookkeeping: both are
+        // process-wide statics, and leaving them behind would leak a stopped library's
+        // configuration into the next one started in the same process.
+        Core.PostgreSqlRuntimeOptions.Reset();
+        N1Detector.Reset();
 
         // Stop every smart-cache pool's background timer.
         await SmartCachePoolRegistry.DisposeAllAsync().ConfigureAwait(false);
@@ -373,13 +390,13 @@ public sealed class PostgreSQLLibrary : ILibrary
     public Repository<T> GetRepository<T>(string connectionId = "Default") where T : class, new()
     {
         var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        var dbConfig = config?.Databases.TryGetValue(connectionId, out var cfg) == true ? cfg : null;
         return new Repository<T>(
             ConnectionManager,
             _context?.Logger,
             connectionId,
-            config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
-                ? dbConfig.SlowQueryThresholdMs
-                : 1000);
+            dbConfig?.SlowQueryThresholdMs ?? 1000,
+            dbConfig?.MaxBatchInsertSize ?? 500);
     }
 
     /// <summary>
@@ -410,13 +427,13 @@ public sealed class PostgreSQLLibrary : ILibrary
     {
         ArgumentNullException.ThrowIfNull(transactionScope);
         var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        var dbConfig = config?.Databases.TryGetValue(transactionScope.ConnectionId, out var cfg) == true ? cfg : null;
         return new Repository<T>(
             ConnectionManager,
             _context?.Logger,
             transactionScope,
-            config?.Databases.TryGetValue(transactionScope.ConnectionId, out var dbConfig) == true
-                ? dbConfig.SlowQueryThresholdMs
-                : 1000);
+            dbConfig?.SlowQueryThresholdMs ?? 1000,
+            dbConfig?.MaxBatchInsertSize ?? 500);
     }
 
     /// <summary>
@@ -442,6 +459,19 @@ public sealed class PostgreSQLLibrary : ILibrary
     /// observability events actually fire, without widening the public surface.
     /// </summary>
     internal CodeLogic.Core.Events.IEventBus? Events => _context?.Events;
+
+    /// <summary>
+    /// The loaded configuration instance. Internal: lets tests assert that a configured
+    /// value actually reaches the object it is supposed to drive.
+    /// </summary>
+    internal DatabaseConfiguration? LoadedConfiguration => _config;
+
+    /// <summary>
+    /// The retention worker, once started. Internal: lets tests confirm that an entity
+    /// registered after <c>StartAsync</c> is picked up, and drive a purge deterministically
+    /// without waiting out the worker's 5-minute initial delay.
+    /// </summary>
+    internal RetentionWorker? Retention => _retentionWorker;
 
     // ── Raw SQL escape hatch ─────────────────────────────────────────────────
 
@@ -511,7 +541,7 @@ public sealed class PostgreSQLLibrary : ILibrary
 
             var result = await ConnectionManager.ExecuteWithConnectionAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(connectionId);
                 cmd.CommandText = sql;
                 if (parameters is not null)
                     foreach (var kv in parameters)
@@ -522,7 +552,9 @@ public sealed class PostgreSQLLibrary : ILibrary
             sw.Stop();
             QueryObservability.RecordExecuted(connectionId, sql, sw.ElapsedMilliseconds, rowCount: -1, cacheHit: false);
             if (sw.ElapsedMilliseconds >= threshold)
-                QueryObservability.RecordSlow(connectionId, sql, sw.ElapsedMilliseconds);
+                SlowQueryExplain.Record(
+                    ConnectionManager, connectionId, sql, parameters, sw.ElapsedMilliseconds,
+                    insideTransaction: false);
 
             return Result<TOut>.Success(result);
         }
@@ -553,8 +585,27 @@ public sealed class PostgreSQLLibrary : ILibrary
         bool createBackup = true,
         string connectionId = "Default") where T : class
     {
-        _registeredEntities.Add(typeof(T));
+        RegisterEntity(typeof(T));
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
+    }
+
+    /// <summary>
+    /// Records an entity type as owned by this library and, when it carries
+    /// <see cref="RetainDaysAttribute"/>, hands it to the retention worker — starting the
+    /// worker if this is the first entity with a retention policy. <c>Start()</c> is
+    /// idempotent, so calling this on every sync is free once the loop is running.
+    /// </summary>
+    private void RegisterEntity(Type entityType)
+    {
+        RetentionWorker? worker;
+        lock (_registrationLock)
+        {
+            _registeredEntities.Add(entityType);
+            worker = _retentionWorker;
+        }
+
+        if (worker is null) return;          // not started yet; OnStartAsync picks it up
+        if (worker.Register(entityType)) worker.Start();
     }
 
     /// <summary>
@@ -582,7 +633,7 @@ public sealed class PostgreSQLLibrary : ILibrary
     {
         var types = entities as IReadOnlyList<Type> ?? entities.ToList();
         foreach (var t in types)
-            _registeredEntities.Add(t);
+            RegisterEntity(t);
         return TableSync.SyncTablesAsync(types, createBackup, connectionId, ct);
     }
 
@@ -645,11 +696,14 @@ public sealed class PostgreSQLLibrary : ILibrary
     /// </summary>
     public async Task<Result<bool>> RestoreSchemaAsync(
         string tableName,
-        string schemaName = CL.PostgreSQL.Core.PostgreSqlDialect.DefaultSchema,
+        string? schemaName = null,
         string? backupFile = null,
         string connectionId = "Default",
         CancellationToken ct = default)
     {
+        // null means "the schema this connection maps unqualified entities to", which is
+        // its configured DefaultSchema — not the hard-coded "public".
+        schemaName ??= Core.PostgreSqlRuntimeOptions.DefaultSchemaFor(connectionId);
         var result = await BackupManager.RestoreTableSchemaAsync(tableName, schemaName, backupFile, connectionId, ct)
             .ConfigureAwait(false);
         if (result.IsSuccess)

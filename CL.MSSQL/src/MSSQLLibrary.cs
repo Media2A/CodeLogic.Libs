@@ -153,7 +153,16 @@ public sealed class MSSQLLibrary : ILibrary
         QueryCache.Configure(
             enabled: cacheConfig.Enabled,
             maxEntries: cacheConfig.MaxEntries,
-            timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds);
+            timeQuantizeSeconds: cacheConfig.TimeQuantizeSeconds,
+            defaultTtlSeconds: cacheConfig.DefaultTtlSeconds,
+            publishEvents: cacheConfig.PublishEvents);
+
+        // Per-database overrides of the global cache switch, and the N+1 detector threshold.
+        foreach (var kvp in enabledDbs)
+        {
+            QueryCache.SetConnectionOverride(kvp.Key, kvp.Value.CacheEnabledOverride);
+            QueryObservability.ConfigureN1Detection(kvp.Key, kvp.Value.N1DetectorThreshold);
+        }
 
         // Wire the smart-cache pool registry so its background timers log to the
         // app's logger and so it can be cleanly disposed on stop.
@@ -195,9 +204,15 @@ public sealed class MSSQLLibrary : ILibrary
             context.Logger.Warning($"[MSSQL] Could not retrieve server info: {ex.Message}");
         }
 
-        // Start the retention worker if any registered entity carries [RetainDays].
-        _retentionWorker = new RetentionWorker(
-            _connectionManager, context.Logger, _registeredEntities);
+        // Create the retention worker and hand it whatever is already registered. Entities are
+        // normally registered AFTER start (SyncTableAsync / SyncSchemaAsync are called by the
+        // app once the runtime is up), so the worker keeps a live entry set and
+        // RegisterEntities below starts it the first time a [RetainDays] entity appears.
+        lock (_registeredEntities)
+        {
+            _retentionWorker = new RetentionWorker(
+                _connectionManager, context.Logger, _registeredEntities);
+        }
         if (_retentionWorker.HasWork) _retentionWorker.Start();
 
         context.Logger.Info(_strings?.LibraryStarted ?? "SQL Server library started");
@@ -216,6 +231,13 @@ public sealed class MSSQLLibrary : ILibrary
 
         // Stop every smart-cache pool's background timer.
         await SmartCachePoolRegistry.DisposeAllAsync().ConfigureAwait(false);
+
+        // Drop the process-wide registrations installed at init so a restart (or another
+        // library instance) does not inherit this one's per-connection settings.
+        QueryObservability.ResetN1Detection();
+        if (_config is not null)
+            foreach (var id in _config.Databases.Keys)
+                QueryCache.SetConnectionOverride(id, null);
 
         _migrationRunner = null;
         _tableSyncService = null;
@@ -373,14 +395,23 @@ public sealed class MSSQLLibrary : ILibrary
     /// <param name="connectionId">The connection ID to use. Default: "Default".</param>
     public Repository<T> GetRepository<T>(string connectionId = "Default") where T : class, new()
     {
-        var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        var dbConfig = ResolveDatabaseConfig(connectionId);
         return new Repository<T>(
             ConnectionManager,
             _context?.Logger,
             connectionId,
-            config?.Databases.TryGetValue(connectionId, out var dbConfig) == true
-                ? dbConfig.SlowQueryThresholdMs
-                : 1000);
+            dbConfig?.SlowQueryThresholdMs ?? 1000,
+            dbConfig?.MaxBatchInsertSize ?? 500);
+    }
+
+    /// <summary>
+    /// Resolves the per-database configuration for a connection id, preferring the live
+    /// configuration object so runtime edits (e.g. <see cref="SetSyncMode"/>) are visible.
+    /// </summary>
+    private SqlServerDatabaseConfig? ResolveDatabaseConfig(string connectionId)
+    {
+        var config = _config ?? _context?.Configuration.Get<DatabaseConfiguration>();
+        return config?.Databases.TryGetValue(connectionId, out var dbConfig) == true ? dbConfig : null;
     }
 
     /// <summary>
@@ -410,14 +441,13 @@ public sealed class MSSQLLibrary : ILibrary
     public Repository<T> GetRepository<T>(TransactionScope transactionScope) where T : class, new()
     {
         ArgumentNullException.ThrowIfNull(transactionScope);
-        var config = _context?.Configuration.Get<DatabaseConfiguration>();
+        var dbConfig = ResolveDatabaseConfig(transactionScope.ConnectionId);
         return new Repository<T>(
             ConnectionManager,
             _context?.Logger,
             transactionScope,
-            config?.Databases.TryGetValue(transactionScope.ConnectionId, out var dbConfig) == true
-                ? dbConfig.SlowQueryThresholdMs
-                : 1000);
+            dbConfig?.SlowQueryThresholdMs ?? 1000,
+            dbConfig?.MaxBatchInsertSize ?? 500);
     }
 
     /// <summary>
@@ -554,7 +584,7 @@ public sealed class MSSQLLibrary : ILibrary
         bool createBackup = true,
         string connectionId = "Default") where T : class
     {
-        _registeredEntities.Add(typeof(T));
+        RegisterEntity(typeof(T));
         return TableSync.SyncTableAsync<T>(createBackup, connectionId);
     }
 
@@ -582,10 +612,32 @@ public sealed class MSSQLLibrary : ILibrary
         CancellationToken ct = default)
     {
         var types = entities as IReadOnlyList<Type> ?? entities.ToList();
-        foreach (var t in types)
-            _registeredEntities.Add(t);
+        foreach (var t in types) RegisterEntity(t);
         return TableSync.SyncTablesAsync(types, createBackup, connectionId, ct);
     }
+
+    /// <summary>
+    /// Records an entity type as registered with the library and, when it carries
+    /// <see cref="RetainDaysAttribute"/>, hands it to the retention worker and starts the
+    /// worker if it is not already running. Registration happening after
+    /// <c>CodeLogic.StartAsync()</c> is the normal case, so the worker cannot snapshot its
+    /// entry list at construction time.
+    /// </summary>
+    private void RegisterEntity(Type entityType)
+    {
+        lock (_registeredEntities) _registeredEntities.Add(entityType);
+        var worker = _retentionWorker;
+        if (worker is null) return;            // pre-start: OnStartAsync picks it up
+        if (worker.TryRegister(entityType)) worker.Start();
+    }
+
+    /// <summary>
+    /// Runs one retention pass immediately over every registered <see cref="RetainDaysAttribute"/>
+    /// entity and returns the number of rows removed. The background loop waits five minutes
+    /// after start and then runs daily; this is the operator-triggered equivalent.
+    /// </summary>
+    public Task<int> RunRetentionOnceAsync(CancellationToken ct = default) =>
+        _retentionWorker?.RunOnceAsync(ct) ?? Task.FromResult(0);
 
     /// <summary>
     /// Overrides the configured <see cref="SyncMode"/> for a connection at runtime, without editing

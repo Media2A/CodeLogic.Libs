@@ -21,17 +21,19 @@ public sealed class CacheConfiguration : ConfigModelBase
     public int MaxEntries { get; set; } = 10_000;
 
     /// <summary>
-    /// Soft memory cap for the cache in megabytes. Currently advisory —
-    /// eviction uses entry count; memory accounting lands in a follow-up.
+    /// Obsolete. The in-process store bounds the cache by entry count, not by bytes —
+    /// use <see cref="MaxEntries"/>. Retained so existing config files keep deserializing.
     /// </summary>
+    [Obsolete("The in-process cache store bounds by entry count, not bytes. Use MaxEntries instead; this value is ignored.")]
     [ConfigField(Label = "Max Memory (MB)", Min = 0,
-        Description = "Soft memory cap. Advisory; current eviction uses entry count.",
+        Description = "Obsolete and ignored — the in-process store evicts by entry count. Use Max Entries.",
         Group = "Capacity", Order = 11, Collapsed = true)]
     public int MaxMemoryMb { get; set; } = 256;
 
     /// <summary>
-    /// Intended default cache lifetime. Not currently applied — <c>WithCache</c> has no
-    /// parameterless overload, so every caching query supplies its own <see cref="System.TimeSpan"/>.
+    /// Default cache lifetime used by the parameterless <c>WithCache()</c> overload on
+    /// <see cref="Services.QueryBuilder{T}"/> and <see cref="Services.ProjectedQuery{TSource, TResult}"/>.
+    /// A <c>WithCache(TimeSpan)</c> call still wins for that query.
     /// </summary>
     [ConfigField(Label = "Default TTL (seconds)", Min = 1,
         Description = "Default cache lifetime when .WithCache() has no TTL argument.",
@@ -50,8 +52,8 @@ public sealed class CacheConfiguration : ConfigModelBase
     public int TimeQuantizeSeconds { get; set; } = 60;
 
     /// <summary>
-    /// Intended switch for publishing cache hit/miss events. Not currently applied —
-    /// <c>CacheHitEvent</c> / <c>CacheMissEvent</c> are published whenever an event bus is bound.
+    /// Whether <c>CacheHitEvent</c> / <c>CacheMissEvent</c> are published. When false the cache
+    /// still works; it just stops emitting hit/miss observability events. Default: true.
     /// </summary>
     [ConfigField(Label = "Publish Cache Events",
         Description = "Emit CacheHitEvent / CacheMissEvent for observability.",

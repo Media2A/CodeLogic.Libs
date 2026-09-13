@@ -50,7 +50,7 @@ public sealed class TableSyncService
         _events = events;
         _analyzer = new SchemaAnalyzer(logger);
         _migrationTracker = new MigrationTracker(connectionManager, logger);
-        _backupManager = new BackupManager(connectionManager, dataDirectory, logger);
+        _backupManager = new BackupManager(connectionManager, dataDirectory, logger, configLookup);
         _stateStore = new SchemaStateStore(connectionManager, logger);
         _configLookup = configLookup;
         _appVersion = CodeLogicEnvironment.AppVersion;

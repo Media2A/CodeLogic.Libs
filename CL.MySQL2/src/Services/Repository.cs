@@ -52,6 +52,13 @@ public sealed class Repository<T> where T : class, new()
         _maxBatchInsertSize = maxBatchInsertSize;
     }
 
+    /// <summary>
+    /// Effective chunk size for <see cref="InsertManyAsync"/> / <see cref="UpsertManyAsync"/>.
+    /// Internal: exposed so tests can assert the configured <c>MaxBatchInsertSize</c> actually
+    /// reaches the repository, without widening the public surface.
+    /// </summary>
+    internal int MaxBatchInsertSize => _maxBatchInsertSize;
+
     // ── CRUD ──────────────────────────────────────────────────────────────────
 
     /// <summary>Inserts a single entity and returns it (with auto-generated PK populated).</summary>
@@ -70,8 +77,7 @@ public sealed class Repository<T> where T : class, new()
 
             var lastId = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
@@ -100,9 +106,9 @@ public sealed class Repository<T> where T : class, new()
 
     /// <summary>
     /// Bulk-inserts a collection of entities using real batched INSERT statements.
-    /// Batches of up to the constructor's <c>maxBatchInsertSize</c> (default 500) are sent
-    /// per round-trip. Note that <c>MySQL2Library.GetRepository&lt;T&gt;</c> always uses that
-    /// default — the <c>MaxBatchInsertSize</c> configuration field is not plumbed through.
+    /// Batches of up to the constructor's <c>maxBatchInsertSize</c> are sent per round-trip;
+    /// <c>MySQL2Library.GetRepository&lt;T&gt;</c> passes the per-database
+    /// <c>MaxBatchInsertSize</c> configuration value (default 500).
     /// </summary>
     public async Task<Result<int>> InsertManyAsync(IEnumerable<T> entities, CancellationToken ct = default)
     {
@@ -125,8 +131,7 @@ public sealed class Repository<T> where T : class, new()
                     var end = Math.Min(start + _maxBatchInsertSize, list.Count);
                     var count = end - start;
 
-                    await using var cmd = conn.CreateCommand();
-                    if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                    await using var cmd = NewCommand(conn);
 
                     var valueTuples = new string[count];
                     for (var i = 0; i < count; i++)
@@ -190,8 +195,7 @@ public sealed class Repository<T> where T : class, new()
 
             var lastId = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
@@ -254,8 +258,7 @@ public sealed class Repository<T> where T : class, new()
                     var end = Math.Min(start + _maxBatchInsertSize, list.Count);
                     var count = end - start;
 
-                    await using var cmd = conn.CreateCommand();
-                    if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                    await using var cmd = NewCommand(conn);
 
                     var valueTuples = new string[count];
                     for (var i = 0; i < count; i++)
@@ -364,8 +367,7 @@ public sealed class Repository<T> where T : class, new()
 
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(insertSeed), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
@@ -415,8 +417,7 @@ public sealed class Repository<T> where T : class, new()
 
             var result = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -426,7 +427,8 @@ public sealed class Repository<T> where T : class, new()
             }, ct).ConfigureAwait(false);
 
             sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
+            LogSlowQuery(sql, sw.ElapsedMilliseconds,
+                new Dictionary<string, object?> { ["@id"] = TypeConverter.ToDbValue(id, pk.EffectiveStorageType) });
             return Result<T?>.Success(result);
         }
         catch (Exception ex)
@@ -450,8 +452,7 @@ public sealed class Repository<T> where T : class, new()
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@val", TypeConverter.ToDbValue(value, col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -462,7 +463,8 @@ public sealed class Repository<T> where T : class, new()
             }, ct).ConfigureAwait(false);
 
             sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
+            LogSlowQuery(sql, sw.ElapsedMilliseconds,
+                new Dictionary<string, object?> { ["@val"] = TypeConverter.ToDbValue(value, col.EffectiveStorageType) });
             return Result<List<T>>.Success(list);
         }
         catch (Exception ex)
@@ -485,8 +487,7 @@ public sealed class Repository<T> where T : class, new()
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
@@ -534,13 +535,11 @@ public sealed class Repository<T> where T : class, new()
 
             var (items, total) = await ExecuteAsync(async conn =>
             {
-                await using var countCmd = conn.CreateCommand();
-                if (_transactionScope is not null) countCmd.Transaction = _transactionScope.Transaction;
+                await using var countCmd = NewCommand(conn);
                 countCmd.CommandText = countSql;
                 var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
 
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = dataSql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
@@ -568,22 +567,22 @@ public sealed class Repository<T> where T : class, new()
     }
 
     /// <summary>
-    /// Returns the total row count for the table. Unlike the other repository reads this does
-    /// <b>not</b> apply the <see cref="Models.SoftDeleteAttribute"/> filter — soft-deleted rows
-    /// are included in the count.
+    /// Returns the total row count for the table. Like every other repository read this applies
+    /// the <see cref="Models.SoftDeleteAttribute"/> filter, so soft-deleted rows are excluded and
+    /// the count agrees with <see cref="GetAllAsync"/> and <see cref="GetPagedAsync"/>.
+    /// Use <c>Query&lt;T&gt;().IncludeDeleted().CountAsync()</c> to count deleted rows as well.
     /// </summary>
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
         {
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT COUNT(*) FROM {MySqlDialect.Quote(table)}";
+            var sql = $"SELECT COUNT(*) FROM {MySqlDialect.Quote(table)}{SoftWhere()}";
             LogQuery(sql);
 
             var count = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
             }, ct).ConfigureAwait(false);
@@ -613,8 +612,7 @@ public sealed class Repository<T> where T : class, new()
 
             await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 foreach (var col in setCols)
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@{col.ColumnName}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
@@ -662,8 +660,7 @@ public sealed class Repository<T> where T : class, new()
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -691,8 +688,7 @@ public sealed class Repository<T> where T : class, new()
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@now", DateTime.UtcNow, soft.Attribute, soft.Property.PropertyType));
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
@@ -736,8 +732,7 @@ public sealed class Repository<T> where T : class, new()
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@delta", TypeConverter.ToDbValue(delta, deltaCol.EffectiveStorageType), deltaCol.Attribute, deltaCol.Property.PropertyType));
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
@@ -788,8 +783,7 @@ public sealed class Repository<T> where T : class, new()
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
-                if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+                await using var cmd = NewCommand(conn);
                 cmd.CommandText = sql;
                 foreach (var kv in parameters)
                     cmd.Parameters.AddWithValue(kv.Key, TypeConverter.ToDbValue(kv.Value) ?? DBNull.Value);
@@ -801,7 +795,7 @@ public sealed class Repository<T> where T : class, new()
             }, ct).ConfigureAwait(false);
 
             sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
+            LogSlowQuery(sql, sw.ElapsedMilliseconds, parameters);
             return Result<List<T>>.Success(list);
         }
         catch (Exception ex)
@@ -812,6 +806,18 @@ public sealed class Repository<T> where T : class, new()
     }
 
     // ── Private helpers ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Creates a command on <paramref name="conn"/>, enlists it in the repository's transaction
+    /// scope when there is one, and applies the connection's configured query timeout.
+    /// </summary>
+    private MySqlCommand NewCommand(MySqlConnection conn)
+    {
+        var cmd = conn.CreateCommand();
+        if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
+        _connectionManager.ApplyCommandTimeout(cmd, _connectionId);
+        return cmd;
+    }
 
     private async Task<TResult> ExecuteAsync<TResult>(
         Func<MySqlConnection, Task<TResult>> action,
@@ -825,11 +831,12 @@ public sealed class Repository<T> where T : class, new()
         return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
-    private void LogSlowQuery(string sql, long elapsedMs)
+    private void LogSlowQuery(
+        string sql, long elapsedMs, IReadOnlyDictionary<string, object?>? parameters = null)
     {
         QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount: -1, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
+            QueryObservability.RecordSlow(_connectionManager, _connectionId, sql, elapsedMs, parameters);
     }
 
     private void LogQuery(string sql)

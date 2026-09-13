@@ -55,7 +55,7 @@ mssql.Query<Order>()
 - `WhereExists<TInner>` / `WhereNotExists<TInner>` → `[NOT] EXISTS (SELECT 1 FROM inner WHERE …)`.
 - `WhereIn<TInner, TKey>` / `WhereNotIn<TInner, TKey>` → `col [NOT] IN (SELECT innerCol FROM inner [WHERE innerFilter])`.
 
-> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` is silently bypassed on these. `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
+> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` / `.SmartCache` are bypassed on these (with a logged warning), and the refusal carries through `.Select(...)` and `.GroupBy(...)` to the resulting `ProjectedQuery`, so `.WhereExists(...).Select(...).WithCache(ttl)` also executes uncached. `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
 
 ## Ordering & paging
 
@@ -153,7 +153,7 @@ Result<List<OrderSummary>> rows = await mssql.Query<Order>()
     .ToListAsync();
 ```
 
-`ProjectedQuery` exposes `WithCache(ttl)`, `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
+`ProjectedQuery` exposes `WithCache(ttl)`, `WithCache()` (the configured `DefaultTtlSeconds`), `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
 
 ## Aggregates — `GroupBy`
 
@@ -212,7 +212,7 @@ in `CAST(CASE WHEN … THEN 1 ELSE 0 END AS bit)` to be legal in a key or projec
 | `FirstOrDefaultAsync(ct)` | `Result<T?>` | `SELECT TOP (1) …` |
 | `ToPagedListAsync(page, pageSize, ct)` | `Result<PagedResult<T>>` | data page + `COUNT(*)` |
 | `ToCursorPagedListAsync(pageSize, ct)` | `Result<CursorPagedResult<T>>` | keyset page + one lookahead row |
-| `CountAsync(ct)` | `Result<long>` | `SELECT COUNT(*)` |
+| `CountAsync(ct)` | `Result<long>` | `SELECT COUNT(*)` (soft-delete filtered unless `IncludeDeleted()`) |
 | `MaxAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MAX(col)` |
 | `MinAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MIN(col)` |
 | `SumAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT SUM(col)` |

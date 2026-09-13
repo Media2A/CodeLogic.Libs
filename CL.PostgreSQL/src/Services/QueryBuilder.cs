@@ -78,7 +78,8 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     public QueryBuilder<T> Where(Expression<Func<T, bool>> predicate)
     {
-        var (clause, parms) = PostgreSqlExpressionVisitor.Translate(predicate);
+        var (clause, parms, maxInList) = PostgreSqlExpressionVisitor.TranslateWithStats(predicate);
+        WarnOnWideInClause(maxInList);
         // Re-key parameters to avoid collisions. Longer parameter names are replaced
         // first so @p1 can't clobber a substring of @p10/@p11 (predicates with 11+ params).
         var rekeyed = new Dictionary<string, object?>();
@@ -133,7 +134,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         };
         var (cond, parms) = PostgreSqlExpressionVisitor.TranslateMulti(predicate, map);
         var keyword = negate ? "NOT EXISTS" : "EXISTS";
-        AppendSubqueryWhere($"{keyword} (SELECT 1 FROM {EntityMetadata<TInner>.QualifiedTableName} WHERE {cond})", parms);
+        AppendSubqueryWhere($"{keyword} (SELECT 1 FROM {EntityMetadata<TInner>.QualifiedTableNameFor(_connectionId)} WHERE {cond})", parms);
         return this;
     }
 
@@ -185,7 +186,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
         var keyword = negate ? "NOT IN" : "IN";
         AppendSubqueryWhere(
-            $"{PostgreSqlDialect.Quote(outerCol)} {keyword} (SELECT {PostgreSqlDialect.Quote(innerCol)} FROM {EntityMetadata<TInner>.QualifiedTableName}{whereSql})", parms);
+            $"{PostgreSqlDialect.Quote(outerCol)} {keyword} (SELECT {PostgreSqlDialect.Quote(innerCol)} FROM {EntityMetadata<TInner>.QualifiedTableNameFor(_connectionId)}{whereSql})", parms);
         return this;
     }
 
@@ -342,11 +343,24 @@ public sealed class QueryBuilder<T> where T : class, new()
         var limitSql = _limit.HasValue ? $" LIMIT {_limit.Value}" : string.Empty;
         var offsetSql = _offset.HasValue ? $" OFFSET {_offset.Value}" : string.Empty;
 
-        var sql = $"SELECT {compiled.SelectList} FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+        var sql = $"SELECT {compiled.SelectList} FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+
+        // A subquery filter (WhereExists / WhereIn) references a second table whose
+        // mutations the single-table version stamp cannot track, which is why ShouldCache /
+        // ShouldSmartCache refuse to cache here. Forwarding the decoration into the
+        // projection would reintroduce exactly that stale read one level down, so the
+        // guard travels with it.
+        var projectedTtl = _hasSubqueryWhere ? null : _cacheTtl;
+        var projectedPool = _hasSubqueryWhere ? null : _smartCachePool;
+        if (_hasSubqueryWhere && (_cacheTtl is not null || _smartCachePool is not null))
+            _logger?.Warning(
+                $"[PostgreSQL] Caching ignored for the projection of `{tableName}`: the query carries a " +
+                "subquery filter (WhereExists / WhereIn), whose inner table cannot be tracked for invalidation.");
 
         return new ProjectedQuery<T, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl, _smartCachePool);
+            _slowQueryThresholdMs, sql, parms, compiled, projectedTtl, projectedPool,
+            cacheDisallowed: _hasSubqueryWhere);
     }
 
     /// <summary>
@@ -358,10 +372,13 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         EnsureCursorNotSet(nameof(GroupBy));
         var (whereClause, parms) = BuildWhereSql();
+        // Same subquery-filter guard as Select: an aggregate over an EXISTS/IN-filtered
+        // query cannot be invalidated by a mutation on the inner table.
         return new GroupedQuery<TKey, T>(
             _connectionManager, _logger, _connectionId, _transactionScope,
             _slowQueryThresholdMs, whereClause, parms, keySelector,
-            _cacheTtl, _orderBys, _limit, _offset);
+            _hasSubqueryWhere ? null : _cacheTtl, _orderBys, _limit, _offset,
+            cacheDisallowed: _hasSubqueryWhere);
     }
 
     public QueryBuilder<T> WithConnection(string connectionId)
@@ -391,6 +408,14 @@ public sealed class QueryBuilder<T> where T : class, new()
         _cacheTtl = ttl;
         return this;
     }
+
+    /// <summary>
+    /// Enable result caching using the configured default lifetime
+    /// (<c>postgresql.cache.DefaultTtlSeconds</c>, 60 seconds out of the box). Equivalent to
+    /// <c>WithCache(TimeSpan.FromSeconds(DefaultTtlSeconds))</c>; see
+    /// <see cref="WithCache(TimeSpan)"/> for the caching rules.
+    /// </summary>
+    public QueryBuilder<T> WithCache() => WithCache(QueryCache.DefaultTtl);
 
     /// <summary>
     /// Opt this query into a named <see cref="SmartCachePool"/>. The pool's
@@ -508,7 +533,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, parameters: parms);
         return Result<List<T>>.Success(list);
     }
 
@@ -577,7 +602,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, parameters: parms);
         return Result<T?>.Success(result);
     }
 
@@ -594,7 +619,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
             var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}";
+            var countSql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{joinSql}{whereClause}{groupBySql}";
             var dataSql = BuildSelectSql(page, pageSize).Sql;
 
             if (ShouldCache)
@@ -637,7 +662,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
+        LogSlowQuery(dataSql, sw.ElapsedMilliseconds, parameters: parms);
 
         return Result<PagedResult<T>>.Success(new PagedResult<T>
         {
@@ -680,7 +705,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             }
 
             var orderSql = string.Join(", ", orders.Select(RenderOrder));
-            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableName}{whereClause} ORDER BY {orderSql} LIMIT {pageSize + 1}";
+            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{whereClause} ORDER BY {orderSql} LIMIT {pageSize + 1}";
             var tableName = GetTableName();
 
             if (ShouldCache)
@@ -728,7 +753,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }, ct).ConfigureAwait(false);
 
         sw.Stop();
-        LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count);
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count, parms);
 
         var hasNextPage = items.Count > pageSize;
         if (hasNextPage)
@@ -754,7 +779,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
-            var sql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}";
+            var sql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{joinSql}{whereClause}";
 
             if (ShouldSmartCache)
             {
@@ -834,7 +859,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var col = PostgreSqlExpressionVisitor.TranslateSelector(selector);
             var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
-            var sql = $"SELECT AVG({PostgreSqlDialect.Quote(col)}) FROM {EntityMetadata<T>.QualifiedTableName}{whereClause}";
+            var sql = $"SELECT AVG({PostgreSqlDialect.Quote(col)}) FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{whereClause}";
 
             LogQuery(sql);
             var value = await ExecuteAsync(async conn =>
@@ -861,7 +886,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var tableName = GetTableName();
             // Hard delete — bypass the soft-delete read filter so it targets all matching rows.
             var (whereClause, parms) = BuildWhereSql(applySoftDelete: false);
-            var sql = $"DELETE FROM {EntityMetadata<T>.QualifiedTableName}{whereClause}";
+            var sql = $"DELETE FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{whereClause}";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -947,7 +972,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             if (sets.Count == 0)
                 return Result<int>.Success(0);
 
-            var sql_full = $"UPDATE {EntityMetadata<T>.QualifiedTableName} SET {string.Join(", ", sets)}{whereClause}";
+            var sql_full = $"UPDATE {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} SET {string.Join(", ", sets)}{whereClause}";
             LogQuery(sql_full);
 
             var affected = await ExecuteAsync(async conn =>
@@ -1008,7 +1033,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 (Pair: pair, Column: EntityMetadata<T>.RequireColumn(pair.Key), Parameter: $"@upd_{index}")).ToArray();
             var setClauses = string.Join(", ", mappedUpdates.Select(item =>
                 $"{PostgreSqlDialect.Quote(item.Column.ColumnName)} = {item.Parameter}"));
-            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableName} SET {setClauses}{whereClause}";
+            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} SET {setClauses}{whereClause}";
 
             var allParms = new Dictionary<string, object?>(whereParms);
             foreach (var item in mappedUpdates)
@@ -1050,7 +1075,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         var limitSql = effectiveLimit.HasValue ? $" LIMIT {effectiveLimit.Value}" : string.Empty;
         var offsetSql = effectiveOffset.HasValue ? $" OFFSET {effectiveOffset.Value}" : string.Empty;
 
-        var sql = $"SELECT {selectCols} FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+        var sql = $"SELECT {selectCols} FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
         return (sql, parms);
     }
 
@@ -1105,7 +1130,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     private NpgsqlCommand BuildCommand(NpgsqlConnection conn, string sql, Dictionary<string, object?> parms)
     {
-        var cmd = conn.CreateCommand();
+        var cmd = conn.CreateCommand(_connectionId);
         if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
         cmd.CommandText = sql;
         foreach (var kv in parms)
@@ -1124,7 +1149,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             var col = PostgreSqlExpressionVisitor.TranslateSelector(selector);
             var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
-            var sql = $"SELECT {func}({PostgreSqlDialect.Quote(col)}) FROM {EntityMetadata<T>.QualifiedTableName}{whereClause}";
+            var sql = $"SELECT {func}({PostgreSqlDialect.Quote(col)}) FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{whereClause}";
 
             LogQuery(sql);
             var value = await ExecuteAsync(async conn =>
@@ -1146,6 +1171,23 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     private static string GetTableName() => EntityMetadata<T>.TableName;
 
+    // Warns at most once per query build when a generated IN list is wider than the
+    // connection's MaxInClauseValues. Advisory only: the list is still emitted whole,
+    // because chunking or throwing would break callers who exceed it today.
+    private bool _inClauseWarned;
+
+    private void WarnOnWideInClause(int inListSize)
+    {
+        if (_inClauseWarned || inListSize <= 0) return;
+        var limit = PostgreSqlRuntimeOptions.For(_connectionId).MaxInClauseValues;
+        if (inListSize <= limit) return;
+        _inClauseWarned = true;
+        _logger?.Warning(
+            $"[PostgreSQL] [{_connectionId}] {typeof(T).Name}: generated IN list has {inListSize} values, " +
+            $"above the configured MaxInClauseValues of {limit}. The list is sent whole — consider a " +
+            "temporary table or a join if the plan degrades.");
+    }
+
     private static string GetColumnName(MemberInfo member)
     {
         var attr = member.GetCustomAttribute<ColumnAttribute>();
@@ -1155,11 +1197,14 @@ public sealed class QueryBuilder<T> where T : class, new()
     private static void EnsureValidColumn(string column) =>
         _ = EntityMetadata<T>.RequireColumn(column);
 
-    private void LogSlowQuery(string sql, long elapsedMs, int rowCount = -1)
+    private void LogSlowQuery(
+        string sql, long elapsedMs, int rowCount = -1, IReadOnlyDictionary<string, object?>? parameters = null)
     {
         QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
+            SlowQueryExplain.Record(
+                _connectionManager, _connectionId, sql, parameters, elapsedMs,
+                insideTransaction: _transactionScope is not null);
     }
 
     private void LogQuery(string sql)

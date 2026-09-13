@@ -29,18 +29,21 @@ internal sealed class SchemaAnalyzer
     }
 
     /// <summary>
-    /// The schema an entity maps to: <see cref="TableAttribute.Schema"/> when set,
-    /// otherwise <c>public</c>.
+    /// The schema an entity maps to: <see cref="TableAttribute.Schema"/> when set, otherwise
+    /// the <c>DefaultSchema</c> configured for <paramref name="connectionId"/> (<c>public</c>
+    /// unless the connection changed it).
     /// </summary>
-    public static string GetSchemaName(Type entityType)
+    public static string GetSchemaName(Type entityType, string? connectionId = null)
     {
         var attr = entityType.GetCustomAttribute<TableAttribute>();
-        return !string.IsNullOrEmpty(attr?.Schema) ? attr.Schema! : PostgreSqlDialect.DefaultSchema;
+        return !string.IsNullOrEmpty(attr?.Schema)
+            ? attr.Schema!
+            : PostgreSqlRuntimeOptions.DefaultSchemaFor(connectionId);
     }
 
     /// <summary>The quoted, schema-qualified table reference for an entity type.</summary>
-    public static string GetQualifiedName(Type entityType) =>
-        PostgreSqlDialect.Qualify(GetSchemaName(entityType), GetTableName(entityType));
+    public static string GetQualifiedName(Type entityType, string? connectionId = null) =>
+        PostgreSqlDialect.Qualify(GetSchemaName(entityType, connectionId), GetTableName(entityType));
 
 
     // ── CREATE TABLE ──────────────────────────────────────────────────────────
@@ -48,11 +51,13 @@ internal sealed class SchemaAnalyzer
     /// <summary>
     /// Generates a CREATE TABLE IF NOT EXISTS statement for the given entity type.
     /// </summary>
-    public string GenerateCreateTable(Type entityType)
+    public string GenerateCreateTable(Type entityType, string? connectionId = null)
     {
+        var options = PostgreSqlRuntimeOptions.For(connectionId);
+        var defaultStringSize = options.DefaultStringSize;
         var tableAttr = entityType.GetCustomAttribute<TableAttribute>() ?? new TableAttribute();
         var tableName = !string.IsNullOrEmpty(tableAttr.Name) ? tableAttr.Name! : entityType.Name;
-        var schemaName = !string.IsNullOrEmpty(tableAttr.Schema) ? tableAttr.Schema! : PostgreSqlDialect.DefaultSchema;
+        var schemaName = !string.IsNullOrEmpty(tableAttr.Schema) ? tableAttr.Schema! : options.DefaultSchema;
         var qualifiedTable = PostgreSqlDialect.Qualify(schemaName, tableName);
 
         var sql = new StringBuilder();
@@ -76,7 +81,7 @@ internal sealed class SchemaAnalyzer
         {
             var colAttr = prop.GetCustomAttribute<ColumnAttribute>();
             var colName = !string.IsNullOrEmpty(colAttr?.Name) ? colAttr.Name! : prop.Name;
-            var colDef = BuildColumnDef(prop, colAttr, colName);
+            var colDef = BuildColumnDef(prop, colAttr, colName, defaultStringSize);
             columns.Add($"  {colDef}");
 
             if (colAttr?.Primary == true)
@@ -209,8 +214,8 @@ internal sealed class SchemaAnalyzer
     /// <c>pg_catalog</c> diffing. The CRC is order-independent and ignores cosmetic
     /// differences (the <c>IF NOT EXISTS</c> noise and whitespace).
     /// </summary>
-    public string ComputeSchemaCrc(Type entityType) =>
-        ComputeCrc(NormalizeForCrc(GenerateCreateTable(entityType)));
+    public string ComputeSchemaCrc(Type entityType, string? connectionId = null) =>
+        ComputeCrc(NormalizeForCrc(GenerateCreateTable(entityType, connectionId)));
 
     /// <summary>Computes a CRC32 (8-char lowercase hex) of an arbitrary string.</summary>
     public static string ComputeCrc(string text) =>
@@ -268,10 +273,12 @@ internal sealed class SchemaAnalyzer
         Type entityType,
         NpgsqlConnection connection,
         SchemaSyncLevel level = SchemaSyncLevel.Safe,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? connectionId = null)
     {
+        var defaultStringSize = PostgreSqlRuntimeOptions.For(connectionId).DefaultStringSize;
         var tableName = GetTableName(entityType);
-        var schemaName = GetSchemaName(entityType);
+        var schemaName = GetSchemaName(entityType, connectionId);
         var qualifiedTable = PostgreSqlDialect.Qualify(schemaName, tableName);
         var alterStatements = new List<string>();
 
@@ -318,7 +325,7 @@ internal sealed class SchemaAnalyzer
                 else
                 {
                     // Column missing — ADD COLUMN
-                    var colDef = BuildColumnDef(prop, colAttr, colName);
+                    var colDef = BuildColumnDef(prop, colAttr, colName, defaultStringSize);
                     alterStatements.Add($"ALTER TABLE {qualifiedTable} ADD COLUMN {colDef};");
                     _logger?.Debug($"[PostgreSQL] Will add column `{tableName}`.`{colName}`");
                 }
@@ -327,12 +334,12 @@ internal sealed class SchemaAnalyzer
             {
                 // Column exists — check if MODIFY is needed (Safe+)
                 var existing = existingColumns[colName];
-                if (ColumnNeedsModify(existing, prop, colAttr))
+                if (ColumnNeedsModify(existing, prop, colAttr, defaultStringSize))
                 {
                     // PostgreSQL has no single MODIFY COLUMN: type, nullability and default
                     // are each their own ALTER action.
                     alterStatements.AddRange(
-                        BuildAlterColumnStatements(qualifiedTable, prop, colAttr, colName, existing));
+                        BuildAlterColumnStatements(qualifiedTable, prop, colAttr, colName, existing, defaultStringSize));
                     _logger?.Debug($"[PostgreSQL] Will modify column \"{tableName}\".\"{colName}\"");
                 }
             }
@@ -463,7 +470,8 @@ internal sealed class SchemaAnalyzer
 
     // ── Column DDL builder ────────────────────────────────────────────────────
 
-    private static string BuildColumnDef(PropertyInfo prop, ColumnAttribute? colAttr, string colName)
+    private static string BuildColumnDef(
+        PropertyInfo prop, ColumnAttribute? colAttr, string colName, int defaultStringSize = 255)
     {
         var sb = new StringBuilder();
         sb.Append($"{PostgreSqlDialect.Quote(colName)} ");
@@ -472,7 +480,7 @@ internal sealed class SchemaAnalyzer
         // against the CLR property type inside GetPostgreSqlType — which also recovers the
         // inferred size (Guid -> CHAR(36), string -> VARCHAR(255)).
         var effective = colAttr ?? new ColumnAttribute();
-        sb.Append(TypeConverter.GetPostgreSqlType(effective, effective.StorageType, prop.PropertyType));
+        sb.Append(TypeConverter.GetPostgreSqlType(effective, effective.StorageType, prop.PropertyType, defaultStringSize));
 
         // Collation is per-column in PostgreSQL and only valid on collatable types.
         if (!string.IsNullOrEmpty(colAttr?.Charset))
@@ -663,11 +671,12 @@ internal sealed class SchemaAnalyzer
         PropertyInfo prop,
         ColumnAttribute? colAttr,
         string colName,
-        ColumnInfo existing)
+        ColumnInfo existing,
+        int defaultStringSize = 255)
     {
         var statements = new List<string>();
         var quoted = PostgreSqlDialect.Quote(colName);
-        var expectedType = BuildExpectedTypeString(prop, colAttr);
+        var expectedType = BuildExpectedTypeString(prop, colAttr, defaultStringSize);
 
         if (!TypesEquivalent(existing.ColumnType, expectedType))
         {
@@ -804,10 +813,11 @@ internal sealed class SchemaAnalyzer
     /// table and rewrite the whole database on each boot.
     /// </para>
     /// </summary>
-    private bool ColumnNeedsModify(ColumnInfo existing, PropertyInfo prop, ColumnAttribute? colAttr)
+    private bool ColumnNeedsModify(
+        ColumnInfo existing, PropertyInfo prop, ColumnAttribute? colAttr, int defaultStringSize = 255)
     {
         // 1. Data type, folded through the alias table and ignoring unspecified precision.
-        var expectedType = BuildExpectedTypeString(prop, colAttr);
+        var expectedType = BuildExpectedTypeString(prop, colAttr, defaultStringSize);
         if (!TypesEquivalent(existing.ColumnType, expectedType))
         {
             _logger?.Debug(
@@ -869,10 +879,12 @@ internal sealed class SchemaAnalyzer
         return false;
     }
 
-    private static string BuildExpectedTypeString(PropertyInfo prop, ColumnAttribute? colAttr)
+    private static string BuildExpectedTypeString(
+        PropertyInfo prop, ColumnAttribute? colAttr, int defaultStringSize = 255)
     {
         var effective = colAttr ?? new ColumnAttribute();
-        return TypeConverter.GetPostgreSqlType(effective, effective.StorageType, prop.PropertyType);
+        return TypeConverter.GetPostgreSqlType(
+            effective, effective.StorageType, prop.PropertyType, defaultStringSize);
     }
 
     private static string NormalizeDefault(string? value, bool isNullable)

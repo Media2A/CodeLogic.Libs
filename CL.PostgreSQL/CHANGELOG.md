@@ -5,6 +5,125 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ## 2026-09-13
 
+### Changed
+
+> **Read this before upgrading if you set `defaultSchema`.**
+
+- **BREAKING — `defaultSchema` now moves your entities.** It used to be applied only as the
+  Npgsql `SearchPath` on the connection string while every generated statement was qualified
+  with the hard-coded constant `public`. Setting `"defaultSchema": "app"` therefore gave you
+  a `search_path` of `app` while all DDL and DML targeted `public`. It now does what it says:
+  an entity **without** `[Table(Schema = "…")]` is created in, and every statement for it
+  qualified with, the configured schema. `[Table(Schema = "…")]` still wins where present,
+  and the schema is created with `CREATE SCHEMA IF NOT EXISTS` on first sync.
+
+  *Migration.* If you left `defaultSchema` at its default `public`, nothing changes. If you
+  set it to anything else, your live tables are in `public` and the library will now look for
+  them in the configured schema — it will create empty tables there on the next sync. Either
+  set `defaultSchema` back to `public` (and pin per-entity schemas with
+  `[Table(Schema = "…")]` if you want them elsewhere), or move the tables first:
+
+  ```sql
+  CREATE SCHEMA IF NOT EXISTS app;
+  ALTER TABLE public.users SET SCHEMA app;   -- per table
+  ```
+
+  Resolution is per connection, so two named connections may now map the same entity types
+  into different schemas. `PostgreSQLLibrary.RestoreSchemaAsync` follows suit: its
+  `schemaName` parameter defaults to `null`, meaning "the connection's configured schema",
+  instead of the literal `public`.
+
+- **BEHAVIOUR — `Repository<T>.CountAsync` now applies the soft-delete filter.** It emitted
+  a bare `SELECT COUNT(*)` while `GetAllAsync` and `GetPagedAsync` in the same class filtered
+  `IS NULL`, so the two contradicted each other on a `[SoftDelete]` entity. `CountAsync()`
+  and `GetAllAsync().Count` now agree. If you were relying on it to report the physical row
+  count, use `Query<T>().IncludeDeleted().CountAsync()`.
+
+- **DEFAULT — `captureExplainOnSlowQuery` now defaults to `false`.** It was declared `true`
+  but nothing read it, so no plan was ever captured. Now that the capture is implemented,
+  defaulting it to `true` would have started running an `EXPLAIN` for every slow query on
+  upgrade; the default was flipped so runtime behaviour is unchanged. Set it to `true` to
+  opt in.
+
+  *Caveat.* Changing the declared default only covers configs that never wrote the key. A
+  `config.postgresql.json` persisted by an earlier version may already contain
+  `"captureExplainOnSlowQuery": true` on disk — that value is now honoured, and such an
+  install **will** start capturing plans on upgrade. Set it to `false` explicitly if that is
+  not what you want. The same applies to `n1DetectorThreshold` if a persisted config carries
+  a non-zero value.
+
+- `CacheConfiguration.MaxMemoryMb` and `PostgreSqlDatabaseConfig.PreparedStatementCacheSize`
+  are marked `[Obsolete]`. Neither is read: the in-process cache evicts by entry count
+  (`MaxEntries`), and statement caching is Npgsql's, configured on the connection string via
+  `Max Auto Prepare` / `Auto Prepare Min Usages`. Both still compile and round-trip.
+
+### Added
+
+- **Slow-query `EXPLAIN` capture.** With `captureExplainOnSlowQuery` on, a query that
+  crosses `slowQueryThresholdMs` has `EXPLAIN (FORMAT JSON) <sql>` run with the same bound
+  parameters on a separate connection, and the plan attached to `SlowQueryEvent.ExplainJson`.
+  Strictly best-effort: fetched off the query path, skipped entirely for a query inside a
+  transaction scope, skipped for statements `EXPLAIN` cannot accept (DDL, utility commands,
+  multi-statement batches) and for parameterized statements whose values were not captured,
+  and any failure leaves the event publishing with a null payload.
+- **N+1 detection.** With `n1DetectorThreshold` above 0, executions of the same normalized
+  SQL template are counted per connection over a rolling one-second window, and
+  `N1QueryDetectedEvent` is published once per window when the count reaches the threshold.
+  `0` (the default) disables it at the cost of a single bool read per query; the bookkeeping
+  is capped at 512 templates and pruned by age.
+- **`WithCache()` with no arguments**, on both the query builder and a projected query, using
+  `postgresql.cache.defaultTtlSeconds` (60). Purely additive — `WithCache(TimeSpan)` is
+  unchanged.
+- `BackupManager.CleanupOldBackupsAsync` and `GetLatestBackupFile` take a `connectionId` so
+  they resolve the same backup directory the writes used.
+
+### Fixed (configuration that was declared but never read)
+
+- **`queryTimeoutMs` is applied** as the command timeout on the commands the library creates
+  (rounded up to whole seconds; `0` = no timeout). The 30 000 ms default matches both
+  `commandTimeout` and Npgsql's own 30-second default, so nothing changes unless you change it.
+- **`maxBatchInsertSize` reaches the repository.** `GetRepository<T>()` passed
+  `slowQueryThresholdMs` but not the batch size, so the constructor default of 500 always
+  won whatever the config said. Now plumbed through in both overloads (the `connectionId`
+  one and the `TransactionScope` one).
+- **`defaultStringSize` drives type inference.** `TypeConverter.InferColumn` hard-coded 255;
+  schema sync now threads the connection's configured value through. Same default, so no
+  change unless you set it.
+- **`cacheEnabledOverride` is honoured** — when non-null it wins over the cache section's
+  `enabled` for that connection. `null` (the default) inherits as before.
+- **`backupDirectory` is honoured** by `BackupManager`. `null` keeps `DataDirectory/backups`.
+- **`maxInClauseValues` is reported.** A generated `IN` list wider than the ceiling logs a
+  warning once per query build, naming the entity and the value count. It deliberately does
+  **not** throw or chunk — that would break callers who exceed it today.
+- **`postgresql.cache.defaultTtlSeconds` and `publishEvents` are read.** The former backs the
+  new parameterless `WithCache()`; the latter gates `CacheHitEvent` / `CacheMissEvent`
+  publication (still `true` by default, so unchanged).
+- `sslCertificatePath` / `sslKeyPath` / `sslRootCertificatePath` map to Npgsql's
+  `SslCertificate`, `SslKey` and `RootCertificate`. This was already wired; the XML and docs
+  now say which option each one is, since the field names do not match one-for-one.
+
+### Fixed (correctness)
+
+- **Retention never ran.** `RetentionWorker` snapshotted the registered entity set with
+  `.ToList()` at construction, and the worker is constructed during `OnStartAsync` — but
+  entities only register through `SyncTableAsync` / `SyncSchemaAsync`, which every documented
+  flow calls *after* `CodeLogic.StartAsync()`. `HasWork` was therefore always false, the loop
+  never started, and `[RetainDays]` was dead in normal usage. The worker's entry list is now
+  live: registration hands each entity to it as it happens and starts the loop (idempotently)
+  on the first `[RetainDays]` entity. The 5-minute initial delay, 24-hour interval,
+  `RunOnceAsync()` and clean disposal are unchanged.
+- **`ProjectedQuery` and `JoinedQuery` dropped the caller's `CancellationToken`** when
+  handing work to `ConnectionManager.ExecuteWithConnectionAsync`, so opening the connection
+  and the transient-retry backoff around it ignored cancellation. Forwarded, matching
+  `QueryBuilder` and `Repository`.
+- **`WhereExists(...).Select(...).WithCache(...)` could serve stale cross-table results.**
+  `ShouldCache` / `ShouldSmartCache` deliberately refuse to cache a subquery-filtered query —
+  the cache stamps an entry with one table's version counter, so a mutation on the inner
+  table cannot invalidate it — but `Select` forwarded the cache decoration into the projection
+  without that guard, and `.WithCache` called on the projection afterwards re-armed it. The
+  verdict now travels with the query into `Select` and `GroupBy`, and a `WithCache` /
+  `SmartCache` call on such a projection is ignored and logged instead of silently caching.
+
 ### Documentation
 
 - Corrected the `SqlFn` XML documentation for the date-part helpers, which still described
@@ -172,6 +291,12 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ### Fixed
 
+- **`ids.Contains(x.Id)` on a `List<T>` or `HashSet<T>` threw instead of emitting `IN`.**
+  The expression visitor's first `Contains` case matched any single-argument instance call,
+  so a collection membership test took the string `LIKE` branch and tried to emit the
+  collection itself as a column. Arrays were unaffected because they bind to the static
+  two-argument `Enumerable.Contains`, which had its own case. The `LIKE` branch is now
+  restricted to a string receiver, and both membership shapes share one emitter.
 - **Schema sync no longer rewrites every table on every startup.** The analyzer compared
   `information_schema.data_type` against the generated DDL with a lowercase string compare.
   Those vocabularies never match -- PostgreSQL reports `character varying`, `numeric`,

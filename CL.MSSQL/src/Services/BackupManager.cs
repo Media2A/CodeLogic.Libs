@@ -1,3 +1,4 @@
+using CL.MSSQL.Configuration;
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
 using Microsoft.Data.SqlClient;
@@ -16,15 +17,25 @@ public sealed class BackupManager
     private readonly ConnectionManager _connectionManager;
     private readonly string _dataDirectory;
     private readonly ILogger? _logger;
+    private readonly Func<string, SqlServerDatabaseConfig?>? _configLookup;
 
+    /// <param name="connectionManager">Connection manager used to read catalog DDL.</param>
+    /// <param name="dataDirectory">Base data directory; backups land in its <c>backups</c> folder.</param>
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="configLookup">
+    /// Optional delegate resolving per-connection config so a database can redirect its
+    /// backups with <see cref="SqlServerDatabaseConfig.BackupDirectory"/>.
+    /// </param>
     public BackupManager(
         ConnectionManager connectionManager,
         string dataDirectory,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        Func<string, SqlServerDatabaseConfig?>? configLookup = null)
     {
         _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
         _dataDirectory = dataDirectory ?? throw new ArgumentNullException(nameof(dataDirectory));
         _logger = logger;
+        _configLookup = configLookup;
     }
 
     /// <summary>
@@ -40,7 +51,7 @@ public sealed class BackupManager
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             Directory.CreateDirectory(backupDir);
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
@@ -80,7 +91,7 @@ public sealed class BackupManager
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             Directory.CreateDirectory(backupDir);
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
@@ -115,12 +126,13 @@ public sealed class BackupManager
     /// Removes backup files older than the specified number of days.
     /// </summary>
     /// <param name="olderThanDays">Files older than this many days will be deleted.</param>
+    /// <param name="connectionId">The connection whose backup directory to clean.</param>
     /// <returns>The number of files deleted.</returns>
-    public async Task<Result<int>> CleanupOldBackupsAsync(int olderThanDays = 30)
+    public async Task<Result<int>> CleanupOldBackupsAsync(int olderThanDays = 30, string connectionId = "Default")
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             if (!Directory.Exists(backupDir))
                 return Result<int>.Success(0);
 
@@ -153,9 +165,9 @@ public sealed class BackupManager
     /// Returns the most recent schema backup file for a table, or null if none exists. Backups are
     /// use a filesystem-safe table stem plus a UTC timestamp in the backup directory.
     /// </summary>
-    public string? GetLatestBackupFile(string tableName)
+    public string? GetLatestBackupFile(string tableName, string connectionId = "Default")
     {
-        var backupDir = GetBackupDirectory();
+        var backupDir = GetBackupDirectory(connectionId);
         if (!Directory.Exists(backupDir)) return null;
         return Directory.GetFiles(backupDir, $"{GetTableBackupStem(tableName)}_*.sql")
             .OrderByDescending(f => new FileInfo(f).LastWriteTimeUtc)
@@ -179,7 +191,7 @@ public sealed class BackupManager
     {
         try
         {
-            var file = backupFile ?? GetLatestBackupFile(tableName);
+            var file = backupFile ?? GetLatestBackupFile(tableName, connectionId);
             if (file is null || !File.Exists(file))
                 return Result<bool>.Failure(Error.Internal(
                     "mssql.restore_not_found", $"No schema backup found for [{tableName}]."));
@@ -238,8 +250,19 @@ public sealed class BackupManager
 
     // ── Private helpers ────────────────────────────────────────────────────────
 
-    private string GetBackupDirectory() =>
-        Path.Combine(_dataDirectory, "backups");
+    /// <summary>
+    /// Where backups for a connection are written: the database's configured
+    /// <see cref="SqlServerDatabaseConfig.BackupDirectory"/> when it sets one (absolute, or
+    /// relative to the data directory), otherwise <c>&lt;DataDirectory&gt;/backups</c>.
+    /// </summary>
+    private string GetBackupDirectory(string connectionId = "Default")
+    {
+        var configured = _configLookup?.Invoke(connectionId)?.BackupDirectory;
+        if (string.IsNullOrWhiteSpace(configured)) return Path.Combine(_dataDirectory, "backups");
+        return Path.IsPathRooted(configured)
+            ? configured
+            : Path.Combine(_dataDirectory, configured);
+    }
 
     private static string GetTableBackupStem(string tableName)
     {

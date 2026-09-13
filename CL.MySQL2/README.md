@@ -118,7 +118,7 @@ Every desired schema is hashed into `__schema_state`. An unchanged model takes t
 | `UpsertWithIncrementsAsync` | Insert a seed or atomically accumulate selected numeric columns. |
 | `GetByIdAsync` / `GetByColumnAsync` / `GetAllAsync` / `FindAsync` | Typed entity retrieval. |
 | `GetPagedAsync` | Page-number/offset paging with totals. |
-| `CountAsync` | Count table rows. Unlike the other reads this ignores `[SoftDelete]`, so deleted rows are counted. |
+| `CountAsync` | Count table rows. Applies the `[SoftDelete]` filter like the other reads, so it agrees with `GetAllAsync`. |
 | `UpdateAsync` | Update an entity by its mapped primary key. |
 | `IncrementAsync` / `DecrementAsync` / `AdjustAsync` | Atomic server-side counter changes. |
 | `DeleteAsync` | Soft delete when `[SoftDelete]` is present; otherwise physically delete. |
@@ -293,7 +293,7 @@ Migrations run in version/order sequence, are tracked in `__migrations`, verify 
 
 Before destructive schema reconciliation, the backup manager writes DDL snapshots. `RestoreSchemaAsync` can replay the latest or a named snapshot and then clears the CRC state so the next sync performs a full comparison. These are schema backups only; they do not preserve table rows.
 
-For row lifecycle management, `[SoftDelete]` changes repository deletion into a timestamp update and filters ordinary reads by default. `.IncludeDeleted()` opts a query back into those rows. `[RetainDays]` registers an entity for background batch purging based on its timestamp column; the worker is built during library start from the types already passed to `SyncTableAsync` / `SyncSchemaAsync`, so reconcile those entities before `CodeLogic.StartAsync()`.
+For row lifecycle management, `[SoftDelete]` changes repository deletion into a timestamp update and filters ordinary reads by default. `.IncludeDeleted()` opts a query back into those rows. `[RetainDays]` registers an entity for background batch purging based on its timestamp column; the worker's entry list is live, so an entity reconciled by `SyncTableAsync` / `SyncSchemaAsync` after `CodeLogic.StartAsync()` is still picked up. `RunRetentionOnceAsync()` triggers a pass on demand.
 
 ## Caching and performance
 
@@ -336,9 +336,9 @@ Smart pools refresh registered queries in the background, retire idle entries, a
 
 - Deadlocks (`1213`) and lock-wait timeouts (`1205`) on individual non-transactional statements are retried with exponential backoff and jitter.
 - `TestConnectionAsync` and the CodeLogic library health check expose connection health.
-- `SlowQueryEvent` reports the SQL and elapsed milliseconds when the configured threshold is exceeded. Its `ExplainJson` field and the `CaptureExplainOnSlowQuery` setting are placeholders — no `EXPLAIN` is run today.
+- `SlowQueryEvent` reports the SQL and elapsed milliseconds when the configured threshold is exceeded. With `CaptureExplainOnSlowQuery` on (default off), it also carries the `EXPLAIN FORMAT=JSON` plan in `ExplainJson`, captured best-effort on a separate connection.
 - `QueryExecutedEvent` reports SQL, duration, row count, connection, and cache-hit status.
-- `CacheHitEvent`, `CacheMissEvent`, `DatabaseConnectedEvent`, `DatabaseDisconnectedEvent`, `TableSyncedEvent`, and `HealthChangedEvent` integrate with the CodeLogic event bus. (`N1QueryDetectedEvent` is declared but never published — the N+1 detector is not implemented.)
+- `CacheHitEvent`, `CacheMissEvent`, `DatabaseConnectedEvent`, `DatabaseDisconnectedEvent`, `TableSyncedEvent`, and `HealthChangedEvent` integrate with the CodeLogic event bus. `N1QueryDetectedEvent` fires when one query template repeats `N1DetectorThreshold` times within a second (0, the default, disables detection).
 - `GetCacheStats()` and `GetCachePoolStats()` expose cache entries, versions, refreshes, failures, and activity.
 
 ## Important behavior boundaries
@@ -374,9 +374,9 @@ The library generates `config.mysql.json` (`mysql`) and `config.mysql.cache.json
 }
 ```
 
-Applied database settings include endpoint and credentials, pooling, connection and command timeouts, SSL mode, connection charset, sync mode, the transient retry policy, and the slow-query threshold. Several further fields are declared but not currently read — `QueryTimeoutMs`, `MaxBatchInsertSize`, `MaxInClauseValues`, `PreparedStatementCacheSize`, `N1DetectorThreshold`, `CaptureExplainOnSlowQuery`, `BackupDirectory`, `CacheEnabledOverride`, `DefaultStringSize`, `Collation`, and `SslCertificatePath`. See the [overview](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/index.html) for the per-field status.
+Applied database settings include endpoint and credentials, pooling, connection and command timeouts, SSL mode and CA path, connection charset, sync mode, the transient retry policy, the slow-query threshold and its optional `EXPLAIN` capture, the query timeout, the insert batch size, the backup directory, the N+1 detector threshold, the default string size, and the per-database cache override. Two fields are `[Obsolete]` and ignored: `PreparedStatementCacheSize` (configure statement caching on the connection string) and the cache section's `MaxMemoryMb` (the store evicts by entry count — use `MaxEntries`). `MaxInClauseValues` is advisory: an oversized generated `IN (...)` list warns rather than chunking. `Collation` remains informational. See the [overview](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/index.html) for the per-field status.
 
-The cache configuration's global switch, entry limit, and `DateTime` quantization window are applied at startup. Its `MaxMemoryMb`, `DefaultTtlSeconds`, and `PublishEvents` fields, and the per-database `CacheEnabledOverride`, are declared but not currently read.
+The cache configuration's global switch, entry limit, `DateTime` quantization window, default TTL (used by the parameterless `.WithCache()`), and hit/miss event switch are all applied at startup.
 
 ## Main entry points
 

@@ -69,6 +69,20 @@ public sealed class ConnectionManager
     public string GetConnectionString(string connectionId = "Default")
         => RequireConfig(connectionId).BuildConnectionString();
 
+    /// <summary>
+    /// Applies the connection's configured <c>QueryTimeoutMs</c> to a command as its
+    /// <see cref="MySqlCommand.CommandTimeout"/> (rounded up to whole seconds, MySqlConnector's
+    /// unit). A value of 0 — or an unregistered connection id — leaves the command on the
+    /// connection string's <c>DefaultCommandTimeout</c>. The shipped default of 30000ms equals
+    /// that 30-second default, so this is a no-op until the value is changed.
+    /// </summary>
+    internal void ApplyCommandTimeout(MySqlCommand cmd, string connectionId)
+    {
+        var ms = GetConfiguration(connectionId)?.QueryTimeoutMs ?? 0;
+        if (ms <= 0) return;
+        cmd.CommandTimeout = (int)Math.Max(1, Math.Min(int.MaxValue, ((long)ms + 999) / 1000));
+    }
+
     // ── Connection lifecycle ───────────────────────────────────────────────────
 
     /// <summary>

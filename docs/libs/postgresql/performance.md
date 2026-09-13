@@ -11,6 +11,32 @@ var rows = await pg.Query<User>()
     .ToListAsync();
 ```
 
+`WithCache()` with no argument uses `postgresql.cache.defaultTtlSeconds` (60 by default).
+The same overload exists on a projected query, so `.Select(…).WithCache()` works too.
+
+### Configuration
+
+| Setting (`postgresql.cache`) | Default | Effect |
+|---|---|---|
+| `enabled` | `true` | Master switch. A per-database `cacheEnabledOverride` wins over it for that connection. |
+| `maxEntries` | `10000` | Entry-count cap for the in-process store. |
+| `defaultTtlSeconds` | `60` | Lifetime used by the parameterless `WithCache()`. |
+| `timeQuantizeSeconds` | `60` | Rounding window for `DateTime` parameters in cache keys. `0` disables. |
+| `publishEvents` | `true` | Whether `CacheHitEvent` / `CacheMissEvent` are published. Set false to keep the cache but silence its per-query events. |
+| `maxMemoryMb` | `256` | **Obsolete** — the store evicts by entry count, not bytes. Use `maxEntries`. |
+
+### Not cacheable
+
+Three cases are refused rather than cached wrongly, because the cache stamps an entry with a
+single table's version counter:
+
+- reads inside a transaction scope (they see uncommitted writes);
+- queries carrying a subquery filter (`WhereExists` / `WhereIn`) — the inner table's
+  mutations could not invalidate the entry. The refusal follows the query into
+  `.Select(…)` and `.GroupBy(…)`, so `.WhereExists(…).Select(…).WithCache(…)` is
+  uncached too (and logs a warning) rather than serving a stale cross-table result;
+- typed joins, which have no `.WithCache` at all.
+
 ### Cache keys
 
 A key is the SHA-256 of the connection id, table name, the table's current version, the SQL
@@ -111,12 +137,13 @@ on a second attempt.
 
 PostgreSQL's extended protocol caps a statement at 65535 bound parameters. Batched inserts
 and upserts chunk at `min(batchSize, (65535 - 16) / columnsPerRow)`, so a wide table
-automatically gets smaller batches rather than failing at the wire. `batchSize` is the
-repository's own default of 500 — the `maxBatchInsertSize` config value is not currently
-plumbed through to it.
+automatically gets smaller batches rather than failing at the wire. `batchSize` comes from
+the connection's `maxBatchInsertSize` (default 500).
 
 Generated `IN` lists are **not** chunked: `ids.Contains(x.Id)` emits one bound parameter per
-value in a single list, and `maxInClauseValues` is not consulted. Chunk large sets yourself.
+value in a single list. `maxInClauseValues` (default 1000) is advisory — exceeding it logs a
+warning once per query build, naming the entity and the value count, and the list is still
+sent whole. Chunk large sets yourself if the plan degrades.
 
 ## Observability
 
@@ -125,15 +152,37 @@ value in a single list, and `maxInClauseValues` is not consulted. Chunk large se
 Queries at or over `slowQueryThresholdMs` are logged as a warning and raise a
 `SlowQueryEvent` carrying the connection id, SQL text and elapsed milliseconds.
 
-`SlowQueryEvent.ExplainJson` and the `captureExplainOnSlowQuery` setting are reserved for a
-planned `EXPLAIN (FORMAT JSON)` capture that is **not implemented**: no call site runs
-`EXPLAIN`, so the field is always null.
+Set `captureExplainOnSlowQuery` (default `false`) to have the plan attached as
+`SlowQueryEvent.ExplainJson`. The library then runs `EXPLAIN (FORMAT JSON) <sql>` with the
+same bound parameters on a separate connection. It is strictly best-effort:
+
+- the fetch happens off the query path, so it never delays the caller;
+- it is skipped entirely for a query running inside a transaction scope, so it can never
+  interleave with the caller's transaction;
+- statements `EXPLAIN` cannot accept (DDL, utility commands, multi-statement batches) and
+  parameterized statements whose values were not captured are skipped;
+- any failure is swallowed and the event still publishes, with a null payload.
+
+`EXPLAIN` without `ANALYZE` only plans the statement — it does not execute it.
 
 ### N+1 detection
 
-`N1QueryDetectedEvent` and the `n1DetectorThreshold` setting are likewise reserved. No
-request-scope template counting exists yet, so the event is never published and the setting
-has no effect at any value.
+Set `n1DetectorThreshold` above 0 to have the library count executions of the same
+normalized SQL template per connection over a rolling one-second window. When the count
+reaches the threshold, `N1QueryDetectedEvent` is published **once for that window**; further
+executions inside it stay silent and the next window starts fresh.
+
+```json
+{ "databases": { "Default": { "n1DetectorThreshold": 20 } } }
+```
+
+Normalization folds digit runs to `?` and collapses whitespace, so `WHERE id = @qb_0` and
+`WHERE id = @qb_7` are the same template. Cache hits are not counted — they never reached
+the server.
+
+`0` is the default and disables the detector completely: no allocation, no dictionary
+lookup, one bool read per query. The bookkeeping is capped at 512 templates and pruned by
+age, so it cannot grow without bound on a long-running process.
 
 ### Counters
 

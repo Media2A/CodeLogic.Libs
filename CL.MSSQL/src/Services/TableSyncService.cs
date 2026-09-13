@@ -50,7 +50,7 @@ public sealed class TableSyncService
         _events = events;
         _analyzer = new SchemaAnalyzer(logger);
         _migrationTracker = new MigrationTracker(connectionManager, logger);
-        _backupManager = new BackupManager(connectionManager, dataDirectory, logger);
+        _backupManager = new BackupManager(connectionManager, dataDirectory, logger, configLookup);
         _stateStore = new SchemaStateStore(connectionManager, logger);
         _configLookup = configLookup;
         _appVersion = CodeLogicEnvironment.AppVersion;
@@ -58,6 +58,16 @@ public sealed class TableSyncService
 
     private SchemaSyncLevel ResolveLevel(string connectionId) =>
         _configLookup?.Invoke(connectionId)?.EffectiveSyncLevel ?? SchemaSyncLevel.Safe;
+
+    /// <summary>
+    /// The <c>nvarchar</c> length inferred for unsized string columns on this connection, from
+    /// <c>SqlServerDatabaseConfig.DefaultStringSize</c>. Falls back to the historical 255.
+    /// </summary>
+    private int ResolveStringSize(string connectionId)
+    {
+        var size = _configLookup?.Invoke(connectionId)?.DefaultStringSize ?? 0;
+        return size > 0 ? size : 255;
+    }
 
     private static bool IsDestructive(string stmt) =>
         stmt.Contains("DROP COLUMN", StringComparison.OrdinalIgnoreCase)
@@ -124,7 +134,8 @@ public sealed class TableSyncService
             }
 
             // ── CRC fast-path ── consult the sentinel before any sys catalog diffing.
-            var modelCrc = _analyzer.ComputeSchemaCrc(entityType);
+            var stringSize = ResolveStringSize(connectionId);
+            var modelCrc = _analyzer.ComputeSchemaCrc(entityType, stringSize);
             var state = await _stateStore.GetStateAsync(stateKey, connectionId, ct).ConfigureAwait(false);
 
             // Skip only when the CRC matches, the row is Synced, AND the table really exists — a
@@ -176,7 +187,7 @@ public sealed class TableSyncService
                 if (!tableExists)
                 {
                     // CREATE TABLE
-                    var createSql = _analyzer.GenerateCreateTable(entityType);
+                    var createSql = _analyzer.GenerateCreateTable(entityType, stringSize);
                     await ExecuteSqlAsync(createSql, connectionId, ct).ConfigureAwait(false);
                     operations.Add($"CREATE TABLE [{tableName}]");
                     _logger?.Info($"[MSSQL] Created table [{tableName}]");
@@ -199,7 +210,7 @@ public sealed class TableSyncService
 
                     // ALTER TABLE as needed at the mode's level.
                     var alterStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
-                        await _analyzer.GenerateAlterStatementsAsync(entityType, conn, level, ct).ConfigureAwait(false),
+                        await _analyzer.GenerateAlterStatementsAsync(entityType, conn, level, ct, stringSize).ConfigureAwait(false),
                         connectionId, ct).ConfigureAwait(false);
 
                     foreach (var stmt in alterStatements)
@@ -214,7 +225,7 @@ public sealed class TableSyncService
                     if (level < SchemaSyncLevel.Full)
                     {
                         var fullStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
-                            await _analyzer.GenerateAlterStatementsAsync(entityType, conn, SchemaSyncLevel.Full, ct).ConfigureAwait(false),
+                            await _analyzer.GenerateAlterStatementsAsync(entityType, conn, SchemaSyncLevel.Full, ct, stringSize).ConfigureAwait(false),
                             connectionId, ct).ConfigureAwait(false);
                         if (fullStatements.Any(IsDestructive))
                         {
@@ -235,7 +246,7 @@ public sealed class TableSyncService
                 // so a half-applied table is intentionally left without an updated CRC and retried.
                 await _stateStore.UpsertStateAsync(
                     stateKey, modelCrc, status, mode.ToString(), _appVersion,
-                    _analyzer.GenerateCreateTable(entityType), connectionId, ct).ConfigureAwait(false);
+                    _analyzer.GenerateCreateTable(entityType, stringSize), connectionId, ct).ConfigureAwait(false);
 
                 sw.Stop();
                 var syncResult = new SyncResult

@@ -14,7 +14,7 @@ Two complementary mechanisms keep a database in step with the code:
 | Property | Default | Purpose |
 |---|---|---|
 | `Name` | class name | Table name. |
-| `Schema` | `public` | PostgreSQL schema. Every statement is qualified with it. The fallback is the literal `public`, not the connection's `defaultSchema`. |
+| `Schema` | the connection's `defaultSchema` | PostgreSQL schema. Every statement is qualified with it. When the attribute does not name one, the entity lands in the connection's configured `defaultSchema` (`public` unless changed), which is created if missing. |
 | `Comment` | — | Emitted as `COMMENT ON TABLE`. |
 | `Collation` | — | Column collation applied to text columns. |
 | `Unlogged` | `false` | Faster writes, not crash-safe, not replicated. |
@@ -191,20 +191,26 @@ public sealed class User
 }
 ```
 
-Reads filter `"deleted_utc" IS NULL`; `DeleteAsync` stamps it instead of removing the row.
-`IncludeDeleted()` opts a query out, and `HardDeleteAsync` really deletes.
+Reads filter `"deleted_utc" IS NULL`; `DeleteAsync` stamps it (with a client-side
+`DateTime.UtcNow`) instead of removing the row. `IncludeDeleted()` opts a query out, and
+`HardDeleteAsync` really deletes.
+
+The filter applies to every repository read, `CountAsync` included — so `CountAsync()` and
+`GetAllAsync().Count` agree. Use `Query<T>().IncludeDeleted().CountAsync()` for the physical
+row count. Writes (`UpdateAsync`, `AdjustAsync` / `IncrementAsync` / `DecrementAsync`,
+`HardDeleteAsync`) target a row by primary key and are deliberately *not* filtered, so a
+soft-deleted row can still be corrected or restored.
 
 `[RetainDays(90, nameof(CreatedUtc))]` is picked up by a background worker that prunes rows
 past the window in batches.
 
-> **Ordering matters.** The worker is built during `CodeLogic.StartAsync()` from the entity
-> types registered so far, and that list is snapshotted at construction. Entities are
-> registered by `SyncTableAsync` / `SyncSchemaAsync`, so a model synced *after*
-> `StartAsync()` — the order shown in every quick-start on these pages — is never seen by
-> the worker and its retention policy never runs. Either sync your entities between
-> `CodeLogic.ConfigureAsync()` and `CodeLogic.StartAsync()`, or drive purges yourself with
-> `RetentionWorker.RunOnceAsync()`. Because PostgreSQL has no `DELETE … LIMIT`, each batch selects rows by
-`ctid` with `FOR UPDATE SKIP LOCKED`, so concurrent passes do not block one another.
+Registration order does not matter. The worker's entry list is live: `SyncTableAsync` /
+`SyncSchemaAsync` hand each entity to it as they run, and the first `[RetainDays]` entity to
+arrive starts the loop (idempotently). Syncing your models *after* `CodeLogic.StartAsync()`
+— the order shown in every quick-start on these pages — works.
+
+Because PostgreSQL has no `DELETE … LIMIT`, each batch selects rows by `ctid` with
+`FOR UPDATE SKIP LOCKED`, so concurrent passes do not block one another.
 
 The worker runs on a timer once the library starts: a first pass five minutes after startup,
 then once every 24 hours. `RetentionWorker.RunOnceAsync()` performs a single purge pass

@@ -2,6 +2,33 @@
 
 ## 2026-09-13
 
+### Changed — behaviour
+
+- **`Repository<T>.CountAsync` now excludes soft-deleted rows.** For an entity carrying
+  `[SoftDelete]` it emitted a bare `SELECT COUNT(*)` while `GetAllAsync` and the count inside
+  `GetPagedAsync` both filtered on the same soft-delete column, so the two contradicted each
+  other. They now agree. **If you relied on `CountAsync` returning the physical row count of a
+  soft-delete entity, switch to `Query<T>().IncludeDeleted().CountAsync()`.** No other read
+  path changes; entities without `[SoftDelete]` are unaffected.
+- **A configured `MaxBatchInsertSize` now actually applies.** `GetRepository<T>()` never
+  passed it, so every repository chunked at the constructor default of 500. A database that
+  configured a different value now gets it — in both the `connectionId` and the
+  `TransactionScope` overload. Statements are still capped further so a batch stays under
+  SQL Server's 2,100-parameter limit.
+- **A configured `QueryTimeoutMs` now applies** as the command timeout on the query commands
+  the library issues (repositories, query builder, projections, joins, grouped queries),
+  overriding the connection string's `Command Timeout` for those commands. The default of
+  30 000 ms matches the provider's own 30 s default, so a default configuration is unchanged;
+  a database that set `CommandTimeout` above 30 s but left `QueryTimeoutMs` alone will see
+  library queries bounded at 30 s. Set `QueryTimeoutMs` to `0` to leave the connection-string
+  value in place.
+- **A configured `DefaultStringSize` now applies** to schema generation for string properties
+  with no explicit `[Column(Size = ...)]`. The default is still 255, so generated DDL and the
+  schema CRC are unchanged unless you change the setting.
+- **A configured `CacheEnabledOverride` now applies**, winning over the global
+  `mssql.cache.Enabled` switch for that connection id. `null` (the default) keeps today's
+  behaviour.
+
 ### Documentation
 
 - Corrected the `SqlFn` XML documentation, which had been copied from the MySQL library and
@@ -19,26 +46,30 @@
   calls inside an open scope being committed by `tx.CommitAsync()`; they in fact open their
   own connection and run outside the transaction. The example is replaced with an explicit
   warning and the supported alternatives.
-- Flagged the configuration settings that are declared but not yet read by the library, so
-  they are no longer documented as working knobs: `QueryTimeoutMs`, `MaxInClauseValues`
-  (no cap is applied to generated `IN (...)` lists), `PreparedStatementCacheSize`,
-  `N1DetectorThreshold`, `DefaultStringSize`, `CacheEnabledOverride`, `DefaultTtlSeconds`
-  and `PublishEvents` — plus `MaxBatchInsertSize`, which `GetRepository<T>()` does not pass
-  to the repository it builds.
-- Marked the N+1 detector as not wired up. The setting, the event and
-  `QueryObservability.RecordN1` all exist, but nothing counts repeats or publishes the
-  event, so `N1QueryDetectedEvent` never fires today.
+- The configuration tables in the library index and the performance guide now describe what
+  each setting does, after the wiring below: `QueryTimeoutMs`, `MaxBatchInsertSize`,
+  `MaxInClauseValues` (advisory — it warns, it does not chunk), `N1DetectorThreshold`,
+  `DefaultStringSize`, `CacheEnabledOverride`, `BackupDirectory`, `DefaultTtlSeconds` and
+  `PublishEvents`. `PreparedStatementCacheSize` and `MaxMemoryMb` are documented as obsolete
+  and point at the real control.
+- The N+1 detection section documents the implemented detector: the one-second rolling
+  window, publish-once-per-window, the normalized template, and that `0` disables it.
+- Documented slow-query plan capture as it actually behaves. Unlike the sibling libraries,
+  `CaptureExplainOnSlowQuery` was already read and already gating the cached-ShowPlan-XML
+  lookup in `QueryObservability`; every `RecordSlow` call site reaches it. The guide now
+  states that the capture runs on its own connection (never inside the callers
+  transaction) and is strictly best-effort — valid ShowPlan XML or `null`, never a throw —
+  and that the default remains on.
 - Fixed the `MinPoolSize` default in the configuration table: it is `0`, not `1`.
 - Fixed the imperative-migration example, which would not compile — the `Migration` base
   supplies `Version` and `Description` from its `(appVersion, order, description)`
   constructor and neither is virtual.
 - Corrected the retention description: each pass loops until a batch deletes fewer rows than
-  `BatchSize`, not until it deletes zero; and the background worker only starts if an entity
-  carrying `[RetainDays]` is already registered when the library starts, so a purge for an
-  entity synced later must be driven through `RetentionWorker.RunOnceAsync()`.
+  `BatchSize`, not until it deletes zero. The worker's entity list is now live, so the
+  "entities synced after start are never purged" caveat is gone with it.
 - Clarified that table-version invalidation is skipped for tables with live `SmartCachePool`
   entries, that `QueryCache.Enabled` / `TimeQuantizeSeconds` are internal rather than part of
-  the public facade, and that `MaxMemoryMb` is advisory (eviction is by entry count).
+  the public facade, and that `MaxMemoryMb` is obsolete (eviction is by entry count).
 - Noted that composition-time guard errors (unsupported expressions, `.Join` after
   `.OrderBy`, `WhereExists` on the outer table) throw rather than returning a `Result`.
 
@@ -49,9 +80,70 @@
   construct `Repository<T>` by hand to do any work inside a transaction.
 - `RetentionWorker.RunOnceAsync()` is now public; it already existed but was internal, so
   the three libraries now expose the same retention surface.
+- `MSSQLLibrary.RunRetentionOnceAsync(ct)` — an operator-triggered purge over every registered
+  `[RetainDays]` entity, without constructing a worker by hand.
+- `RetentionWorker.TryRegister(Type)` and `RetentionWorker.Entities` — the worker's entry list
+  is now live and can be added to while the loop runs.
+- `QueryBuilder<T>.WithCache()` and `ProjectedQuery<,>.WithCache()` — parameterless overloads
+  that use the configured `mssql.cache` → `DefaultTtlSeconds` (60 s by default).
+- `QueryCache.SetConnectionOverride(connectionId, enabled)` — registers a per-database
+  override of the global cache switch; the library calls it from `CacheEnabledOverride`.
+- `QueryObservability.ConfigureN1Detection(connectionId, threshold)` — registers a
+  connection's N+1 threshold; the library calls it from `N1DetectorThreshold`.
+- `QueryCache.Configure` takes `defaultTtlSeconds` and `publishEvents` (both optional, both
+  defaulting to today's values).
+- Configuration validation for the newly wired fields: `MaxInClauseValues`, `QueryTimeoutMs`,
+  `N1DetectorThreshold` and `DefaultStringSize`.
+
+### Deprecated
+
+- `SqlServerDatabaseConfig.PreparedStatementCacheSize` is `[Obsolete]` and not applied.
+  `Microsoft.Data.SqlClient` has no client-side prepared-statement cache to size and SQL
+  Server's plan cache is automatic; configure pooling on the connection string instead. The
+  property is kept so existing configuration keeps compiling and deserializing.
+- `CacheConfiguration.MaxMemoryMb` is `[Obsolete]` and not applied. The in-process store
+  bounds the cache by entry count — use `MaxEntries`.
 
 ### Fixed
 
+- **`ids.Contains(x.Id)` on a `List<T>` or `HashSet<T>` threw instead of emitting `IN`.**
+  The expression visitor's first `Contains` case matched any single-argument instance call,
+  so a collection membership test took the string `LIKE` branch and tried to emit the
+  collection itself as a column. Arrays were unaffected because they bind to the static
+  two-argument `Enumerable.Contains`, which had its own case. The `LIKE` branch is now
+  restricted to a string receiver, and both membership shapes share one emitter.
+- **Retention never ran.** `OnStartAsync` built the `RetentionWorker` from the set of
+  registered entities and the constructor snapshotted it, but every documented flow registers
+  entities through `SyncTableAsync` / `SyncSchemaAsync` *after* `CodeLogic.StartAsync()`. So
+  `HasWork` was false, the background loop never started, and `[RetainDays]` was dead in
+  normal usage. The worker's entry list is now live, the library feeds it every registration,
+  and it starts the loop the first time a `[RetainDays]` entity appears. The 5-minute initial
+  delay, the 24-hour interval and `RunOnceAsync()` are unchanged, and disposal still cancels
+  the loop cleanly.
+- **The N+1 detector never fired.** `QueryObservability.RecordN1` had no call sites and
+  `N1DetectorThreshold` was never read, so `N1QueryDetectedEvent` could not be published.
+  Executions of the same normalized statement are now counted per connection in a one-second
+  rolling window and the event is published once per window when the threshold is crossed.
+  Bookkeeping is bounded by a fixed-capacity map pruned by age. A threshold of `0` — the
+  default — costs nothing: no dictionary touch and no allocation on the query path.
+- **`ProjectedQuery` and `JoinedQuery` dropped the caller's `CancellationToken`** when handing
+  their work to the connection manager, so an already-cancelled call still opened a connection
+  (and could still be retried by the transient-failure logic). Both now forward it, as
+  `QueryBuilder` and `Repository` already did.
+- **`.WhereExists(...).Select(...).WithCache(...)` cached a cross-table result under one
+  table's version** and would serve it stale after the other table changed. `QueryBuilder`
+  refuses to cache a subquery-filtered query, but `Select` and `GroupBy` forwarded the TTL and
+  smart-cache pool into the projection regardless, and `ProjectedQuery.WithCache` could set
+  one afterwards. The refusal now propagates to the projected and grouped queries, which log a
+  warning and execute uncached.
+- **`BackupDirectory` is honoured.** Schema backups were always written to
+  `<DataDirectory>/backups`; a configured directory (absolute, or relative to the data
+  directory) is now used for both writing and reading back the latest file.
+- **`CacheConfiguration.PublishEvents` is honoured** — `CacheHitEvent` / `CacheMissEvent` are
+  only published when it is true (it is by default).
+- **`MaxInClauseValues` is reported.** A generated `IN (...)` list longer than the configured
+  cap logs one warning per query build, naming the entity and the value count. Nothing is
+  chunked, truncated or rejected: callers that exceed it today keep working.
 - **`SqlFn.Like` in a projection, `GROUP BY` key or `UPDATE ... SET` was a syntax error.**
   T-SQL has no boolean expression type, so the emitted `a LIKE b` is a predicate and is
   rejected anywhere a value is expected (`Incorrect syntax near the keyword 'LIKE'`). It

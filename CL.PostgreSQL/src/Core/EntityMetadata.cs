@@ -17,14 +17,62 @@ internal static class EntityMetadata<T> where T : class
     public static readonly string TableName;
 
     /// <summary>
-    /// The schema the entity lives in, from <see cref="TableAttribute.Schema"/> or
-    /// <c>public</c>. PostgreSQL table names are only unique within a schema, so every
-    /// generated statement qualifies them.
+    /// The schema declared by <see cref="TableAttribute.Schema"/>, or null when the entity
+    /// does not name one — in which case it lands in the connection's configured
+    /// <c>DefaultSchema</c>. An explicit attribute always wins.
     /// </summary>
-    public static readonly string SchemaName;
+    public static readonly string? ExplicitSchemaName;
 
-    /// <summary>The quoted, schema-qualified table reference, e.g. <c>"public"."users"</c>.</summary>
-    public static readonly string QualifiedTableName;
+    /// <summary>
+    /// The schema the entity lives in on the <c>Default</c> connection:
+    /// <see cref="TableAttribute.Schema"/> when set, else that connection's configured
+    /// <c>DefaultSchema</c> (<c>public</c> unless changed). Prefer
+    /// <see cref="SchemaNameFor"/> wherever the connection ID is known — two named
+    /// connections may configure different schemas.
+    /// </summary>
+    public static string SchemaName => SchemaNameFor(null);
+
+    /// <summary>
+    /// The quoted, schema-qualified table reference on the <c>Default</c> connection, e.g.
+    /// <c>"public"."users"</c>. Prefer <see cref="QualifiedTableNameFor"/>.
+    /// </summary>
+    public static string QualifiedTableName => QualifiedTableNameFor(null);
+
+    // Per-connection qualified names. Stamped with the schema-cache generation so a
+    // configuration change (or a stop/start inside one test host) is picked up rather than
+    // serving a name built against the previous default schema.
+    private static readonly ConcurrentDictionary<string, (int Generation, string Schema, string Qualified)> _perConnection =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Stands in for a null connection ID. Not a legal connection ID itself, so it cannot
+    // collide with a real one.
+    private const string NullConnectionKey = "<default connection>";
+
+    /// <summary>
+    /// The schema this entity maps to on <paramref name="connectionId"/>:
+    /// <see cref="TableAttribute.Schema"/> when the entity declares one, otherwise that
+    /// connection's configured <c>DefaultSchema</c>.
+    /// </summary>
+    public static string SchemaNameFor(string? connectionId) => Resolve(connectionId).Schema;
+
+    /// <summary>The quoted, schema-qualified table reference for <paramref name="connectionId"/>.</summary>
+    public static string QualifiedTableNameFor(string? connectionId) => Resolve(connectionId).Qualified;
+
+    private static (string Schema, string Qualified) Resolve(string? connectionId)
+    {
+        var key = connectionId ?? NullConnectionKey;
+        var generation = EntityMetadataSchemaCache.Generation;
+
+        if (_perConnection.TryGetValue(key, out var cached) && cached.Generation == generation)
+            return (cached.Schema, cached.Qualified);
+
+        var schema = ExplicitSchemaName
+                     ?? RequireSafeIdentifier(
+                         PostgreSqlRuntimeOptions.DefaultSchemaFor(connectionId), typeof(T), "schema");
+        var qualified = PostgreSqlDialect.Qualify(schema, TableName);
+        _perConnection[key] = (generation, schema, qualified);
+        return (schema, qualified);
+    }
 
     public static readonly TableAttribute? TableAttr;
     public static readonly IReadOnlyList<ColumnMetadata> Columns;
@@ -53,10 +101,9 @@ internal static class EntityMetadata<T> where T : class
         TableAttr = type.GetCustomAttribute<TableAttribute>();
         TableName = RequireSafeIdentifier(
             !string.IsNullOrEmpty(TableAttr?.Name) ? TableAttr.Name! : type.Name, type, "table");
-        SchemaName = RequireSafeIdentifier(
-            !string.IsNullOrEmpty(TableAttr?.Schema) ? TableAttr.Schema! : PostgreSqlDialect.DefaultSchema,
-            type, "schema");
-        QualifiedTableName = PostgreSqlDialect.Qualify(SchemaName, TableName);
+        ExplicitSchemaName = !string.IsNullOrEmpty(TableAttr?.Schema)
+            ? RequireSafeIdentifier(TableAttr.Schema!, type, "schema")
+            : null;
 
         var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(p => p.CanRead && p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)

@@ -21,20 +21,22 @@ public sealed class CacheConfiguration : ConfigModelBase
     public int MaxEntries { get; set; } = 10_000;
 
     /// <summary>
-    /// Soft memory cap for the cache in megabytes. Currently advisory —
-    /// eviction uses entry count; memory accounting lands in a follow-up.
+    /// Not used. The in-process store bounds the cache by entry count, not by bytes —
+    /// size it with <see cref="MaxEntries"/>.
     /// </summary>
+    [Obsolete("Not applied. The in-process cache store bounds by entry count, not bytes — " +
+              "use MaxEntries instead.")]
     [ConfigField(Label = "Max Memory (MB)", Min = 0,
-        Description = "Soft memory cap. Advisory; current eviction uses entry count.",
+        Description = "Obsolete. Not applied — the store evicts by entry count; use Max Entries.",
         Group = "Capacity", Order = 11, Collapsed = true)]
     public int MaxMemoryMb { get; set; } = 256;
 
     /// <summary>
-    /// Intended default TTL for cached queries. <b>Not currently consumed</b>: the only
-    /// overload is <c>WithCache(TimeSpan ttl)</c>, so every cached query supplies its own TTL.
+    /// TTL used by the parameterless <c>WithCache()</c> overload on the query builder and on a
+    /// projected query. <c>WithCache(TimeSpan)</c> still wins for a query that names its own TTL.
     /// </summary>
     [ConfigField(Label = "Default TTL (seconds)", Min = 1,
-        Description = "Reserved. Every cached query currently supplies its own TTL via .WithCache(ttl).",
+        Description = "TTL used by .WithCache() when the query does not supply one.",
         Group = "Behavior", Order = 20)]
     public int DefaultTtlSeconds { get; set; } = 60;
 
@@ -50,11 +52,12 @@ public sealed class CacheConfiguration : ConfigModelBase
     public int TimeQuantizeSeconds { get; set; } = 60;
 
     /// <summary>
-    /// Intended switch for cache hit/miss events. <b>Not currently consumed</b>: once the
-    /// library binds an event bus, <c>CacheHitEvent</c> / <c>CacheMissEvent</c> are always published.
+    /// Whether a cache lookup publishes <c>CacheHitEvent</c> / <c>CacheMissEvent</c>. Turn it
+    /// off on a hot path where the events are only noise; the cache itself keeps working and
+    /// <c>QueryExecutedEvent</c> still carries its <c>CacheHit</c> flag.
     /// </summary>
     [ConfigField(Label = "Publish Cache Events",
-        Description = "Reserved. CacheHitEvent / CacheMissEvent are always published when an event bus is bound.",
+        Description = "Publish CacheHitEvent / CacheMissEvent on every cache lookup.",
         Group = "Observability", Order = 30)]
     public bool PublishEvents { get; set; } = true;
 }

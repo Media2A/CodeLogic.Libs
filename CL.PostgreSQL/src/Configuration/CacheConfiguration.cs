@@ -21,18 +21,19 @@ public sealed class CacheConfiguration : ConfigModelBase
     public int MaxEntries { get; set; } = 10_000;
 
     /// <summary>
-    /// Soft memory cap for the cache in megabytes. Currently advisory —
-    /// eviction uses entry count; memory accounting lands in a follow-up.
+    /// <b>Obsolete.</b> The in-process store bounds the cache by entry count, not by bytes,
+    /// and nothing reads this value. Use <see cref="MaxEntries"/>.
     /// </summary>
+    [Obsolete("The in-process cache bounds by entry count, not bytes. Use MaxEntries instead; this value is not read.")]
     [ConfigField(Label = "Max Memory (MB)", Min = 0,
-        Description = "Soft memory cap. Advisory; current eviction uses entry count.",
+        Description = "Obsolete — the cache evicts by entry count. Use Max Entries.",
         Group = "Capacity", Order = 11, Collapsed = true)]
     public int MaxMemoryMb { get; set; } = 256;
 
     /// <summary>
-    /// Intended default cache lifetime. <b>Not currently applied:</b> every
-    /// <c>WithCache(TimeSpan)</c> overload requires an explicit TTL and nothing reads this
-    /// value, so no code path falls back to it.
+    /// Default cache lifetime used by the parameterless <c>WithCache()</c> overload on the
+    /// query builder and on a projected query. <c>WithCache(TimeSpan)</c> still wins where
+    /// a call supplies its own TTL.
     /// </summary>
     [ConfigField(Label = "Default TTL (seconds)", Min = 1,
         Description = "Default cache lifetime when .WithCache() has no TTL argument.",
@@ -51,8 +52,8 @@ public sealed class CacheConfiguration : ConfigModelBase
     public int TimeQuantizeSeconds { get; set; } = 60;
 
     /// <summary>
-    /// Intended switch for cache hit/miss events. <b>Not currently applied:</b>
-    /// <c>CacheHitEvent</c> / <c>CacheMissEvent</c> are published unconditionally.
+    /// Whether <c>CacheHitEvent</c> / <c>CacheMissEvent</c> are published. True by default;
+    /// set false to silence the per-query cache observability without disabling the cache.
     /// </summary>
     [ConfigField(Label = "Publish Cache Events",
         Description = "Emit CacheHitEvent / CacheMissEvent for observability.",

@@ -15,6 +15,9 @@ internal sealed class PostgreSqlExpressionVisitor : ExpressionVisitor
     private readonly StringBuilder _sql = new();
     private readonly Dictionary<string, object?> _parameters = new();
     private int _paramCounter;
+    // Widest IN (...) value list this translation produced. Reported so the caller can
+    // warn against the configured MaxInClauseValues ceiling; the list is never chunked.
+    private int _maxInListSize;
     private readonly string _tableAlias;
     private readonly IReadOnlyDictionary<ParameterExpression, string>? _aliasMap;
     private StorageType _currentComparisonStorageType = StorageType.Default;
@@ -41,9 +44,22 @@ internal sealed class PostgreSqlExpressionVisitor : ExpressionVisitor
         Expression<Func<T, bool>> predicate,
         string tableAlias = "")
     {
+        var (sql, parameters, _) = TranslateWithStats(predicate, tableAlias);
+        return (sql, parameters);
+    }
+
+    /// <summary>
+    /// As <see cref="Translate{T}"/>, but also reports the widest <c>IN (...)</c> value list
+    /// the translation emitted. Callers compare it against the connection's configured
+    /// <c>MaxInClauseValues</c> and warn; the list itself is always emitted whole.
+    /// </summary>
+    public static (string Sql, Dictionary<string, object?> Parameters, int MaxInListSize) TranslateWithStats<T>(
+        Expression<Func<T, bool>> predicate,
+        string tableAlias = "")
+    {
         var visitor = new PostgreSqlExpressionVisitor(tableAlias);
         visitor.Visit(predicate.Body);
-        return (visitor._sql.ToString(), visitor._parameters);
+        return (visitor._sql.ToString(), visitor._parameters, visitor._maxInListSize);
     }
 
     /// <summary>
@@ -199,7 +215,10 @@ internal sealed class PostgreSqlExpressionVisitor : ExpressionVisitor
 
         switch (node.Method.Name)
         {
+            // Only a string receiver means LIKE. Any other single-argument instance
+            // Contains is a collection membership test and is handled below.
             case "Contains" when node.Object is MemberExpression containsMember
+                                  && containsMember.Type == typeof(string)
                                   && node.Arguments.Count == 1:
             {
                 _sql.Append(QualifyColumn(containsMember.Member, containsMember.Expression));
@@ -226,39 +245,19 @@ internal sealed class PostgreSqlExpressionVisitor : ExpressionVisitor
                 AddParameter($"%{val}");
                 break;
             }
-            case "Contains" when node.Arguments.Count == 2:
-            {
-                // Static Enumerable.Contains(collection, item) or IList.Contains
-                var collection = GetValue(node.Arguments[0]);
-                var entityMember = GetEntityMember(node.Arguments[1]);
-                var prevStorageType = _currentComparisonStorageType;
-                if (entityMember is not null)
-                    _currentComparisonStorageType = ResolveStorageType(entityMember.Member);
-
-                // Materialise first: an empty set must not emit "IN ()", which is a syntax
-                // error. An empty set matches nothing, so a false literal is the right SQL
-                // and the column reference is skipped entirely.
-                var items = collection is System.Collections.IEnumerable source
-                    ? source.Cast<object?>().ToList()
-                    : [];
-                if (items.Count == 0)
-                {
-                    _sql.Append("FALSE");
-                }
-                else
-                {
-                    Visit(node.Arguments[1]);
-                    _sql.Append(" IN (");
-                    for (var i = 0; i < items.Count; i++)
-                    {
-                        if (i > 0) _sql.Append(", ");
-                        AddParameter(items[i]);
-                    }
-                    _sql.Append(')');
-                }
-                _currentComparisonStorageType = prevStorageType;
+            // A collection receiver: ids.Contains(x.Id) on List<T>, HashSet<T>, IList.
+            // Excluded above by the string guard; a string receiver here would be a
+            // char membership test, which is not what the caller means.
+            case "Contains" when node.Object is not null
+                                  && node.Object.Type != typeof(string)
+                                  && node.Arguments.Count == 1:
+                EmitInClause(node.Object, node.Arguments[0]);
                 break;
-            }
+
+            // Static Enumerable.Contains(collection, item).
+            case "Contains" when node.Arguments.Count == 2:
+                EmitInClause(node.Arguments[0], node.Arguments[1]);
+                break;
             default:
                 // Try to evaluate the method call as a constant
                 try
@@ -335,6 +334,46 @@ internal sealed class PostgreSqlExpressionVisitor : ExpressionVisitor
     /// Escapes LIKE special characters (%, _, \) in a user-supplied value so it is treated
     /// as a literal, not as a wildcard pattern. Non-string values pass through unchanged.
     /// </summary>
+    /// <summary>
+    /// Emits <c>column IN (...)</c> for a membership test, from either the static
+    /// two-argument <c>Enumerable.Contains(collection, item)</c> or the one-argument
+    /// instance form <c>collection.Contains(item)</c>. Both shapes share this body so
+    /// they cannot drift apart.
+    /// </summary>
+    private void EmitInClause(Expression collectionExpr, Expression itemExpr)
+    {
+        // Static Enumerable.Contains(collection, item) or IList.Contains
+        var collection = GetValue(collectionExpr);
+        var entityMember = GetEntityMember(itemExpr);
+        var prevStorageType = _currentComparisonStorageType;
+        if (entityMember is not null)
+            _currentComparisonStorageType = ResolveStorageType(entityMember.Member);
+
+        // Materialise first: an empty set must not emit "IN ()", which is a syntax
+        // error. An empty set matches nothing, so a false literal is the right SQL
+        // and the column reference is skipped entirely.
+        var items = collection is System.Collections.IEnumerable source
+            ? source.Cast<object?>().ToList()
+            : [];
+        if (items.Count == 0)
+        {
+            _sql.Append("FALSE");
+        }
+        else
+        {
+            if (items.Count > _maxInListSize) _maxInListSize = items.Count;
+            Visit(itemExpr);
+            _sql.Append(" IN (");
+            for (var i = 0; i < items.Count; i++)
+            {
+                if (i > 0) _sql.Append(", ");
+                AddParameter(items[i]);
+            }
+            _sql.Append(')');
+        }
+        _currentComparisonStorageType = prevStorageType;
+    }
+
     private static object? EscapeLikeValue(object? value)
     {
         if (value is not string s) return value;

@@ -57,8 +57,8 @@ Schema inspection uses `sys.schemas`, `sys.tables`, `sys.columns`, `sys.types`, 
 
 `[SoftDelete(timestampColumn)]` marks a nullable `DateTime` column as the delete marker.
 `Repository.DeleteAsync` then sets it to `DateTime.UtcNow` instead of issuing a physical
-`DELETE`, and single-table reads (`mssql.Query<T>()` terminals and the repository getters)
-automatically exclude rows where it is set.
+`DELETE`, and single-table reads (`mssql.Query<T>()` terminals and the repository getters —
+including `Repository.CountAsync`) automatically exclude rows where it is set.
 
 ```csharp
 [Table(Name = "accounts", Schema = "dbo")]
@@ -76,8 +76,9 @@ var all = await mssql.Query<Account>().IncludeDeleted().ToListAsync();   // over
 ```
 
 > Auto-filtering applies to single-table reads only. It does **not** apply to joins, subquery
-> filters, or the query builder's bulk `UpdateAsync` / `DeleteAsync` — those stay raw so you can
-> target or restore deleted rows.
+> filters, the query builder's bulk `UpdateAsync` / `DeleteAsync`, or the by-key writes
+> `Repository.UpdateAsync` / `AdjustAsync` / `IncrementAsync` / `DecrementAsync` — those stay
+> raw so you can target or restore deleted rows.
 
 ## Retention
 
@@ -95,14 +96,21 @@ public class AuditLog
 }
 ```
 
-The worker is created during the library's start phase, waits 5 minutes, then runs every 24
-hours. It only starts if, **at that moment**, at least one entity registered through
-`SyncTableAsync<T>` / `SyncSchemaAsync` already carries `[RetainDays]` — entities you sync
-after `CodeLogic.StartAsync()` has returned are not picked up by that background loop.
+The worker is created during the library's start phase and its entity list is **live**: every
+type you register through `SyncTableAsync<T>` / `SyncSchemaAsync` is handed to it, and the
+background loop starts the first time one of them carries `[RetainDays]` — including
+registrations made long after `CodeLogic.StartAsync()` has returned, which is the normal
+application flow. Once running it waits 5 minutes, purges, then repeats every 24 hours, and a
+new entity registered mid-flight is picked up on the next pass.
 
-The library keeps its worker instance private, so for an operator-triggered or test purge
-construct one yourself and call `RunOnceAsync()`, which purges every entity you hand it and
-returns the number of rows deleted:
+For an operator-triggered or test purge, `RunRetentionOnceAsync` runs one pass immediately over
+every registered `[RetainDays]` entity and returns the number of rows deleted:
+
+```csharp
+int removed = await mssql.RunRetentionOnceAsync();
+```
+
+You can also drive a worker of your own over a specific set of entities:
 
 ```csharp
 var worker = new RetentionWorker(mssql.ConnectionManager, logger, [typeof(AuditLog)]);

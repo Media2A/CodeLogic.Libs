@@ -151,18 +151,18 @@ Two files are written on first run.
 | `SyncMode` | `Production` | `Developer` · `Production` · `Migration`. See [Schema & Migrations](schema-migrations.md). |
 | `SchemaSyncLevel` | `Safe` | Low-level cap: `None` · `Safe` · `Additive` · `Full`. |
 | `AllowDestructiveSync` | `false` | Legacy flag honoured under `SyncMode` mapping. |
-| `BackupDirectory` | `null` | Where schema backups are written. |
+| `BackupDirectory` | `null` | Where schema backups are written. `null` uses `<DataDirectory>/backups`; a relative path is resolved against the data directory. |
 | `SlowQueryThresholdMs` | `1000` | Threshold for `SlowQueryEvent`. |
 | `CaptureExplainOnSlowQuery` | `true` | Attach best-effort estimated `SHOWPLAN_XML`. |
-| `QueryTimeoutMs` | `30000` | Reserved — not read by the current code; use `CommandTimeout`. |
-| `MaxBatchInsertSize` | `500` | Insert/upsert chunk size. Reserved — `GetRepository<T>()` does not yet pass it, so repositories chunk at the built-in 500. |
-| `MaxInClauseValues` | `1000` | Reserved — no cap is applied to generated `IN (...)` lists today. |
-| `PreparedStatementCacheSize` | `256` | Reserved — not read by the current code. |
+| `QueryTimeoutMs` | `30000` | Command timeout for the query commands the library issues (repositories, query builder, projections, joins, grouped queries). Overrides the connection string's `Command Timeout` for those; `0` leaves it in place. |
+| `MaxBatchInsertSize` | `500` | Rows per multi-row `INSERT`/upsert statement, capped further by the 2,100-parameter limit. |
+| `MaxInClauseValues` | `1000` | Advisory cap on a generated `IN (...)` list. Exceeding it logs one warning per query build naming the entity and the count — nothing is chunked, truncated or rejected. |
+| `PreparedStatementCacheSize` | `256` | **Obsolete, not applied.** `Microsoft.Data.SqlClient` has no client-side statement cache to size; plan caching is the server's. Configure pooling on the connection string. |
 | `TransientRetryCount` | `3` | Deadlock/lock-wait retries (0 disables). |
 | `TransientRetryBaseDelayMs` | `50` | Base backoff; exponential + jitter. |
-| `N1DetectorThreshold` | `0` | Reserved — the N+1 detector is not wired up yet, so this has no effect. |
-| `CacheEnabledOverride` | `null` | Reserved — not read by the current code; use the global `Enabled` switch. |
-| `DefaultStringSize` | `255` | Reserved — not read by the current code; unsized string columns always infer `nvarchar(255)`. |
+| `N1DetectorThreshold` | `0` | Executions of one normalized statement within a one-second window that raise `N1QueryDetectedEvent`. `0` disables the detector entirely (and costs nothing on the query path). |
+| `CacheEnabledOverride` | `null` | Per-database override of the global cache `Enabled` switch. `null` = no override. |
+| `DefaultStringSize` | `255` | `nvarchar` length inferred for a string property with no explicit `[Column(Size = ...)]`. Changing it changes the generated DDL and therefore the schema CRC. |
 
 `config.mssql.cache.json` (section `mssql.cache`) controls the result cache.
 
@@ -170,10 +170,10 @@ Two files are written on first run.
 |---------|---------|-------|
 | `Enabled` | `true` | Global cache switch. |
 | `MaxEntries` | `10000` | Entry ceiling. |
-| `MaxMemoryMb` | `256` | Advisory only — eviction is by entry count, not memory. |
-| `DefaultTtlSeconds` | `60` | Reserved — `WithCache` has no parameterless overload, so every cached query supplies its own TTL. |
+| `MaxMemoryMb` | `256` | **Obsolete, not applied.** The in-process store evicts by entry count; use `MaxEntries`. |
+| `DefaultTtlSeconds` | `60` | TTL used by the parameterless `.WithCache()` overload. `.WithCache(ttl)` still wins when a query names its own. |
 | `TimeQuantizeSeconds` | `60` | Quantization bucket for DateTime params (see [Performance](performance.md)). |
-| `PublishEvents` | `true` | Reserved — cache hit/miss events are always published once an event bus is bound. |
+| `PublishEvents` | `true` | Publish `CacheHitEvent` / `CacheMissEvent` on every cache lookup. Turn off to silence them; the cache itself is unaffected and `QueryExecutedEvent` still carries `CacheHit`. |
 
 Full caching behaviour is on the [Performance & Caching](performance.md) page.
 
@@ -201,7 +201,7 @@ All events implement `IEvent` and publish to the CodeLogic event bus.
 | `SlowQueryEvent` | A query exceeds `SlowQueryThresholdMs` (carries `ExplainJson`). |
 | `CacheHitEvent` | A cached result satisfies a read. |
 | `CacheMissEvent` | A cacheable read misses the cache. |
-| `N1QueryDetectedEvent` | Declared for the N+1 detector, which is not wired up yet — nothing publishes this today. |
+| `N1QueryDetectedEvent` | One normalized statement runs `N1DetectorThreshold` times on a connection within a second (published once per window; the detector is off at the default threshold of `0`). |
 | `HealthChangedEvent` | The health status transitions. |
 
 ## See also

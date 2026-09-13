@@ -41,7 +41,7 @@ public DateTime UpdatedUtc { get; set; }
 | `Name` | property name | Column name. |
 | `PreviousName` | — | Rename in place via `CHANGE COLUMN`, preserving data. |
 | `DataType` | inferred | Explicit MySQL type (see `DataType` below). |
-| `Size` | `0` | Length for `VarChar`/`Char`/binary (falls back to `DefaultStringSize`). |
+| `Size` | `0` | Length for `VarChar`/`Char`/binary. `0` on an inferred string column falls back to the configured `DefaultStringSize` (255). |
 | `Precision` / `Scale` | `10` / `2` | For `Decimal`. |
 | `Primary` | `false` | Part of the primary key. |
 | `AutoIncrement` | `false` | `AUTO_INCREMENT`. |
@@ -184,8 +184,9 @@ var all = await mysql.Query<Account>().IncludeDeleted().ToListAsync();   // over
 
 > Auto-filtering applies to single-table reads only. It does **not** apply to joins, subquery filters, or the query builder's bulk `UpdateAsync` / `DeleteAsync` — those stay raw so you can target or restore deleted rows.
 
-> `Repository.CountAsync()` is also unfiltered: it issues a bare `SELECT COUNT(*)` and so
-> includes soft-deleted rows. Use `mysql.Query<T>().CountAsync()` for a filtered count.
+> `Repository.CountAsync()` applies the filter like every other repository read, so it agrees
+> with `GetAllAsync()` and `GetPagedAsync()`. Use `mysql.Query<T>().IncludeDeleted().CountAsync()`
+> to count soft-deleted rows as well.
 
 ## Retention
 
@@ -205,12 +206,15 @@ Each pass issues `DELETE FROM table WHERE col < @cutoff LIMIT BatchSize` in a lo
 statement deletes fewer rows than `BatchSize`; the cutoff is computed client-side as
 `DateTime.UtcNow.AddDays(-days)` and bound as a parameter.
 
-The worker is created during library start, waits 5 minutes, then runs every 24 hours. It
-only picks up entity types that were already registered at that point — registration happens
-inside `SyncTableAsync<T>` / `SyncSchemaAsync`, so call those *before* `CodeLogic.StartAsync()`
-if you want retention to cover them. `RetentionWorker.RunOnceAsync()` performs a single purge
-pass synchronously and returns the number of rows deleted — useful for a maintenance command,
-or for a test that should not wait out the timer.
+The worker is created during library start, waits 5 minutes, then runs every 24 hours. Its
+entry list is **live**: registration happens inside `SyncTableAsync<T>` / `SyncSchemaAsync`, and
+an entity registered after `CodeLogic.StartAsync()` — the usual order — is picked up as soon as
+it is registered, starting the loop if it was not already running. There is no need to sync
+retained entities before start.
+
+`mysql.RunRetentionOnceAsync()` (or `RetentionWorker.RunOnceAsync()` on a worker you own)
+performs a single purge pass and returns the number of rows deleted — useful for a maintenance
+command, or for a test that should not wait out the timer.
 
 ## Imperative migrations
 
@@ -274,7 +278,7 @@ Result<MigrationRunResult> rolled =
 
 ## Backups & restore
 
-`SyncTableAsync` / `SyncSchemaAsync` take a schema backup before altering an existing table (controlled by `createBackup`, and always taken in `Migration` mode). Snapshots are DDL-only, captured with `SHOW CREATE TABLE`, and written to `DataDirectory/backups` as `{table}_{yyyyMMdd_HHmmss}.sql` — the `BackupDirectory` configuration field is not currently honoured.
+`SyncTableAsync` / `SyncSchemaAsync` take a schema backup before altering an existing table (controlled by `createBackup`, and always taken in `Migration` mode). Snapshots are DDL-only, captured with `SHOW CREATE TABLE`, and written as `{table}_{yyyyMMdd_HHmmss}.sql` to `DataDirectory/backups`, or to the connection's `BackupDirectory` when that field is set (a relative path resolves under the data directory).
 
 `RestoreSchemaAsync` replays a backup snapshot and clears the table's `__schema_state` row so the next sync reconciles from scratch:
 

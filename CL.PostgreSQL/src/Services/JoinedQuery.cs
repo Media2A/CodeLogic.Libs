@@ -170,10 +170,10 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
                 while (await reader.ReadAsync(ct).ConfigureAwait(false))
                     list.Add(_projection.Materializer(reader));
                 return list;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
-            RecordTiming(sql, sw.ElapsedMilliseconds, items.Count);
+            RecordTiming(sql, sw.ElapsedMilliseconds, items.Count, parms);
             return Result<List<TResult>>.Success(items);
         }
         catch (Exception ex)
@@ -203,7 +203,7 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
             {
                 await using var cmd = BuildCommand(conn, sql, parms);
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<long>.Success(count);
         }
@@ -246,7 +246,7 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
 
     private NpgsqlCommand BuildCommand(NpgsqlConnection conn, string sql, Dictionary<string, object?> parms)
     {
-        var cmd = conn.CreateCommand();
+        var cmd = conn.CreateCommand(_connectionId);
         if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
         cmd.CommandText = sql;
         foreach (var kv in parms)
@@ -254,18 +254,24 @@ public sealed class JoinedQuery<TLeft, TRight, TResult>
         return cmd;
     }
 
-    private async Task<T> ExecuteAsync<T>(Func<NpgsqlConnection, Task<T>> action)
+    private async Task<T> ExecuteAsync<T>(Func<NpgsqlConnection, Task<T>> action, CancellationToken ct)
     {
         if (_transactionScope is not null)
             return await action(_transactionScope.Connection).ConfigureAwait(false);
-        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
+
+        // The token has to reach ExecuteWithConnectionAsync, otherwise opening the
+        // connection (and any transient-failure retry around it) ignores cancellation.
+        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
-    private void RecordTiming(string sql, long elapsedMs, int rowCount)
+    private void RecordTiming(
+        string sql, long elapsedMs, int rowCount, IReadOnlyDictionary<string, object?>? parameters = null)
     {
         QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
+            SlowQueryExplain.Record(
+                _connectionManager, _connectionId, sql, parameters, elapsedMs,
+                insideTransaction: _transactionScope is not null);
     }
 
     private string DescribeForLog()

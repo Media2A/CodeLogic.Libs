@@ -69,6 +69,18 @@ public sealed class ConnectionManager
     public string GetConnectionString(string connectionId = "Default")
         => RequireConfig(connectionId).BuildConnectionString();
 
+    /// <summary>
+    /// The command timeout, in whole seconds, that library-issued query commands should carry
+    /// for this connection id — <see cref="SqlServerDatabaseConfig.QueryTimeoutMs"/> rounded up.
+    /// Returns null when the connection is unknown or the timeout is set to 0, in which case the
+    /// command keeps whatever the connection string's <c>Command Timeout</c> gave it.
+    /// </summary>
+    internal int? QueryCommandTimeoutSeconds(string connectionId)
+    {
+        var ms = GetConfiguration(connectionId)?.QueryTimeoutMs ?? 0;
+        return ms <= 0 ? null : Math.Max(1, (int)Math.Ceiling(ms / 1000.0));
+    }
+
     // ── Connection lifecycle ───────────────────────────────────────────────────
 
     /// <summary>

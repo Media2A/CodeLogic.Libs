@@ -68,14 +68,14 @@ public sealed class Repository<T> where T : class, new()
             // an integer sequence, and it is unambiguous under concurrency.
             var pkCol = EntityMetadata<T>.PrimaryKey;
             var returning = pkCol is null ? string.Empty : $" RETURNING {PostgreSqlDialect.Quote(pkCol.ColumnName)}";
-            var sql = $"INSERT INTO {EntityMetadata<T>.QualifiedTableName} ({columnList}) VALUES ({paramList}){returning};";
+            var sql = $"INSERT INTO {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} ({columnList}) VALUES ({paramList}){returning};";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
             var lastId = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
@@ -127,7 +127,7 @@ public sealed class Repository<T> where T : class, new()
                     var end = Math.Min(start + batchSize, list.Count);
                     var count = end - start;
 
-                    await using var cmd = conn.CreateCommand();
+                    await using var cmd = conn.CreateCommand(_connectionId);
                     if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
 
                     var valueTuples = new string[count];
@@ -144,7 +144,7 @@ public sealed class Repository<T> where T : class, new()
                         valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
                     }
 
-                    cmd.CommandText = $"INSERT INTO {EntityMetadata<T>.QualifiedTableName} ({columnList}) VALUES {string.Join(", ", valueTuples)};";
+                    cmd.CommandText = $"INSERT INTO {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} ({columnList}) VALUES {string.Join(", ", valueTuples)};";
                     LogQuery(cmd.CommandText);
                     await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                     inserted += count;
@@ -204,14 +204,14 @@ public sealed class Repository<T> where T : class, new()
             // DO NOTHING when every column is part of the key: DO UPDATE with an empty SET is a
             // syntax error, and there would be nothing to change anyway.
             var action = updateList.Length == 0 ? "DO NOTHING" : $"DO UPDATE SET {updateList}";
-            var sql = $"INSERT INTO {EntityMetadata<T>.QualifiedTableName} ({columnList}) VALUES ({paramList}) ON CONFLICT ({targetList}) {action}{returning};";
+            var sql = $"INSERT INTO {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} ({columnList}) VALUES ({paramList}) ON CONFLICT ({targetList}) {action}{returning};";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
             var lastId = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
@@ -282,7 +282,7 @@ public sealed class Repository<T> where T : class, new()
                     var end = Math.Min(start + batchSize, list.Count);
                     var count = end - start;
 
-                    await using var cmd = conn.CreateCommand();
+                    await using var cmd = conn.CreateCommand(_connectionId);
                     if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
 
                     var valueTuples = new string[count];
@@ -299,7 +299,7 @@ public sealed class Repository<T> where T : class, new()
                         valueTuples[i] = "(" + string.Join(", ", tupleParts) + ")";
                     }
 
-                    cmd.CommandText = $"INSERT INTO {EntityMetadata<T>.QualifiedTableName} ({columnList}) VALUES {string.Join(", ", valueTuples)} ON CONFLICT ({targetList}) {action};";
+                    cmd.CommandText = $"INSERT INTO {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} ({columnList}) VALUES {string.Join(", ", valueTuples)} ON CONFLICT ({targetList}) {action};";
                     LogQuery(cmd.CommandText);
                     affected += await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
@@ -385,7 +385,7 @@ public sealed class Repository<T> where T : class, new()
             var targetList = string.Join(", ", target.Select(c => PostgreSqlDialect.Quote(c.ColumnName)));
             // EXCLUDED.col is the value proposed for insertion; the table-qualified name is the
             // existing row, so `counter = tbl.counter + EXCLUDED.counter` accumulates.
-            var qualified = EntityMetadata<T>.QualifiedTableName;
+            var qualified = EntityMetadata<T>.QualifiedTableNameFor(_connectionId);
             var updateClauses = incrementCols
                 .Select(c => $"{PostgreSqlDialect.Quote(c.ColumnName)} = {qualified}.{PostgreSqlDialect.Quote(c.ColumnName)} + EXCLUDED.{PostgreSqlDialect.Quote(c.ColumnName)}")
                 .Concat(setCols.Select(c => $"{PostgreSqlDialect.Quote(c.ColumnName)} = EXCLUDED.{PostgreSqlDialect.Quote(c.ColumnName)}"));
@@ -396,7 +396,7 @@ public sealed class Repository<T> where T : class, new()
 
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in insertCols)
@@ -486,14 +486,14 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
-            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableName} WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @id{SoftAnd()} LIMIT 1";
+            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @id{SoftAnd()} LIMIT 1";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
             var result = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
@@ -521,14 +521,14 @@ public sealed class Repository<T> where T : class, new()
         {
             var col = EntityMetadata<T>.RequireColumn(column);
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableName} WHERE {PostgreSqlDialect.Quote(col.ColumnName)} = @val{SoftAnd()}";
+            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} WHERE {PostgreSqlDialect.Quote(col.ColumnName)} = @val{SoftAnd()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@val", TypeConverter.ToDbValue(value, col.EffectiveStorageType), col.Attribute, col.Property.PropertyType));
@@ -556,14 +556,14 @@ public sealed class Repository<T> where T : class, new()
         try
         {
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableName}{SoftWhere()}";
+            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{SoftWhere()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -604,20 +604,20 @@ public sealed class Repository<T> where T : class, new()
                 ? $" ORDER BY {PostgreSqlDialect.Quote(orderCol)} {(descending ? "DESC" : "ASC")}"
                 : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableName}{SoftWhere()}";
-            var dataSql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableName}{SoftWhere()}{orderClause} LIMIT {pageSize} OFFSET {offset}";
+            var countSql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{SoftWhere()}";
+            var dataSql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{SoftWhere()}{orderClause} LIMIT {pageSize} OFFSET {offset}";
 
             LogQuery(dataSql);
             var sw = Stopwatch.StartNew();
 
             var (items, total) = await ExecuteAsync(async conn =>
             {
-                await using var countCmd = conn.CreateCommand();
+                await using var countCmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) countCmd.Transaction = _transactionScope.Transaction;
                 countCmd.CommandText = countSql;
                 var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
 
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = dataSql;
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -645,18 +645,23 @@ public sealed class Repository<T> where T : class, new()
         }
     }
 
-    /// <summary>Returns the total row count for the table.</summary>
+    /// <summary>
+    /// Returns the total row count for the table. On a <c>[SoftDelete]</c> entity, rows whose
+    /// delete timestamp is set are excluded — the same filter <see cref="GetAllAsync"/> and
+    /// <see cref="GetPagedAsync"/> apply. Use <c>Query&lt;T&gt;().IncludeDeleted().CountAsync()</c>
+    /// to count them too.
+    /// </summary>
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
         {
             var table = EntityMetadata<T>.TableName;
-            var sql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableName}";
+            var sql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)}{SoftWhere()}";
             LogQuery(sql);
 
             var count = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
@@ -680,14 +685,14 @@ public sealed class Repository<T> where T : class, new()
             var pk = EntityMetadata<T>.RequirePrimaryKey();
             var setCols = EntityMetadata<T>.Columns.Where(c => c != pk).ToArray();
             var setClauses = string.Join(", ", setCols.Select(c => $"{PostgreSqlDialect.Quote(c.ColumnName)} = @{c.ColumnName}"));
-            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableName} SET {setClauses} WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @__pk";
+            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} SET {setClauses} WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @__pk";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
             await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var col in setCols)
@@ -731,12 +736,12 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
-            var sql = $"DELETE FROM {EntityMetadata<T>.QualifiedTableName} WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @id";
+            var sql = $"DELETE FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @id";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType), pk.Attribute, pk.Property.PropertyType));
@@ -759,13 +764,13 @@ public sealed class Repository<T> where T : class, new()
         {
             var table = EntityMetadata<T>.TableName;
             var pk = EntityMetadata<T>.RequirePrimaryKey();
-            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableName} SET {PostgreSqlDialect.Quote(soft.ColumnName)} = @now " +
+            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} SET {PostgreSqlDialect.Quote(soft.ColumnName)} = @now " +
                       $"WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @id AND {PostgreSqlDialect.Quote(soft.ColumnName)} IS NULL";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@now", DateTime.UtcNow, soft.Attribute, soft.Property.PropertyType));
@@ -805,12 +810,12 @@ public sealed class Repository<T> where T : class, new()
             var pk = EntityMetadata<T>.RequirePrimaryKey();
             var colName = PostgreSqlExpressionVisitor.TranslateSelector(propertySelector);
             var deltaCol = EntityMetadata<T>.RequireColumn(colName);
-            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableName} SET {PostgreSqlDialect.Quote(colName)} = {PostgreSqlDialect.Quote(colName)} + @delta WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @id";
+            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} SET {PostgreSqlDialect.Quote(colName)} = {PostgreSqlDialect.Quote(colName)} + @delta WHERE {PostgreSqlDialect.Quote(pk.ColumnName)} = @id";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 cmd.Parameters.Add(TypeConverter.CreateParameter("@delta", TypeConverter.ToDbValue(delta, deltaCol.EffectiveStorageType), deltaCol.Attribute, deltaCol.Property.PropertyType));
@@ -854,15 +859,20 @@ public sealed class Repository<T> where T : class, new()
         try
         {
             var table = EntityMetadata<T>.TableName;
-            var (whereClause, parameters) = PostgreSqlExpressionVisitor.Translate(predicate);
-            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableName} WHERE {whereClause}{SoftAnd()}";
+            var (whereClause, parameters, maxInList) = PostgreSqlExpressionVisitor.TranslateWithStats(predicate);
+            var inLimit = PostgreSqlRuntimeOptions.For(_connectionId).MaxInClauseValues;
+            if (maxInList > inLimit)
+                _logger?.Warning(
+                    $"[PostgreSQL] [{_connectionId}] {typeof(T).Name}: generated IN list has {maxInList} values, " +
+                    $"above the configured MaxInClauseValues of {inLimit}. The list is sent whole.");
+            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableNameFor(_connectionId)} WHERE {whereClause}{SoftAnd()}";
 
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
             var list = await ExecuteAsync(async conn =>
             {
-                await using var cmd = conn.CreateCommand();
+                await using var cmd = conn.CreateCommand(_connectionId);
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 foreach (var kv in parameters)
@@ -875,7 +885,7 @@ public sealed class Repository<T> where T : class, new()
             }, ct).ConfigureAwait(false);
 
             sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
+            LogSlowQuery(sql, sw.ElapsedMilliseconds, parameters);
             return Result<List<T>>.Success(list);
         }
         catch (Exception ex)
@@ -899,11 +909,18 @@ public sealed class Repository<T> where T : class, new()
         return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
-    private void LogSlowQuery(string sql, long elapsedMs)
+    /// <summary>
+    /// Publishes the per-query observability events. <paramref name="parameters"/> is
+    /// forwarded to the EXPLAIN capture on the slow path; when it is null a parameterized
+    /// statement is simply not explained (see <see cref="SlowQueryExplain"/>).
+    /// </summary>
+    private void LogSlowQuery(string sql, long elapsedMs, IReadOnlyDictionary<string, object?>? parameters = null)
     {
         QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount: -1, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
+            SlowQueryExplain.Record(
+                _connectionManager, _connectionId, sql, parameters, elapsedMs,
+                insideTransaction: _transactionScope is not null);
     }
 
     private void LogQuery(string sql)

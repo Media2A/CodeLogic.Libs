@@ -78,7 +78,8 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     public QueryBuilder<T> Where(Expression<Func<T, bool>> predicate)
     {
-        var (clause, parms) = SqlServerExpressionVisitor.Translate(predicate);
+        var (clause, parms) = SqlServerExpressionVisitor.Translate(predicate, string.Empty, out var inListCount);
+        WarnOnLargeInList(inListCount);
         // Re-key parameters to avoid collisions. Longer parameter names are replaced
         // first so @p1 can't clobber a substring of @p10/@p11 (predicates with 11+ params).
         var rekeyed = new Dictionary<string, object?>();
@@ -346,9 +347,22 @@ public sealed class QueryBuilder<T> where T : class, new()
 
         var sql = $"SELECT {topSql}{compiled.SelectList} FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}{orderBySql}{pagingSql}";
 
+        // A subquery-filtered query is not cacheable — the cache stamps an entry with a single
+        // table's version, so a mutation on the EXISTS / IN inner table could never invalidate
+        // it. ShouldCache / ShouldSmartCache refuse it here; the projection must refuse it too,
+        // otherwise .WhereExists(...).Select(...).WithCache(...) would serve a stale cross-table
+        // result.
+        var projectionCacheTtl = _hasSubqueryWhere ? null : _cacheTtl;
+        var projectionCachePool = _hasSubqueryWhere ? null : _smartCachePool;
+        if (_hasSubqueryWhere && (_cacheTtl is not null || _smartCachePool is not null))
+            _logger?.Warning(
+                "[MSSQL] Caching is not applied to a projected query with a subquery filter " +
+                "(WhereExists / WhereIn) — the entry could not be invalidated by the inner table.");
+
         return new ProjectedQuery<T, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl, _smartCachePool);
+            _slowQueryThresholdMs, sql, parms, compiled, projectionCacheTtl, projectionCachePool,
+            cacheDisallowed: _hasSubqueryWhere);
     }
 
     /// <summary>
@@ -360,10 +374,12 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         EnsureCursorNotSet(nameof(GroupBy));
         var (whereClause, parms) = BuildWhereSql();
+        // Same guard as Select: a grouped projection over a subquery filter is not cacheable.
         return new GroupedQuery<TKey, T>(
             _connectionManager, _logger, _connectionId, _transactionScope,
             _slowQueryThresholdMs, whereClause, parms, keySelector,
-            _cacheTtl, _orderBys, _limit, _offset);
+            _hasSubqueryWhere ? null : _cacheTtl, _orderBys, _limit, _offset,
+            cacheDisallowed: _hasSubqueryWhere);
     }
 
     public QueryBuilder<T> WithConnection(string connectionId)
@@ -395,6 +411,13 @@ public sealed class QueryBuilder<T> where T : class, new()
     }
 
     /// <summary>
+    /// Enable result caching using the configured default TTL
+    /// (<c>mssql.cache</c> → <c>DefaultTtlSeconds</c>, 60 s out of the box). Equivalent to
+    /// <see cref="WithCache(TimeSpan)"/> with that value.
+    /// </summary>
+    public QueryBuilder<T> WithCache() => WithCache(QueryCache.DefaultTtl);
+
+    /// <summary>
     /// Opt this query into a named <see cref="SmartCachePool"/>. The pool's
     /// background timer keeps the cache entry warm — readers never block on
     /// the DB once the entry is populated. The pool must be registered via
@@ -419,6 +442,22 @@ public sealed class QueryBuilder<T> where T : class, new()
     // _cacheTtl ("Nullable object must have a value").
     // Subquery-filtered queries are not cacheable: the cache stamps entries with a single
     // table's version, so a mutation on the EXISTS/IN inner table couldn't invalidate them.
+    // MaxInClauseValues is advisory: a list above it still executes (chunking or throwing
+    // would break callers who exceed it today), but it is logged once per query build.
+    private bool _inListWarningIssued;
+
+    private void WarnOnLargeInList(int count)
+    {
+        if (count <= 0 || _inListWarningIssued) return;
+        var max = _connectionManager.GetConfiguration(_connectionId)?.MaxInClauseValues ?? 0;
+        if (max <= 0 || count <= max) return;
+        _inListWarningIssued = true;
+        _logger?.Warning(
+            $"[MSSQL] {typeof(T).Name}: a generated IN (...) list holds {count} values, above the " +
+            $"configured MaxInClauseValues of {max}. The query still runs — consider a join or a " +
+            "temp table if SQL Server rejects it on the 2,100-parameter limit.");
+    }
+
     private bool ShouldCache => _cacheTtl is not null && _transactionScope is null && !_hasSubqueryWhere;
     private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null && !_hasSubqueryWhere;
 
@@ -1109,6 +1148,10 @@ public sealed class QueryBuilder<T> where T : class, new()
     private SqlCommand BuildCommand(SqlConnection conn, string sql, Dictionary<string, object?> parms)
     {
         var cmd = conn.CreateCommand();
+        // Configured QueryTimeoutMs wins over the connection string's Command Timeout for
+        // commands this library issues.
+        if (_connectionManager.QueryCommandTimeoutSeconds(_connectionId) is { } timeoutSeconds)
+            cmd.CommandTimeout = timeoutSeconds;
         if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
         cmd.CommandText = sql;
         foreach (var kv in parms)

@@ -42,6 +42,41 @@ public static class QueryCache
     /// <summary>Whether the cache is enabled globally.</summary>
     internal static bool Enabled { get; private set; } = true;
 
+    /// <summary>Whether a lookup publishes <c>CacheHitEvent</c> / <c>CacheMissEvent</c>.</summary>
+    internal static bool PublishEvents { get; private set; } = true;
+
+    /// <summary>
+    /// TTL applied by the parameterless <c>WithCache()</c> overload, from
+    /// <see cref="Configuration.CacheConfiguration.DefaultTtlSeconds"/>.
+    /// </summary>
+    internal static TimeSpan DefaultTtl { get; private set; } = TimeSpan.FromSeconds(60);
+
+    // Per-database overrides of the global switch, from each database's
+    // SqlServerDatabaseConfig.CacheEnabledOverride. Absent = inherit the global switch.
+    private static readonly ConcurrentDictionary<string, bool> _enabledOverrides =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Registers (or clears, when <paramref name="enabled"/> is null) a per-database override
+    /// of the global <see cref="Enabled"/> switch. Called by <c>MSSQLLibrary</c> at init.
+    /// </summary>
+    public static void SetConnectionOverride(string connectionId, bool? enabled)
+    {
+        if (enabled is null) _enabledOverrides.TryRemove(connectionId, out _);
+        else _enabledOverrides[connectionId] = enabled.Value;
+    }
+
+    /// <summary>
+    /// The effective cache switch for a connection: its <c>CacheEnabledOverride</c> when set,
+    /// otherwise the global <see cref="Enabled"/> flag.
+    /// </summary>
+    internal static bool IsEnabledFor(string? connectionId)
+    {
+        if (connectionId is not null && _enabledOverrides.TryGetValue(connectionId, out var overridden))
+            return overridden;
+        return Enabled;
+    }
+
     /// <summary>Replace the underlying store (e.g. with a Redis adapter).</summary>
     public static void UseStore(ICacheStore store) =>
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -62,10 +97,17 @@ public static class QueryCache
     internal static ICacheCoordinator Coordinator => _coordinator;
 
     /// <summary>Apply runtime configuration from <see cref="Configuration.CacheConfiguration"/>.</summary>
-    public static void Configure(bool enabled, int maxEntries, int timeQuantizeSeconds)
+    public static void Configure(
+        bool enabled,
+        int maxEntries,
+        int timeQuantizeSeconds,
+        int defaultTtlSeconds = 60,
+        bool publishEvents = true)
     {
         Enabled = enabled;
         TimeQuantizeSeconds = Math.Max(0, timeQuantizeSeconds);
+        DefaultTtl = TimeSpan.FromSeconds(Math.Max(1, defaultTtlSeconds));
+        PublishEvents = publishEvents;
         if (_store is InProcessCacheStore inProc) inProc.Configure(maxEntries);
     }
 
@@ -86,12 +128,12 @@ public static class QueryCache
         string cacheKey, string tableName, Func<Task<T>> factory, TimeSpan ttl,
         string? connectionId = null)
     {
-        if (!Enabled) return await factory().ConfigureAwait(false);
+        if (!IsEnabledFor(connectionId)) return await factory().ConfigureAwait(false);
 
         var (found, value) = await _store.TryGetAsync(cacheKey).ConfigureAwait(false);
         if (found && !IsFailureResult(value))
         {
-            if (connectionId is not null)
+            if (connectionId is not null && PublishEvents)
                 QueryObservability.RecordCacheHit(connectionId, tableName, cacheKey);
             return (T)value!;
         }
@@ -101,7 +143,7 @@ public static class QueryCache
         if (found)
             await _store.EvictAsync(cacheKey).ConfigureAwait(false);
 
-        if (connectionId is not null)
+        if (connectionId is not null && PublishEvents)
             QueryObservability.RecordCacheMiss(connectionId, tableName, cacheKey);
 
         // Single-flight: the first caller to miss creates the in-flight task; concurrent

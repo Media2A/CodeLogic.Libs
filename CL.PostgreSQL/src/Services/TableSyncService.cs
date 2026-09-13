@@ -90,7 +90,9 @@ public sealed class TableSyncService
         bool lockHeld = false)
     {
         var tableName = SchemaAnalyzer.GetTableName(entityType);
-        var schemaName = SchemaAnalyzer.GetSchemaName(entityType);
+        // An entity with no [Table(Schema = ...)] lands in the schema this connection
+        // configured as its DefaultSchema, so the name has to be resolved per connection.
+        var schemaName = SchemaAnalyzer.GetSchemaName(entityType, connectionId);
         // Tables are unique per schema, not per database, so the sentinel key must carry
         // the schema. Keying on the bare name let two same-named entities in different
         // schemas share one row and mask each other's CRC.
@@ -123,7 +125,7 @@ public sealed class TableSyncService
             }
 
             // ── CRC fast-path ── consult the sentinel before any pg_catalog diffing.
-            var modelCrc = _analyzer.ComputeSchemaCrc(entityType);
+            var modelCrc = _analyzer.ComputeSchemaCrc(entityType, connectionId);
             var state = await _stateStore.GetStateAsync(stateKey, connectionId, ct).ConfigureAwait(false);
 
             // Skip only when the CRC matches, the row is Synced, AND the table really exists — a
@@ -175,7 +177,7 @@ public sealed class TableSyncService
                 if (!tableExists)
                 {
                     // CREATE TABLE
-                    var createSql = _analyzer.GenerateCreateTable(entityType);
+                    var createSql = _analyzer.GenerateCreateTable(entityType, connectionId);
                     await ExecuteSqlAsync(createSql, connectionId, ct).ConfigureAwait(false);
                     operations.Add($"CREATE TABLE {PostgreSqlDialect.Qualify(schemaName, tableName)}");
                     _logger?.Info($"[PostgreSQL] Created table `{tableName}`");
@@ -194,7 +196,7 @@ public sealed class TableSyncService
 
                     // ALTER TABLE as needed at the mode's level.
                     var alterStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
-                        await _analyzer.GenerateAlterStatementsAsync(entityType, conn, level, ct).ConfigureAwait(false),
+                        await _analyzer.GenerateAlterStatementsAsync(entityType, conn, level, ct, connectionId).ConfigureAwait(false),
                         connectionId, ct).ConfigureAwait(false);
 
                     foreach (var stmt in alterStatements)
@@ -209,7 +211,7 @@ public sealed class TableSyncService
                     if (level < SchemaSyncLevel.Full)
                     {
                         var fullStatements = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
-                            await _analyzer.GenerateAlterStatementsAsync(entityType, conn, SchemaSyncLevel.Full, ct).ConfigureAwait(false),
+                            await _analyzer.GenerateAlterStatementsAsync(entityType, conn, SchemaSyncLevel.Full, ct, connectionId).ConfigureAwait(false),
                             connectionId, ct).ConfigureAwait(false);
                         if (fullStatements.Any(IsDestructive))
                         {
@@ -230,7 +232,7 @@ public sealed class TableSyncService
                 // so a half-applied table is intentionally left without an updated CRC and retried.
                 await _stateStore.UpsertStateAsync(
                     stateKey, modelCrc, status, mode.ToString(), _appVersion,
-                    _analyzer.GenerateCreateTable(entityType), connectionId, ct).ConfigureAwait(false);
+                    _analyzer.GenerateCreateTable(entityType, connectionId), connectionId, ct).ConfigureAwait(false);
 
                 sw.Stop();
                 var syncResult = new SyncResult
@@ -311,7 +313,6 @@ public sealed class TableSyncService
             foreach (var entityType in types)
             {
                 var tableName = SchemaAnalyzer.GetTableName(entityType);
-                var schemaName = SchemaAnalyzer.GetSchemaName(entityType);
                 try
                 {
                     var result = await SyncTableCoreAsync(entityType, createBackup, connectionId, ct, lockHeld: lockHeld)

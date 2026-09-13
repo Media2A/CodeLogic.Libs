@@ -46,7 +46,7 @@ public sealed class BackupManager
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             Directory.CreateDirectory(backupDir);
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
@@ -87,7 +87,7 @@ public sealed class BackupManager
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             Directory.CreateDirectory(backupDir);
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
@@ -118,12 +118,15 @@ public sealed class BackupManager
         }
     }
 
-    /// <summary>Removes backup files older than the specified number of days.</summary>
-    public async Task<Result<int>> CleanupOldBackupsAsync(int olderThanDays = 30)
+    /// <summary>
+    /// Removes backup files older than the specified number of days, from the backup
+    /// directory configured for <paramref name="connectionId"/>.
+    /// </summary>
+    public async Task<Result<int>> CleanupOldBackupsAsync(int olderThanDays = 30, string connectionId = "Default")
     {
         try
         {
-            var backupDir = GetBackupDirectory();
+            var backupDir = GetBackupDirectory(connectionId);
             if (!Directory.Exists(backupDir))
                 return Result<int>.Success(0);
 
@@ -158,9 +161,10 @@ public sealed class BackupManager
     /// </summary>
     public string? GetLatestBackupFile(
         string tableName,
-        string schemaName = PostgreSqlDialect.DefaultSchema)
+        string schemaName = PostgreSqlDialect.DefaultSchema,
+        string connectionId = "Default")
     {
-        var backupDir = GetBackupDirectory();
+        var backupDir = GetBackupDirectory(connectionId);
         if (!Directory.Exists(backupDir)) return null;
         return Directory.GetFiles(backupDir, $"{BackupStem(schemaName, tableName)}_*.sql")
             .OrderByDescending(f => new FileInfo(f).LastWriteTimeUtc)
@@ -182,7 +186,7 @@ public sealed class BackupManager
         var qualified = PostgreSqlDialect.Qualify(schemaName, tableName);
         try
         {
-            var file = backupFile ?? GetLatestBackupFile(tableName, schemaName);
+            var file = backupFile ?? GetLatestBackupFile(tableName, schemaName, connectionId);
             if (file is null || !File.Exists(file))
                 return Result<bool>.Failure(Error.Internal(
                     "postgresql.restore_not_found", $"No schema backup found for {qualified}."));
@@ -238,7 +242,17 @@ public sealed class BackupManager
 
     // ── Private helpers ────────────────────────────────────────────────────────
 
-    private string GetBackupDirectory() => Path.Combine(_dataDirectory, "backups");
+    /// <summary>
+    /// Where backups for a connection are written: its configured <c>BackupDirectory</c>
+    /// when set, otherwise <c>DataDirectory/backups</c>.
+    /// </summary>
+    private string GetBackupDirectory(string? connectionId = null)
+    {
+        var configured = Core.PostgreSqlRuntimeOptions.For(connectionId).BackupDirectory;
+        return string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(_dataDirectory, "backups")
+            : configured;
+    }
 
     /// <summary>
     /// Builds the filename stem for a backup. Any character that is not safe in a path is

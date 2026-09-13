@@ -104,10 +104,14 @@ public sealed class MySqlDatabaseConfig
     public bool EnableSsl { get; set; } = false;
 
     /// <summary>
-    /// Path to a client SSL certificate file. Optional. Not currently applied — the connection
-    /// string sets only <c>SslMode</c> from <see cref="EnableSsl"/>.
+    /// Path to a PEM certificate-authority file used to verify the server's certificate.
+    /// Optional; only honoured when <see cref="EnableSsl"/> is true, in which case it is written
+    /// to the connection string as MySqlConnector's <c>SslCa</c> and the SSL mode is raised to
+    /// <see cref="MySqlSslMode.VerifyCA"/> (a CA is pointless without verification).
+    /// Blank leaves the connection at <c>SslMode=Required</c> with no chain validation.
     /// </summary>
-    [ConfigField(Label = "SSL Certificate Path", Description = "Optional path to a client certificate file.",
+    [ConfigField(Label = "SSL CA Certificate Path",
+        Description = "Optional PEM CA file used to verify the server certificate. Applied only when SSL is enabled; raises SSL mode to VerifyCA.",
         RequiresRestart = true, Group = "Security", Order = 41)]
     public string? SslCertificatePath { get; set; }
 
@@ -192,8 +196,9 @@ public sealed class MySqlDatabaseConfig
         };
 
     /// <summary>
-    /// Intended directory for schema backup files. Not currently applied —
-    /// <see cref="Services.BackupManager"/> always writes to <c>DataDirectory/backups</c>.
+    /// Directory for schema backup files. Blank (the default) keeps
+    /// <see cref="Services.BackupManager"/> writing to <c>DataDirectory/backups</c>; when set,
+    /// backups for this connection are written to (and read back from) the given directory.
     /// </summary>
     [ConfigField(Label = "Backup Directory", Description = "Override where schema backups are stored. Blank = default data/backups folder.",
         Group = "Schema Sync", Order = 62, Collapsed = true)]
@@ -206,8 +211,9 @@ public sealed class MySqlDatabaseConfig
     public int SlowQueryThresholdMs { get; set; } = 1000;
 
     /// <summary>
-    /// Intended per-database override for the global cache switch. Not currently applied —
-    /// only the global <see cref="CacheConfiguration.Enabled"/> switch is honoured.
+    /// Per-database override for the global cache switch. Null (the default) inherits
+    /// <see cref="CacheConfiguration.Enabled"/>; a non-null value wins over it for queries
+    /// running on this connection.
     /// </summary>
     [ConfigField(Label = "Cache Enabled Override",
         Description = "Override the global cache switch for this database only. Leave empty to inherit.",
@@ -215,18 +221,21 @@ public sealed class MySqlDatabaseConfig
     public bool? CacheEnabledOverride { get; set; } = null;
 
     /// <summary>
-    /// Intended default per-query timeout in milliseconds. Not currently applied — commands
-    /// use MySqlConnector's <see cref="CommandTimeout"/> (seconds) from the connection string.
+    /// Default per-query timeout in milliseconds, applied as <c>CommandTimeout</c> on the
+    /// commands the repository, query builder, projections, joins and the raw-SQL helpers
+    /// create (rounded up to whole seconds — MySqlConnector's unit). 0 leaves each command at
+    /// the connection string's <see cref="CommandTimeout"/>. Default 30000 matches that 30s
+    /// default, so the effective timeout is unchanged unless you change this.
     /// </summary>
     [ConfigField(Label = "Query Timeout (ms)", Min = 0,
-        Description = "Default per-query timeout in ms. Used when no .WithTimeout() override is set.",
+        Description = "Per-query command timeout in ms (rounded up to seconds). 0 = use the connection's Command Timeout.",
         Group = "Timeouts", Order = 32, Collapsed = true)]
     public int QueryTimeoutMs { get; set; } = 30_000;
 
     /// <summary>
-    /// Intended chunk size for <c>InsertManyAsync</c> / <c>UpsertManyAsync</c>. Not currently
-    /// applied — <c>MySQL2Library.GetRepository&lt;T&gt;</c> constructs the repository with its
-    /// own default of 500 rows per batched statement.
+    /// Chunk size for <c>InsertManyAsync</c> / <c>UpsertManyAsync</c>: rows per batched
+    /// statement. Passed to every <c>Repository&lt;T&gt;</c> created by
+    /// <c>MySQL2Library.GetRepository&lt;T&gt;</c>. Default: 500.
     /// </summary>
     [ConfigField(Label = "Max Batch Insert Size", Min = 1, Max = 10_000,
         Description = "Number of rows per batched INSERT statement.",
@@ -234,20 +243,24 @@ public sealed class MySqlDatabaseConfig
     public int MaxBatchInsertSize { get; set; } = 500;
 
     /// <summary>
-    /// Intended maximum number of values in a parameterized <c>IN (...)</c> clause. Not currently
-    /// applied — a collection <c>Contains</c> translation emits one parameter per value, uncapped.
+    /// Advisory ceiling on the number of values in a generated <c>IN (...)</c> clause. Nothing is
+    /// chunked or rejected — a collection <c>Contains</c> still emits one parameter per value —
+    /// but a translation that exceeds this logs one warning naming the entity and the count.
+    /// Default: 1000.
     /// </summary>
     [ConfigField(Label = "Max IN-Clause Values", Min = 1, Max = 65_000,
-        Description = "Above this, IN-clause queries auto-chunk or fall back to a temp table.",
+        Description = "Warn (once per query build) when a generated IN (...) list exceeds this many values. Nothing is chunked or rejected.",
         Group = "Performance", Order = 81, Collapsed = true)]
     public int MaxInClauseValues { get; set; } = 1_000;
 
     /// <summary>
-    /// Intended per-connection prepared statement cache size. Not currently applied — it is not
-    /// written into the connection string.
+    /// Obsolete and ignored. Statement caching is the provider's concern: set MySqlConnector's
+    /// <c>IgnorePrepare=false</c> on the connection string instead. Retained so existing config
+    /// files keep deserializing.
     /// </summary>
+    [Obsolete("Statement caching is configured on the MySqlConnector connection string (IgnorePrepare=false); this value is ignored.")]
     [ConfigField(Label = "Prepared Statement Cache Size", Min = 0,
-        Description = "Number of prepared statements kept per connection.",
+        Description = "Obsolete and ignored — configure statement caching on the MySqlConnector connection string (IgnorePrepare=false).",
         Group = "Performance", Order = 82, Collapsed = true)]
     public int PreparedStatementCacheSize { get; set; } = 256;
 
@@ -272,29 +285,33 @@ public sealed class MySqlDatabaseConfig
     public int TransientRetryBaseDelayMs { get; set; } = 50;
 
     /// <summary>
-    /// Intended threshold for warning when the same query template fires this many times inside
-    /// a single request scope. Not currently applied — no code path counts query templates, so
-    /// <c>N1QueryDetectedEvent</c> is never published regardless of this value.
+    /// Publish <c>N1QueryDetectedEvent</c> when the same normalized query template executes this
+    /// many times on this connection within a one-second rolling window. The event fires once per
+    /// window, not on every further execution. 0 (the default) disables detection entirely, and
+    /// costs nothing on the query path.
     /// </summary>
     [ConfigField(Label = "N+1 Detector Threshold", Min = 0,
-        Description = "Warn when the same query template fires N times in one request scope. 0 disables.",
+        Description = "Publish N1QueryDetectedEvent when one query template repeats this many times within a second. 0 disables.",
         Group = "Observability", Order = 90, Collapsed = true)]
     public int N1DetectorThreshold { get; set; } = 0;
 
     /// <summary>
-    /// Intended to capture <c>EXPLAIN FORMAT=JSON</c> on a slow query and attach it to the
-    /// <c>SlowQueryEvent</c>. Not currently applied — no <c>EXPLAIN</c> is ever run, so
-    /// <c>SlowQueryEvent.ExplainJson</c> is always null.
+    /// When true, a slow query additionally runs <c>EXPLAIN FORMAT=JSON</c> on a separate pooled
+    /// connection (never the caller's transaction) and attaches the plan to
+    /// <c>SlowQueryEvent.ExplainJson</c>. Strictly best-effort: statements that cannot be
+    /// explained (DDL, multi-statement batches) are skipped and any failure is swallowed — the
+    /// event still publishes, with a null payload. Default: false.
     /// </summary>
     [ConfigField(Label = "Capture EXPLAIN On Slow",
-        Description = "On slow query, run EXPLAIN FORMAT=JSON and attach to the event.",
+        Description = "On a slow query, run EXPLAIN FORMAT=JSON on a separate connection and attach the plan to SlowQueryEvent.",
         Group = "Observability", Order = 91, Collapsed = true)]
-    public bool CaptureExplainOnSlowQuery { get; set; } = true;
+    public bool CaptureExplainOnSlowQuery { get; set; } = false;
 
     /// <summary>
-    /// Intended default VARCHAR length when a string property has no explicit
-    /// <c>[Column(Size = …)]</c>. Not currently applied — type inference is hard-wired to the
-    /// same value, 255, so changing this has no effect.
+    /// Default VARCHAR length used by type inference when a string property has no explicit
+    /// <c>[Column(Size = …)]</c>. Applied process-wide at library initialization from the
+    /// <c>Default</c> database (or the first enabled one) — DDL generation is not
+    /// connection-scoped. Default: 255.
     /// </summary>
     [ConfigField(Label = "Default String Size", Min = 1, Max = 65_535,
         Description = "Default VARCHAR length for string columns without an explicit Size.",
@@ -323,6 +340,15 @@ public sealed class MySqlDatabaseConfig
             CharacterSet = CharacterSet,
             SslMode = EnableSsl ? MySqlSslMode.Required : MySqlSslMode.None
         };
+
+        // A CA path is only meaningful when TLS is on, and only if the chain is actually
+        // verified — so providing one raises Required to VerifyCA. With SSL off the path is
+        // ignored rather than handed to the driver as a contradictory option.
+        if (EnableSsl && !string.IsNullOrWhiteSpace(SslCertificatePath))
+        {
+            builder.SslCa = SslCertificatePath;
+            builder.SslMode = MySqlSslMode.VerifyCA;
+        }
 
         return builder.ConnectionString;
     }

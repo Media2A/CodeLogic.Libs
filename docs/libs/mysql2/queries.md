@@ -55,7 +55,7 @@ mysql.Query<Order>()
 - `WhereExists<TInner>` / `WhereNotExists<TInner>` → `[NOT] EXISTS (SELECT 1 FROM inner WHERE …)`.
 - `WhereIn<TInner, TKey>` / `WhereNotIn<TInner, TKey>` → `col [NOT] IN (SELECT innerCol FROM inner [WHERE innerFilter])`.
 
-> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` is silently bypassed on these. `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
+> **Subquery-filtered queries are not cacheable** and cannot be turned into a typed `.Join` — the result cache stamps each entry with a single table's version counter, so it cannot invalidate on the inner table's mutations. `.WithCache` / `.SmartCache` are silently bypassed on these, including on a `.Select(...)` projection taken from such a query (the projection inherits the refusal, so `.WithCache` applied after `.Select` is ignored too). `WhereExists` against the outer query's own table is rejected (unqualified inner columns would be ambiguous).
 
 ## Ordering & paging
 
@@ -157,7 +157,7 @@ Result<List<OrderSummary>> rows = await mysql.Query<Order>()
     .ToListAsync();
 ```
 
-`ProjectedQuery` exposes `WithCache(ttl)`, `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
+`ProjectedQuery` exposes `WithCache(ttl)`, `WithCache()` (the cache configuration's `DefaultTtlSeconds`), `SmartCache(pool)`, `ToListAsync`, and `FirstOrDefaultAsync`.
 
 ## Aggregates — `GroupBy`
 

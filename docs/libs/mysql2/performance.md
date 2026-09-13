@@ -8,7 +8,10 @@ CL.MySQL2 is built to be fast by default: reflection runs once per entity, proje
 
 ## Result cache
 
-`.WithCache(ttl)` caches a single-table query's result for the given TTL. The cache is a cache-aside read path keyed on the translated SQL plus its parameters; a failure `Result` is never cached.
+`.WithCache(ttl)` caches a single-table query's result for the given TTL; the parameterless
+`.WithCache()` uses the cache configuration's `DefaultTtlSeconds` (60s by default). A
+per-database `CacheEnabledOverride` wins over the global `Enabled` switch for queries on that
+connection, and `PublishEvents` controls whether hits and misses raise events. The cache is a cache-aside read path keyed on the translated SQL plus its parameters; a failure `Result` is never cached.
 
 ```csharp
 Result<List<Server>> servers = await mysql.Query<Server>()
@@ -18,7 +21,7 @@ Result<List<Server>> servers = await mysql.Query<Server>()
     .ToListAsync();
 ```
 
-The cache reads three values from `config.mysql.cache.json` at startup — `Enabled`, `MaxEntries`, and `TimeQuantizeSeconds` — via `QueryCache.Configure(...)`. The remaining fields in that file (`MaxMemoryMb`, `DefaultTtlSeconds`, `PublishEvents`) and the per-database `CacheEnabledOverride` are declared but not currently read by any code path. The public surface of the static `QueryCache` facade is `Configure`, `UseStore`, `UseCoordinator`, `Count`, `Invalidate`, `GetStats`, and `Clear`; `Enabled` and `TimeQuantizeSeconds` are internal.
+The cache reads `Enabled`, `MaxEntries`, `TimeQuantizeSeconds`, `DefaultTtlSeconds`, and `PublishEvents` from `config.mysql.cache.json` at startup via `QueryCache.Configure(...)`, and registers each database's `CacheEnabledOverride` with `QueryCache.SetConnectionOverride(...)`. `MaxMemoryMb` is `[Obsolete]` and ignored — the in-process store evicts by entry count, so use `MaxEntries`. The public surface of the static `QueryCache` facade is `Configure`, `SetConnectionOverride`, `UseStore`, `UseCoordinator`, `Count`, `Invalidate`, `GetStats`, and `Clear`; `Enabled`, `DefaultTtl`, `PublishEvents`, and `TimeQuantizeSeconds` are internal.
 
 > Caching is available on single-table `QueryBuilder<T>` reads and on `ProjectedQuery` (single-table `Select`). It is **not** available on joined queries or subquery-filtered (`WhereExists` / `WhereIn`) queries — those stamp a single table's version and could not be invalidated when the other table mutates. It is also disabled inside a transaction scope.
 
@@ -109,25 +112,42 @@ Single non-transactional statements that fail with a deadlock (`1213`) or lock-w
 
 > Statements inside an explicit transaction scope are **never** auto-retried — the whole transaction is the caller's to retry, since an inner statement can't be replayed in isolation.
 
-## N+1 detection — not implemented
+## N+1 detection
 
-`N1DetectorThreshold` and the `N1QueryDetectedEvent` record both exist, and
-`QueryObservability.RecordN1` is there to publish the event, but nothing calls it and nothing
-reads the threshold. **No N+1 detection runs today and `N1QueryDetectedEvent` is never
-published**, whatever `N1DetectorThreshold` is set to. Treat the setting as reserved.
+Set the per-database `N1DetectorThreshold` above 0 and every executed statement is folded into
+a normalized template (parameters and numeric literals collapse to `?`). When one template runs
+that many times on the same connection inside a **one-second rolling window**, an
+`N1QueryDetectedEvent` is published carrying the connection id, the template and the count.
 
-The shape it is meant to catch — a loop issuing one query per row — is still worth avoiding;
-the fix is usually a single `WhereIn` / join instead of the loop — see
-[Query Builder](queries.md).
+- `0` — the default — disables detection entirely, and costs nothing on the query path: no
+  allocation and no bookkeeping.
+- The event fires **once per window**, not on every further execution.
+- Tracking is bounded (a fixed number of templates, pruned by age), so a long-running process
+  cannot accumulate state here.
+
+```csharp
+events.Subscribe<N1QueryDetectedEvent>(e =>
+    logger.Warn($"N+1: {e.Count} x {e.QueryTemplate}"));
+```
+
+The shape it catches — a loop issuing one query per row — is usually fixed with a single
+`WhereIn` / join instead of the loop; see [Query Builder](queries.md).
 
 ## Slow-query reporting
 
 Queries slower than `SlowQueryThresholdMs` (default 1000ms) are logged at warning level and
 publish a `SlowQueryEvent` carrying the connection id, the SQL, and the elapsed milliseconds.
 
-The event also has an `ExplainJson` field and the configuration has a
-`CaptureExplainOnSlowQuery` flag, but **plan capture is not implemented**: no `EXPLAIN` is ever
-executed and `ExplainJson` is always null, regardless of the flag.
+Turn on the per-database `CaptureExplainOnSlowQuery` (default off) and a slow query also runs
+`EXPLAIN FORMAT=JSON` for the same statement and parameters, attaching the plan to the event's
+`ExplainJson`. Capture is strictly best-effort and deliberately out of the caller's way:
+
+- it runs on a **separate pooled connection**, never inside the caller's transaction, and never
+  on the caller's thread;
+- statements MySQL cannot explain — DDL, and multi-statement batches such as the repository's
+  `INSERT ...; SELECT LAST_INSERT_ID();` — are skipped silently;
+- any failure is swallowed. The `SlowQueryEvent` always publishes, with `ExplainJson` null when
+  no plan could be obtained.
 
 ```csharp
 // Subscribe on the CodeLogic event bus
@@ -148,20 +168,20 @@ Both apply automatically to the builder, projections, joins, and raw `SqlQueryAs
 
 ## Batch sizes & limits
 
-`config.mysql.json` declares several per-database throughput knobs. Only some of them are actually wired up today — the rest are placeholders, so check this table before tuning:
+`config.mysql.json` declares several per-database throughput knobs:
 
 | Setting | Default | Status |
 |---------|---------|--------|
 | `CommandTimeout` | `30` | **Applied** — written to the connection string as `DefaultCommandTimeout` (seconds). |
 | `ConnectionTimeout` | `30` | **Applied** — connection-string `ConnectionTimeout` (seconds). |
 | `MinPoolSize` / `MaxPoolSize` | `1` / `100` | **Applied** — connection-string pool bounds. |
-| `MaxBatchInsertSize` | `500` | Not applied. `Repository<T>` takes the chunk size as a constructor argument defaulting to 500, and `GetRepository<T>` never passes the configured value, so chunking is fixed at 500. |
-| `MaxInClauseValues` | `1000` | Not applied — a collection `Contains` emits one parameter per value, uncapped. |
-| `PreparedStatementCacheSize` | `256` | Not applied — not written into the connection string. |
-| `QueryTimeoutMs` | `30000` | Not applied — nothing reads it; `CommandTimeout` governs. |
+| `MaxBatchInsertSize` | `500` | **Applied** — `GetRepository<T>` passes it to `Repository<T>`, which chunks `InsertManyAsync` / `UpsertManyAsync` at that many rows per statement. |
+| `MaxInClauseValues` | `1000` | **Applied as a warning only** — a generated `IN (...)` list larger than this logs one warning per query build naming the entity and the count. Nothing is chunked or rejected, so no existing query changes its result. |
+| `PreparedStatementCacheSize` | `256` | **Obsolete and ignored** — statement caching is a MySqlConnector connection-string concern (`IgnorePrepare=false`). |
+| `QueryTimeoutMs` | `30000` | **Applied** — set as `CommandTimeout` (rounded up to whole seconds) on the commands the repository, query builder, projections, joins and the raw-SQL helpers create. 0 falls back to the connection string's `CommandTimeout`; the 30000ms default equals that 30s default. |
 
-There is no `Repository.MaxBatchInsertSize` property — the chunk size is a private field set
-from a constructor parameter.
+The chunk size remains a private field on `Repository<T>` set from a constructor parameter —
+there is no public property for it.
 
 For large inserts, prefer `InsertManyAsync` (chunked) over a loop of `InsertAsync` — fewer round trips, and each chunk is eligible for transient retry.
 

@@ -102,14 +102,21 @@ Auto-generated on first run as `config.postgresql.json` (section `postgresql`). 
 | `database` / `username` / `password` | `""` | Connection credentials. The database is not the schema — see `defaultSchema`. |
 | `sslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, `VerifyFull`. **`Prefer` encrypts but does not verify the certificate; use `VerifyFull` in production.** |
 | `sslCertificatePath` / `sslKeyPath` / `sslRootCertificatePath` | `null` | Client certificate, its key, and the CA bundle used by `VerifyCA`/`VerifyFull`. |
-| `defaultSchema` | `public` | Applied as the connection's `search_path`. It does not move entities: a `[Table]` without a `Schema` is always mapped to the literal `public` schema. |
+| `defaultSchema` | `public` | The schema unqualified entities live in, and the connection's `search_path`. A `[Table]` without a `Schema` is created in — and every statement for it qualified with — this schema; `[Table(Schema = "…")]` still wins. Created if missing. **Changing it moves where your tables are read and written.** |
 | `applicationName` | `null` | Reported to the server; shows up in `pg_stat_activity`. |
 | `minPoolSize` / `maxPoolSize` | `1` / `100` | Connection-pool bounds. |
 | `connectionLifetime` | `300` | Seconds a pooled connection may sit idle before being closed. |
 | `connectionTimeout` / `commandTimeout` | `30` / `30` | Seconds to wait when opening a connection / running a command. |
 | `syncMode` | `production` | `developer` (drops freely), `production` (add and modify only), `migration` (one-shot destructive reconcile, backup first). |
 | `allowDestructiveSync` | `false` | Legacy escape hatch; promotes `production` to a full reconcile. |
-| `maxBatchInsertSize` | `500` | Intended rows per batched insert. Not currently read — the repository uses its own 500-row default, capped so a statement stays under PostgreSQL's 65535-parameter limit. |
+| `maxBatchInsertSize` | `500` | Rows per batched insert/upsert, capped so a statement stays under PostgreSQL's 65535-parameter limit. |
+| `queryTimeoutMs` | `30000` | Command timeout applied to every command the library creates (rounded up to whole seconds). `0` = no timeout. |
+| `maxInClauseValues` | `1000` | Warn (once per query build) when a generated `IN` list is wider than this. The list is still sent whole — nothing is chunked and nothing throws. |
+| `defaultStringSize` | `255` | `varchar` length for a string column with no explicit `[Column(Size = …)]`. |
+| `cacheEnabledOverride` | `null` | Per-database override of the global cache switch. `null` inherits. |
+| `backupDirectory` | `null` | Where schema backups are written. `null` = `DataDirectory/backups`. |
+| `n1DetectorThreshold` | `0` | Publish `N1QueryDetectedEvent` when one query template repeats this often within a one-second window. `0` disables. |
+| `captureExplainOnSlowQuery` | `false` | Attach `EXPLAIN (FORMAT JSON)` to `SlowQueryEvent` for slow queries. Best-effort. |
 | `slowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
 | `transientRetryCount` | `3` | Retries for serialization failures, deadlocks and unavailable locks (SQLSTATE `40001`, `40P01`, `55P03`). |
 
@@ -119,7 +126,7 @@ A few places where PostgreSQL genuinely differs from the MySQL and SQL Server si
 
 - **Upserts need a conflict target.** `ON CONFLICT` arbitrates on one named unique key, not "whichever key collides". The target is inferred when the entity has exactly one candidate; when it has several, pass `conflictTarget` explicitly rather than have one chosen for you.
 - **Identifiers are case-sensitive.** Everything is emitted double-quoted, so `[Column(Name = "userId")]` is a different column from `userid`. Prefer `snake_case` names.
-- **Schemas are namespaces.** A connection targets one database; `[Table(Schema = "…")]` selects the schema inside it. Every generated statement is schema-qualified.
+- **Schemas are namespaces.** A connection targets one database; `defaultSchema` picks the schema inside it for entities that do not name one, and `[Table(Schema = "…")]` overrides that per entity. Every generated statement is schema-qualified, and two named connections may target different schemas with the same entity types.
 - **`OnUpdateCurrentTimestamp`** has no column-clause equivalent, so schema sync creates a `BEFORE UPDATE` trigger for it.
 - **`DateTime` maps to `timestamptz`** and values with `Unspecified` kind are treated as UTC.
 

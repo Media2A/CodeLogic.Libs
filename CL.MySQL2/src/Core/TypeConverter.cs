@@ -142,8 +142,13 @@ internal static class TypeConverter
     /// lacking an explicit one. This lets us pick the right size for Guid, varchar,
     /// etc. instead of silently falling back to MySQL defaults.
     /// </summary>
-    public static ColumnAttribute InferColumn(Type clrType, int defaultStringSize = 255)
+    /// <remarks>
+    /// <paramref name="defaultStringSize"/> defaults to the configured <c>DefaultStringSize</c>
+    /// (255 unless configuration says otherwise).
+    /// </remarks>
+    public static ColumnAttribute InferColumn(Type clrType, int? defaultStringSize = null)
     {
+        var stringSize = defaultStringSize ?? SqlGenerationOptions.DefaultStringSize;
         var type = Nullable.GetUnderlyingType(clrType) ?? clrType;
 
         if (type == typeof(bool))        return new ColumnAttribute { DataType = DataType.TinyInt };
@@ -158,7 +163,7 @@ internal static class TypeConverter
         if (type == typeof(float))       return new ColumnAttribute { DataType = DataType.Float };
         if (type == typeof(double))      return new ColumnAttribute { DataType = DataType.Double };
         if (type == typeof(decimal))     return new ColumnAttribute { DataType = DataType.Decimal };
-        if (type == typeof(string))      return new ColumnAttribute { DataType = DataType.VarChar, Size = defaultStringSize };
+        if (type == typeof(string))      return new ColumnAttribute { DataType = DataType.VarChar, Size = stringSize };
         if (type == typeof(char))        return new ColumnAttribute { DataType = DataType.Char, Size = 1 };
         if (type == typeof(DateTime))    return new ColumnAttribute { DataType = DataType.DateTime };
         if (type == typeof(DateTimeOffset)) return new ColumnAttribute { DataType = DataType.DateTime };
@@ -261,6 +266,8 @@ internal static class TypeConverter
     {
         if (column.DataType != DataType.Unspecified || clrType is null) return column;
 
+        // Passing no size threads the configured DefaultStringSize through, so an inferred
+        // string column honours it instead of the hard-coded 255.
         var inferred = InferColumn(clrType);
         return new ColumnAttribute
         {

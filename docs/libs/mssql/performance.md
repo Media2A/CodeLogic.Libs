@@ -8,7 +8,7 @@ CL.MSSQL is built to be fast by default: reflection runs once per entity, projec
 
 ## Result cache
 
-`.WithCache(ttl)` caches a single-table query's result for the given TTL. The cache is a cache-aside read path keyed on the translated SQL plus its parameters; a failure `Result` is never cached.
+`.WithCache(ttl)` caches a single-table query's result for the given TTL; the parameterless `.WithCache()` uses the configured `DefaultTtlSeconds` (60 s out of the box). The cache is a cache-aside read path keyed on the translated SQL plus its parameters; a failure `Result` is never cached.
 
 ```csharp
 Result<List<Server>> servers = await mssql.Query<Server>()
@@ -18,9 +18,9 @@ Result<List<Server>> servers = await mssql.Query<Server>()
     .ToListAsync();
 ```
 
-The cache is configured in `config.mssql.cache.json`. Only `Enabled`, `MaxEntries`, and `TimeQuantizeSeconds` are applied at startup (via `QueryCache.Configure`); `MaxMemoryMb`, `DefaultTtlSeconds`, `PublishEvents`, and the per-database `CacheEnabledOverride` are declared but not yet read by the library. The static `QueryCache` facade exposes the public operations `UseStore`, `UseCoordinator`, `Invalidate`, `Clear`, `Count`, and `GetStats` — the resolved `Enabled` and `TimeQuantizeSeconds` values are internal and not readable from application code.
+The cache is configured in `config.mssql.cache.json`. `Enabled`, `MaxEntries`, `TimeQuantizeSeconds`, `DefaultTtlSeconds` and `PublishEvents` are applied at startup via `QueryCache.Configure`, and each database’s `CacheEnabledOverride` is registered with `QueryCache.SetConnectionOverride` so it wins over the global `Enabled` switch for that connection. `MaxMemoryMb` is obsolete and not applied — the store evicts by entry count, so size it with `MaxEntries`. The static `QueryCache` facade exposes the public operations `UseStore`, `UseCoordinator`, `SetConnectionOverride`, `Invalidate`, `Clear`, `Count`, and `GetStats` — the resolved `Enabled` and `TimeQuantizeSeconds` values are internal and not readable from application code.
 
-> Caching is available on single-table `QueryBuilder<T>` reads and on `ProjectedQuery` (single-table `Select`). It is **not** available on joined queries or subquery-filtered (`WhereExists` / `WhereIn`) queries — those stamp a single table's version and could not be invalidated when the other table mutates. It is also disabled inside a transaction scope.
+> Caching is available on single-table `QueryBuilder<T>` reads and on `ProjectedQuery` (single-table `Select`). It is **not** available on joined queries or subquery-filtered (`WhereExists` / `WhereIn`) queries — those stamp a single table's version and could not be invalidated when the other table mutates. The refusal now follows the projection: `.WhereExists(...).Select(...).WithCache(ttl)` logs a warning and executes uncached rather than caching a cross-table result under one table's version. Caching is also disabled inside a transaction scope, and for a whole database whose `CacheEnabledOverride` is `false`.
 
 ### Table-version invalidation
 
@@ -109,18 +109,32 @@ Complete non-caller-transaction operations that fail with a deadlock (`1205`), l
 
 > Statements inside an explicit transaction scope are **never** auto-retried — the whole transaction is the caller's to retry, since an inner statement can't be replayed in isolation.
 
-## N+1 detection (not yet wired)
+## N+1 detection
 
-> The pieces are declared — the `N1DetectorThreshold` setting, the `N1QueryDetectedEvent`, and
-> `QueryObservability.RecordN1` — but nothing in the query pipeline counts repeats or calls
-> `RecordN1`, so setting `N1DetectorThreshold` currently has no effect and the event never
-> fires. To spot the classic one-query-per-row loop today, subscribe to `QueryExecutedEvent`
-> and group by SQL text. The fix is usually a single `WhereIn` / join instead of the loop —
-> see [Query Builder](queries.md).
+Set `N1DetectorThreshold` above `0` and the library counts executions of the same normalized
+statement, per connection, in a rolling **one-second** window. When the count reaches the
+threshold it publishes `N1QueryDetectedEvent` **once for that window** — not again on every
+later execution — and logs a warning.
+
+```csharp
+events.Subscribe<N1QueryDetectedEvent>(e =>
+    logger.Warn($"N+1 on {e.ConnectionId}: {e.Count}x {e.QueryTemplate}"));
+```
+
+- The template collapses runs of whitespace and drops the digits in generated parameter names
+  (`@qb_0`, `@qb_17` → `@qb_`), so one query executed in a loop maps to one template.
+- Cache hits are not counted — only statements that actually reached the server.
+- Bookkeeping is bounded: a fixed-capacity map pruned by age, dropped wholesale rather than
+  grown if a pathological workload fills it.
+- **`0` is the default and means disabled** — no dictionary touch, no allocation, no string
+  work on the query path.
+
+The fix for a genuine N+1 is usually a single `WhereIn` / join instead of the loop — see
+[Query Builder](queries.md).
 
 ## Slow-query capture and estimated plans
 
-Queries slower than `SlowQueryThresholdMs` publish a `SlowQueryEvent`. When enabled, estimated-plan capture reads the just-compiled ShowPlan XML from `sys.dm_exec_query_plan` on a separate connection, without executing user SQL a second time. This is the same plan document exposed by `SET SHOWPLAN_XML` and also works for parameterized `sp_executesql` commands. Permission, cache-eviction, and unsupported-query failures are logged without failing the original query.
+Queries slower than `SlowQueryThresholdMs` publish a `SlowQueryEvent`. When `CaptureExplainOnSlowQuery` is on (the default), estimated-plan capture reads the just-compiled ShowPlan XML from `sys.dm_exec_query_plan` on a **separate connection** — never inside the caller's transaction — and without executing user SQL a second time. It is strictly best-effort: the plan cache is shared and evictable, so `ExplainJson` is either valid ShowPlan XML or `null`, and a failure is swallowed rather than propagated into the query path. With the flag off, `ExplainJson` is always `null` and no extra query runs. This is the same plan document exposed by `SET SHOWPLAN_XML` and also works for parameterized `sp_executesql` commands. Permission, cache-eviction, and unsupported-query failures are logged without failing the original query.
 
 ```csharp
 // Subscribe on the CodeLogic event bus
@@ -141,15 +155,15 @@ Both apply automatically to the builder, projections, joins, and raw `SqlQueryAs
 
 ## Batch sizes & limits
 
-These per-database knobs live in `config.mssql.json`. Of them, only `CommandTimeout` currently reaches the code; the rest are declared but not yet read, so batching falls back to the built-in 500-row default:
+These per-database knobs live in `config.mssql.json`:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `MaxBatchInsertSize` | `500` | Intended rows per chunk in `InsertManyAsync` / `UpsertManyAsync`. **Not yet plumbed through `GetRepository<T>()`**, which leaves the `Repository<T>` constructor's own `maxBatchInsertSize` default of 500 in place. |
-| `MaxInClauseValues` | `1000` | Reserved — the expression visitor applies no cap to generated `IN (...)` lists. |
-| `PreparedStatementCacheSize` | `256` | Reserved — not read by the current code. |
-| `QueryTimeoutMs` | `30000` | Reserved — not read by the current code. |
-| `CommandTimeout` | `30` | Command timeout in seconds; applied via the built connection string. |
+| `MaxBatchInsertSize` | `500` | Rows per chunk in `InsertManyAsync` / `UpsertManyAsync`. Passed to every repository built by `GetRepository<T>()`, including the transaction-scoped overload. |
+| `MaxInClauseValues` | `1000` | Advisory ceiling on a generated `IN (...)` list. A larger list still executes unchanged; it logs one warning per query build naming the entity and the value count. |
+| `PreparedStatementCacheSize` | `256` | **Obsolete, not applied.** `Microsoft.Data.SqlClient` has no client-side statement cache to size, and SQL Server's plan cache is automatic. |
+| `QueryTimeoutMs` | `30000` | Command timeout, in milliseconds, for the query commands the library issues. Applied per command, so it **overrides** the connection string's `Command Timeout` on those; `0` leaves the connection-string value in place. |
+| `CommandTimeout` | `30` | Command timeout in seconds placed on the built connection string — the default for any command the library does not set explicitly (schema sync, migrations, backups, raw `ExecuteSqlAsync`). |
 
 Whatever chunk size is in force, it is reduced further per statement so a batch stays under
 SQL Server's 2,100-parameter limit for the entity's column count (`SqlServerDialect.MaxBatchRows`).

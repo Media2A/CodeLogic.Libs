@@ -43,6 +43,12 @@ var inRegion = await pg.Query<User>()
 
 `WhereNotExists` and `WhereNotIn` are the negations.
 
+A query carrying a subquery filter is **not cacheable** and cannot be turned into a typed
+`.Join`: the result cache stamps an entry with a single table's version counter, so a
+mutation on the inner table could not invalidate it. The refusal travels with the query, so
+`.WhereExists(…).Select(…).WithCache(…)` and `.WhereExists(…).GroupBy(…)` are uncached too —
+the `.WithCache` is ignored (and logged) rather than serving a stale cross-table result.
+
 ## Ordering, paging, projection
 
 ```csharp
@@ -168,11 +174,15 @@ var rows = await pg.Query<User>()
     .ToListAsync();
 
 var hot = await pg.Query<User>().SmartCache("active-users").ToListAsync();
+
+// No argument: uses postgresql.cache.defaultTtlSeconds (60 by default).
+var brief = await pg.Query<User>().WithCache().ToListAsync();
 ```
 
 Cache keys mix the connection id, table, table version, SQL text and sorted parameters. Any
 write through the library bumps the table version, so prior entries become unreachable without
-an explicit eviction pass. See [Performance & Caching](performance.md).
+an explicit eviction pass. A per-database `cacheEnabledOverride` can switch caching off for
+one connection while leaving it on globally. See [Performance & Caching](performance.md).
 
 ## Raw SQL
 

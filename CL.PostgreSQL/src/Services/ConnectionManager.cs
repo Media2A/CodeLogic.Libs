@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using CL.PostgreSQL.Configuration;
+using CL.PostgreSQL.Core;
 using CL.PostgreSQL.Events;
 using CodeLogic.Core.Events;
 using CodeLogic.Core.Logging;
@@ -49,11 +50,20 @@ public sealed class ConnectionManager
 
     /// <summary>
     /// Registers (or replaces) a connection configuration under a given ID.
+    /// <para>
+    /// Also publishes the connection's runtime knobs (default schema, query timeout,
+    /// default string size, N+1 threshold, EXPLAIN capture, cache override, backup
+    /// directory) to <see cref="Core.PostgreSqlRuntimeOptions"/>, which is where the
+    /// static query/metadata layers read them from. Every registration path — startup
+    /// and runtime alike — goes through here, so a connection registered later is
+    /// honoured identically.
+    /// </para>
     /// </summary>
     public void RegisterConfiguration(PostgreSqlDatabaseConfig config, string connectionId = "Default")
     {
         ArgumentNullException.ThrowIfNull(config);
         _configs[connectionId] = config;
+        Core.PostgreSqlRuntimeOptions.Register(connectionId, config);
         _logger?.Debug($"[PostgreSQL] Configuration registered for '{connectionId}' → {config.Host}:{config.Port}/{config.Database}");
     }
 
@@ -145,7 +155,7 @@ public sealed class ConnectionManager
         try
         {
             await using var conn = await OpenConnectionAsync(connectionId, ct).ConfigureAwait(false);
-            await using var cmd = conn.CreateCommand();
+            await using var cmd = conn.CreateCommand(connectionId);
             cmd.CommandText = "SELECT 1";
             await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             await CloseConnectionAsync(conn).ConfigureAwait(false);
@@ -262,7 +272,7 @@ public sealed class ConnectionManager
     {
         return await ExecuteWithConnectionAsync(async conn =>
         {
-            await using var cmd = conn.CreateCommand();
+            await using var cmd = conn.CreateCommand(connectionId);
             // version() is the full banner; the remaining MySQL spellings have no
             // PostgreSQL equivalent: @@version_comment -> the server's compile-time
             // settings, DATABASE() -> current_database(), @@hostname -> inet_server_addr(),

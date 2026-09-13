@@ -6,6 +6,115 @@ NuGet package version of `CodeLogic.MySQL2`.
 
 ## 2026-09-13
 
+### Behaviour changes (read before upgrading)
+
+- **`Repository<T>.CountAsync()` now applies the `[SoftDelete]` filter.** It used to emit a
+  bare `SELECT COUNT(*)`, contradicting `GetAllAsync` / `GetPagedAsync` on the same entity --
+  the paged read already filtered its own count. For a soft-delete entity the returned count
+  will now be *lower* than before by the number of deleted rows. If you relied on the old
+  total, use `mysql.Query<T>().IncludeDeleted().CountAsync()`.
+- **`CaptureExplainOnSlowQuery` now defaults to `false`.** The flag was declared `true` but
+  never read, so nothing ran. Now that it is wired, keeping the old default would have turned
+  `EXPLAIN` capture on for everyone on upgrade. A `config.mysql.json` written by an earlier
+  version still carries `true` and will therefore capture plans -- set it to `false` if you
+  do not want that.
+- **Configuration fields that were declared and ignored are now read.** `QueryTimeoutMs`,
+  `MaxBatchInsertSize`, `BackupDirectory`, `CacheEnabledOverride`, `SslCertificatePath`,
+  `DefaultStringSize`, `N1DetectorThreshold`, `DefaultTtlSeconds` and `PublishEvents` all take
+  effect now. Every one of them keeps today's behaviour at its default value, but a
+  non-default value you set previously (and which did nothing) will now change behaviour.
+
+### Fixed
+
+- **`ids.Contains(x.Id)` on a `List<T>` or `HashSet<T>` threw instead of emitting `IN`.**
+  The expression visitor's first `Contains` case matched any single-argument instance call,
+  so a collection membership test took the string `LIKE` branch and tried to emit the
+  collection itself as a column. Arrays were unaffected because they bind to the static
+  two-argument `Enumerable.Contains`, which had its own case. The `LIKE` branch is now
+  restricted to a string receiver, and both membership shapes share one emitter.
+- **`GetRepository<T>` ignored `MaxBatchInsertSize`.** Both overloads (connection id and
+  `TransactionScope`) passed the slow-query threshold but not the batch size, so
+  `InsertManyAsync` / `UpsertManyAsync` always chunked at the constructor default of 500.
+- **`ProjectedQuery` and `JoinedQuery` dropped the terminal's `CancellationToken`** when
+  opening the connection -- a cancelled token could still run the query to completion, and
+  any transient-failure retry around the open ignored cancellation entirely. Both now
+  forward it.
+- **A subquery-filtered query could be cached through `.Select(...)`.** `QueryBuilder.Select`
+  copied the cache TTL / smart-cache pool into the projection without consulting the
+  subquery-filter guard that `ShouldCache` applies, so
+  `WhereExists(...).Select(...).WithCache(...)` cached a cross-table result stamped with only
+  one table's version and served it stale after the other table changed. The guard now
+  travels with the projection, so a `.WithCache` applied after `.Select` is refused too.
+- **`TypeConverter.ResolveColumn` ignored the configured default string size**, calling
+  `InferColumn(clrType)` without threading it through. Same root cause as `DefaultStringSize`
+  below; both are fixed together.
+
+### Added
+
+- **Retention actually runs.** `RetentionWorker` snapshotted its entry list at construction,
+  and the worker was constructed during library start -- before any documented flow calls
+  `SyncTableAsync` / `SyncSchemaAsync`. `HasWork` was therefore false and `[RetainDays]` was
+  dead in normal use. The entry list is now live: an entity registered at any time is picked
+  up (`RetentionWorker.TryRegister`), and the library starts the loop the first time a
+  `[RetainDays]` entity is registered. `Start()` remains idempotent, the 5-minute initial
+  delay and 24-hour interval are unchanged, disposal still cancels cleanly, and the list is
+  safe to mutate while the loop reads it.
+- `MySQL2Library.RunRetentionOnceAsync()` -- an on-demand purge pass over every registered
+  `[RetainDays]` entity, without reaching for the worker directly.
+- **N+1 detection.** `N1DetectorThreshold` is read and `QueryObservability.RecordN1` finally
+  has a caller: executions of the same normalized SQL template on one connection are counted
+  in a one-second rolling window and publish `N1QueryDetectedEvent` once per window when the
+  count crosses the threshold. Bookkeeping is bounded (a fixed number of templates, pruned by
+  age). `0` -- the default -- disables it with no allocation and no dictionary touch.
+  `QueryObservability.ConfigureN1Detection(connectionId, threshold)` sets it at runtime.
+- **Slow-query `EXPLAIN` capture.** With `CaptureExplainOnSlowQuery` on, a slow query also
+  runs `EXPLAIN FORMAT=JSON` with the same parameters and attaches the plan to
+  `SlowQueryEvent.ExplainJson`. It runs on a separate pooled connection (never the caller's
+  transaction, never the caller's thread), skips statements MySQL cannot explain (DDL, and
+  multi-statement batches such as `INSERT ...; SELECT LAST_INSERT_ID();`), and swallows every
+  failure -- the event always publishes, with a null payload when no plan was obtained.
+- `QueryBuilder<T>.WithCache()` and `ProjectedQuery<,>.WithCache()` -- parameterless overloads
+  using the cache configuration's `DefaultTtlSeconds` (60s default).
+- `QueryCache.SetConnectionOverride(connectionId, enabled)` backing the per-database
+  `CacheEnabledOverride`, and an optional config lookup on `BackupManager` backing
+  `BackupDirectory`. `BackupManager.GetLatestBackupFile` and `CleanupOldBackupsAsync` take an
+  optional `connectionId` so they read the same directory the backup was written to.
+
+### Changed
+
+- `QueryTimeoutMs` is applied as `CommandTimeout` (rounded up to whole seconds) on the
+  commands the repository, query builder, projections, joins, retention and the raw-SQL
+  helpers create. `0` inherits the connection string's `CommandTimeout`; the 30000ms default
+  equals that 30-second default, so nothing changes until you change it.
+- `SslCertificatePath` is written to the connection string as MySqlConnector's `SslCa` when
+  `EnableSsl` is true, raising the SSL mode to `VerifyCA`. With SSL off it is ignored. The
+  label and description now say "SSL CA Certificate Path": a single path field can only work
+  as a CA, since MySqlConnector's client-certificate option `SslCert` additionally requires
+  `SslKey`, for which this configuration has no field.
+- `MaxInClauseValues` is advisory: a generated `IN (...)` list larger than it logs one warning
+  per query build naming the entity and the count. Nothing is chunked, thrown or rejected, so
+  no query that works today changes its result.
+- `DefaultStringSize` is applied process-wide at initialization from the `Default` database
+  (or the first enabled one) -- DDL generation is static and not connection-scoped.
+- `CacheConfiguration.PublishEvents` gates `CacheHitEvent` / `CacheMissEvent`; the default
+  `true` is today's behaviour.
+
+### Deprecated
+
+- `MySqlDatabaseConfig.PreparedStatementCacheSize` is `[Obsolete]` and ignored -- statement
+  caching is the provider's concern, configured on the MySqlConnector connection string
+  (`IgnorePrepare=false`).
+- `CacheConfiguration.MaxMemoryMb` is `[Obsolete]` and ignored -- the in-process store bounds
+  the cache by entry count, not bytes. Use `MaxEntries`.
+
+### Documentation
+
+- The "not implemented" / "reserved" notes the previous audit pass added for exactly these
+  items are gone from the README, the overview, the performance page and the schema guide,
+  replaced by what the code now does.
+
+## 2026-09-13 (documentation audit)
+
 ### Documentation
 
 - The README's transaction example still built a `Repository<T>` by hand; it now uses the
