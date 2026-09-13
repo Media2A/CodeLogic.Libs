@@ -17,7 +17,9 @@ public sealed class ConnectionManager
     private readonly IEventBus? _events;
 
     // Per-connection-id configuration storage
-    private readonly Dictionary<string, PostgreSqlDatabaseConfig> _configs = new(StringComparer.OrdinalIgnoreCase);
+    // Concurrent: RegisterConfiguration can run while other threads resolve a
+    // connection, and a plain Dictionary is not safe under that mix.
+    private readonly ConcurrentDictionary<string, PostgreSqlDatabaseConfig> _configs = new(StringComparer.OrdinalIgnoreCase);
 
     // Per-connection-id open connection counter
     private readonly ConcurrentDictionary<string, int> _openCounts = new(StringComparer.OrdinalIgnoreCase);

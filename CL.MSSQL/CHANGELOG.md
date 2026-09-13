@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-13
+
+### Fixed
+
+- `Contains()` over an empty collection emitted `IN ()`, which is a syntax error. It now
+  emits `1 = 0`.
+- Cancellation tokens are forwarded to connection acquisition, so opening a connection can
+  be cancelled.
+- `ConnectionManager` held its configuration map in a non-concurrent `Dictionary` that could
+  be written by `RegisterConfiguration` while another thread read it.
+
 ## 2026-09-12
 
 ### Changed

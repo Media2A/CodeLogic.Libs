@@ -4,6 +4,53 @@ All notable changes to **CodeLogic.MySQL2** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/). The version listed here matches the
 NuGet package version of `CodeLogic.MySQL2`.
 
+## 2026-09-13
+
+### Security
+
+- Added `MySqlDialect` with `Quote`, `QuoteMultipart` and `EscapeLike`, and routed all 113
+  identifier render sites through it, so a delimiter inside an identifier is escaped rather
+  than closing it. Output is byte-identical for safe identifiers, so generated DDL and the
+  schema CRC are unchanged.
+- `EntityMetadata<T>` now rejects any mapped table or column name containing a backtick, NUL
+  or newline. Combined with the render-site quoting this makes identifier injection
+  structurally impossible rather than merely unlikely.
+- Parameters for the dictionary overload of `QueryBuilder.UpdateAsync` are named by ordinal
+  instead of by the caller's key, so a key that is a valid column name but not a valid
+  parameter name can no longer corrupt the statement.
+
+### Fixed
+
+- **A `[Column]` attribute without an explicit `DataType` generated `TINYINT`.** Because
+  `DataType` is a non-nullable enum whose default was `TinyInt`, the
+  `colAttr?.DataType ?? Infer(...)` fallback could never fire when the attribute was
+  present. `DataType.Unspecified` is now the enum's default and such columns infer from the
+  CLR property type. An unattributed `Guid` likewise generated `CHAR(1)` instead of
+  `CHAR(36)`, because the inferred size was dropped along with the inferred type.
+- `Contains()` over an empty collection emitted `IN ()`, which is a syntax error. It now
+  emits `1 = 0`.
+- Both `UpdateAsync` overloads now reject database-generated (auto-increment) columns rather
+  than producing SQL the server refuses.
+- Cancellation tokens are forwarded to connection acquisition, so opening a connection can
+  be cancelled.
+- `ConnectionManager` held its configuration map in a non-concurrent `Dictionary` that could
+  be written by `RegisterConfiguration` while another thread read it.
+
+### Changed
+
+- Entity values are bound with an explicit `MySqlDbType` derived from the column's declared
+  or inferred type, via the new `TypeConverter.CreateParameter`, instead of `AddWithValue`.
+  An inferred type that differs from the column's own forces a server-side conversion and
+  can prevent the column's index from being used.
+
+### Migration notes
+
+- **Breaking:** `DataType` enum values shift by one to make room for `Unspecified = 0`. This
+  matters only if the numeric value was persisted somewhere; serialising by name is
+  unaffected.
+- Entities with a `[Column]` attribute that omitted `DataType` will generate corrected DDL
+  and see one `ALTER` on the next schema sync.
+
 ## 2026-09-12
 
 ### Changed

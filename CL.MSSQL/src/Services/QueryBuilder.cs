@@ -507,7 +507,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 items.Add(map(reader));
             return items;
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -576,7 +576,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
             var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
             return map(reader);
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -636,7 +636,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 entities.Add(map(reader));
 
             return (entities, totalCount);
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
@@ -727,7 +727,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 entities.Add(map(reader));
             return entities;
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count);
@@ -806,7 +806,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             await using var cmd = BuildCommand(conn, sql, parms);
             return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         return Result<long>.Success(count);
     }
@@ -844,7 +844,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 await using var cmd = BuildCommand(conn, sql, parms);
                 var raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 return raw is null || raw is DBNull ? 0.0 : Convert.ToDouble(raw);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<double>.Success(value);
         }
@@ -870,7 +870,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql, parms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
@@ -955,7 +955,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql_full, allParms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(tableName);
             return Result<int>.Success(affected);
@@ -1019,7 +1019,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql, allParms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
@@ -1094,12 +1094,16 @@ public sealed class QueryBuilder<T> where T : class, new()
                 $"After(cursor) can only be consumed by ToCursorPagedListAsync; '{operation}' is not a cursor terminal.");
     }
 
-    private async Task<TResult> ExecuteAsync<TResult>(Func<SqlConnection, Task<TResult>> action)
+    private async Task<TResult> ExecuteAsync<TResult>(
+        Func<SqlConnection, Task<TResult>> action,
+        CancellationToken ct = default)
     {
         if (_transactionScope is not null)
             return await action(_transactionScope.Connection).ConfigureAwait(false);
 
-        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
+        // The token has to reach ExecuteWithConnectionAsync, otherwise opening the
+        // connection (and any transient-failure retry around it) ignores cancellation.
+        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
     private SqlCommand BuildCommand(SqlConnection conn, string sql, Dictionary<string, object?> parms)
@@ -1132,7 +1136,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 var raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 if (raw is null || raw is DBNull) return default!;
                 return (TResult)Convert.ChangeType(raw, typeof(TResult))!;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<TResult>.Success(value);
         }

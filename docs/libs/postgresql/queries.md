@@ -1,188 +1,193 @@
 # CL.PostgreSQL — Query Builder
 
-> Typed LINQ-shaped expressions translated to real SQL — filters, ordering, paging, joins, projections, aggregates, bulk writes, raw SQL, and transactions.
+`pg.Query<T>()` returns a `QueryBuilder<T>`: a chainable, immutable-in-spirit builder that
+translates LINQ-shaped expressions into parameterised PostgreSQL. Values are always bound as
+parameters; identifiers always come from entity metadata, never from caller strings.
 
-See the [overview](index.md) for loading, repositories, configuration, and events.
+Every terminal returns `Result<T>`.
 
-`pg.Query<T>()` returns a `QueryBuilder<T>` you compose fluently. Nothing executes until a terminal method runs; each terminal returns a `Result<…>`. The builder translates expressions to server-side SQL — there is no client-side filtering — and materializes rows into `T`.
+## Filtering
 
 ```csharp
-var pg = Libraries.Get<PostgreSQLLibrary>();
+var rows = await pg.Query<User>()
+    .Where(u => u.IsActive && u.CreatedUtc >= DateTime.UtcNow.AddDays(-30))
+    .Where(u => u.Email != null)          // additional Where calls AND together
+    .ToListAsync();
+```
 
-Result<List<User>> users = await pg.Query<User>()
-    .Where(u => u.IsActive && u.LoginCount > 10)
-    .OrderByDescending(u => u.Name)
-    .Take(50)
+Supported in a predicate:
+
+| C# | SQL |
+|---|---|
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | the same operators |
+| `&&`, `\|\|`, `!` | `AND`, `OR`, `NOT` |
+| `x.Prop == null` | `IS NULL` (either operand order) |
+| `x.Name.Contains("a")` | `LIKE` with the term's metacharacters escaped |
+| `x.Name.StartsWith` / `EndsWith` | anchored `LIKE` |
+| `string.IsNullOrEmpty(x.Name)` | `(col IS NULL OR col = '')` |
+| `ids.Contains(x.Id)` | `IN (…)`, chunked past `maxInClauseValues` |
+
+An empty collection in `Contains` produces `FALSE` rather than the invalid `IN ()`.
+
+### Subquery filters
+
+```csharp
+var withOrders = await pg.Query<User>()
+    .WhereExists<Order>((u, o) => o.UserId == u.Id)
     .ToListAsync();
 
-if (users.IsSuccess)
-    foreach (var u in users.Value!) { /* … */ }
+var inRegion = await pg.Query<User>()
+    .WhereIn<Region, long>((u, r) => u.RegionId, r => r.Id, r => r.IsActive)
+    .ToListAsync();
 ```
 
-## Filtering with `Where`
+`WhereNotExists` and `WhereNotIn` are the negations.
 
-`Where` takes an `Expression<Func<T, bool>>` and translates it to a parameterized `WHERE` clause. Chained calls are AND-combined.
+## Ordering, paging, projection
 
 ```csharp
-pg.Query<User>()
+var page = await pg.Query<User>()
     .Where(u => u.IsActive)
-    .Where(u => u.LoginCount >= 1 && u.LoginCount < 1000)
-    .Where(u => u.Name != null);
+    .OrderByDescending(u => u.CreatedUtc)
+    .Skip(40).Take(20)                    // aliases for Offset / Limit
+    .ToListAsync();
+
+var summary = await pg.Query<User>()
+    .Select(u => new { u.Id, u.Email })   // only these columns are read
+    .ToListAsync();
 ```
 
-Supported expression shapes include comparisons, `&&` / `||`, `!`, `string` methods (`Contains` / `StartsWith` / `EndsWith` → `LIKE`), and null checks (→ `IS NULL` / `IS NOT NULL`). Captured local variables are parameterized.
+`Select` is a real projection: the generated `SELECT` lists just those columns, and the
+result is materialized by a compiled mapper, not reflection.
 
-## Ordering & paging
+### Offset paging
 
 ```csharp
-pg.Query<User>()
-    .OrderBy(u => u.Name)
-    .OrderByDescending(u => u.LoginCount)
-    .Skip(40)         // alias: Offset(40)
-    .Take(20);        // alias: Limit(20)
+var paged = await pg.Query<User>().OrderBy(u => u.Id).GetPagedAsync(page: 3, pageSize: 25);
+// paged.Value.Items / TotalItems / PageNumber / PageSize
 ```
 
-`OrderBy` / `OrderByDescending` take a key selector. `Take`/`Limit` and `Skip`/`Offset` are aliases for `LIMIT` and `OFFSET`. For first-page metadata, use the paged terminal:
+### Cursor paging
+
+Offset paging drifts when rows are inserted between requests, and gets slower the deeper you
+go. Cursor paging seeks instead:
 
 ```csharp
-Result<PagedResult<User>> page = await pg.Query<User>()
+var first = await pg.Query<User>()
+    .OrderByDescending(u => u.CreatedUtc)
+    .ToCursorPagedListAsync(pageSize: 50);
+
+var next = await pg.Query<User>()
+    .OrderByDescending(u => u.CreatedUtc)
+    .After(first.Value.NextCursor)
+    .ToCursorPagedListAsync(pageSize: 50);
+```
+
+The ordering must be declared, and the primary key is appended automatically to make it
+total. The cursor is a base64url token carrying the typed ordering values; decoding validates
+it against the entity, table and the exact ordering of the query issuing it, so a token from
+one query cannot be replayed against another. It is **not** signed — treat a cursor as a
+position, not as an authorisation.
+
+The seek predicate uses `IS NOT DISTINCT FROM` for the equality legs, so nullable ordering
+columns page correctly.
+
+## Joins
+
+```csharp
+var rows = await pg.Query<User>()
+    .Join<Order, long, UserOrder>(
+        (u, o) => u.Id == o.UserId,
+        (u, o) => new UserOrder { Email = u.Email, Total = o.Total })
+    .Where((u, o) => o.Total > 100)
+    .OrderByDescending((u, o) => o.Total)
+    .Take(50)
+    .ToListAsync();
+```
+
+Both sides are schema-qualified from their `[Table]` attributes. A raw `Join(table, condition)`
+overload exists for shapes the typed form cannot express; its table name is quoted (and may be
+`schema.table`) but the condition is passed through verbatim, so do not build it from user input.
+
+## Grouping & aggregates
+
+```csharp
+var perDay = await pg.Query<Order>()
+    .Where(o => o.CreatedUtc >= since)
+    .GroupBy(o => SqlFn.Date(o.CreatedUtc))
+    .Select(g => new { Day = g.Key, Count = g.Count(), Revenue = g.Sum(o => o.Total) })
+    .ToListAsync();
+```
+
+Scalar terminals: `CountAsync`, `SumAsync`, `MinAsync`, `MaxAsync`, `AverageAsync`, `AnyAsync`.
+
+`SqlFn` exposes server-side functions usable inside a key or projection. They translate to
+PostgreSQL, not MySQL: `Year`/`Month`/`Day`/`Hour`/`Minute`/`DayOfWeek` become
+`EXTRACT(… FROM x)::int`, `Date(x)` becomes `x::date`, `IfNull(a, b)` becomes `COALESCE(a, b)`,
+and `BucketUtc(x, n)` becomes `to_timestamp(floor(extract(epoch from x) / n) * n)`.
+
+`DayOfWeek` needs no adjustment here: PostgreSQL's `DOW` is already 0–6 from Sunday, matching
+.NET's `DayOfWeek`, where MySQL's `DAYOFWEEK` is 1–7 and the MySQL library subtracts one.
+
+## Bulk writes
+
+```csharp
+// Typed setter form — `Counter = u.Counter + 1` stays server-side.
+await pg.Query<User>()
     .Where(u => u.IsActive)
-    .OrderByDescending(u => u.Name)
-    .ToPagedListAsync(page: 1, pageSize: 25);
+    .UpdateAsync(u => new User { LoginCount = u.LoginCount + 1, LastSeen = DateTime.UtcNow });
 
-PagedResult<User> p = page.Value!;
-// p.Items, p.PageNumber, p.PageSize, p.TotalItems, p.TotalPages, p.HasPreviousPage, p.HasNextPage
+// Dictionary form — keys resolve through the entity's column allow-list.
+await pg.Query<User>().Where(u => u.Id == id).UpdateAsync(new() { ["email"] = newEmail });
+
+await pg.Query<User>().Where(u => u.CreatedUtc < cutoff).DeleteAsync();
 ```
 
-## Joins & projections
+Both overloads reject database-generated columns rather than emitting SQL the server refuses.
+Bulk update deliberately bypasses the soft-delete read filter so it can target or restore
+deleted rows.
 
-`Join(table, condition, JoinType)` appends a literal join clause for ad-hoc joins outside the typed model. `Select` emits an explicit projection column list.
+## Caching
 
 ```csharp
-pg.Query<Order>()
-    .Join("customers c", "c.\"Id\" = t.\"CustomerId\"", JoinType.Left)
-    .Where(o => o.Total > 100)
-    .Select(o => new { o.Id, o.Total });
+var rows = await pg.Query<User>()
+    .Where(u => u.IsActive)
+    .WithCache(TimeSpan.FromMinutes(5))
+    .ToListAsync();
+
+var hot = await pg.Query<User>().SmartCache("active-users").ToListAsync();
 ```
 
-`JoinType` is `Inner` (default), `Left`, `Right`, or `Cross`.
+Cache keys mix the connection id, table, table version, SQL text and sorted parameters. Any
+write through the library bumps the table version, so prior entries become unreachable without
+an explicit eviction pass. See [Performance & Caching](performance.md).
 
-## Grouping
-
-`GroupBy<TKey>` adds a `GROUP BY` clause; combine it with the aggregate terminals below.
+## Raw SQL
 
 ```csharp
-pg.Query<Order>()
-    .Where(o => o.CreatedUtc >= DateTime.UtcNow.AddDays(-7))
-    .GroupBy(o => o.CustomerId);
+var rows = await pg.SqlQueryAsync<User>(
+    "SELECT * FROM \"public\".\"users\" WHERE \"email\" = @email",
+    new() { ["@email"] = email });
+
+var count = await pg.SqlScalarAsync<long>("SELECT count(*) FROM \"public\".\"users\"");
+
+await pg.ExecuteSqlAsync("REFRESH MATERIALIZED VIEW \"public\".\"user_stats\"");
 ```
 
-## Terminal operations
-
-Nothing runs until a terminal is awaited.
-
-| Terminal | Returns | SQL |
-|----------|---------|-----|
-| `ToListAsync(ct)` | `Result<List<T>>` | `SELECT …` |
-| `FirstOrDefaultAsync(ct)` | `Result<T?>` | `SELECT … LIMIT 1` |
-| `ToPagedListAsync(page, pageSize, ct)` | `Result<PagedResult<T>>` | data page + `COUNT(*)` |
-| `CountAsync(ct)` | `Result<long>` | `SELECT COUNT(*)` |
-| `MaxAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MAX(col)` |
-| `MinAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT MIN(col)` |
-| `SumAsync<TResult>(selector, ct)` | `Result<TResult>` | `SELECT SUM(col)` |
-| `AverageAsync<TResult>(selector, ct)` | `Result<double>` | `SELECT AVG(col)` |
-| `UpdateAsync(updates, ct)` | `Result<int>` | bulk `UPDATE` |
-| `DeleteAsync(ct)` | `Result<int>` | bulk `DELETE` |
-
-```csharp
-Result<User?>   first = await pg.Query<User>().Where(u => u.Id == 1).FirstOrDefaultAsync();
-Result<long>    open  = await pg.Query<User>().Where(u => u.IsActive).CountAsync();
-Result<int>     top   = await pg.Query<User>().MaxAsync(u => u.LoginCount);
-Result<int>     total = await pg.Query<User>().SumAsync(u => u.LoginCount);
-Result<double>  avg   = await pg.Query<User>().AverageAsync(u => u.LoginCount);
-```
-
-> Both the repository's `CountAsync` and the **query builder's** `CountAsync` return `Result<long>`. Use the builder when you need to count a filtered set.
-
-## Bulk update & delete
-
-The builder runs set-based mutations server-side without materializing rows. Both honour the chained `Where` filter.
-
-```csharp
-// Bulk update via an explicit column map
-Result<int> archived = await pg.Query<User>()
-    .Where(u => !u.IsActive)
-    .UpdateAsync(new Dictionary<string, object?> { ["Status"] = "archived" });
-
-// Bulk delete
-Result<int> purged = await pg.Query<User>()
-    .Where(u => !u.IsActive)
-    .DeleteAsync();
-```
-
-> A bulk `UpdateAsync` / `DeleteAsync` without a `Where` filter targets the **whole table**. Filter deliberately.
-
-## Raw SQL escape hatch
-
-When the builder can't express something, `pg.QueryRaw()` returns a non-generic `QueryBuilder` for parameterized raw SQL. Rows come back as dictionaries keyed by column name.
-
-```csharp
-var raw = pg.QueryRaw();   // optional connectionId
-
-// Query → list of column→value dictionaries
-Result<List<Dictionary<string, object?>>> rows = await raw.QueryAsync(
-    "SELECT \"Name\", \"LoginCount\" FROM \"users\" WHERE \"Id\" = @id",
-    new() { ["@id"] = 1 });
-
-// Non-query → affected rows
-Result<int> affected = await raw.ExecuteAsync("TRUNCATE \"users\"");
-```
-
-To materialize raw SQL straight into an entity instead of dictionaries, use the repository's `RawQueryAsync` / `RawExecuteAsync`:
-
-```csharp
-var repo = pg.GetRepository<User>();
-Result<List<User>> users = await repo.RawQueryAsync(
-    "SELECT * FROM \"users\" WHERE \"Name\" = @n", new() { ["@n"] = "Ada" });
-Result<int> n = await repo.RawExecuteAsync("UPDATE \"users\" SET \"IsActive\" = false");
-```
+Pass values as parameters. Never interpolate them into the SQL string — the builder cannot
+protect a statement you assembled yourself.
 
 ## Transactions
 
-`BeginTransactionAsync` returns a `TransactionScope` (an `IAsyncDisposable`). Commit explicitly; if the scope is disposed without a commit it rolls back automatically.
-
 ```csharp
-await using TransactionScope tx = await pg.BeginTransactionAsync();   // optional connectionId
-try
-{
-    var raw = pg.QueryRaw();
-    await raw.ExecuteAsync("UPDATE \"accounts\" SET \"Balance\" = \"Balance\" - @amt WHERE \"Id\" = @from",
-        new() { ["@amt"] = 100m, ["@from"] = 1 });
-    await raw.ExecuteAsync("UPDATE \"accounts\" SET \"Balance\" = \"Balance\" + @amt WHERE \"Id\" = @to",
-        new() { ["@amt"] = 100m, ["@to"] = 2 });
+await using var tx = await pg.BeginTransactionAsync();
 
-    await tx.CommitAsync();
-}
-catch
-{
-    await tx.RollbackAsync();   // or just let the scope dispose
-    throw;
-}
+var repo = pg.GetRepository<User>(tx);
+await repo.InsertAsync(user);
+await pg.Query<Audit>(tx).Where(a => a.Stale).DeleteAsync();
+
+await tx.CommitAsync();      // without this, disposal rolls back
 ```
 
-`TransactionScope` exposes `CommitAsync(ct)` and `RollbackAsync(ct)`; disposal without a commit triggers an automatic rollback.
-
-## Choosing a connection
-
-Every entry point accepts a `connectionId` selecting a named database from `config.postgresql.json`; it defaults to `"Default"`. On the builder, `.WithConnection("Reporting")` does the same fluently.
-
-```csharp
-var reports = pg.Query<Sale>().WithConnection("Reporting");
-var repo    = pg.GetRepository<Sale>("Reporting");
-```
-
-## See also
-
-- [Getting Started](../../getting-started.md) — load, configure, and use any `CL.*` library.
-- [API Reference](../../api/index.md) — generated type/member documentation.
-- [Package on NuGet](https://www.nuget.org/packages/CodeLogic.PostgreSQL)
+The scope rolls back if it is disposed without a commit, so an early `return` or a thrown
+exception cannot silently leave a half-applied transaction.

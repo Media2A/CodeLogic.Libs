@@ -3,6 +3,106 @@
 All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-09-13
+
+### Changed
+
+- **Rebuilt on the `CL.MySQL2` architecture.** The library's internals were replaced with a
+  dialect-swapped port of `CL.MySQL2`, the same way `CL.MSSQL` was built, taking the source
+  tree from 17 files to 45 and bringing the three database libraries onto one codebase shape.
+
+### Added
+
+- Query cache with table-version invalidation, named smart-cache pools with background
+  refresh, and a pluggable cache store / coordinator for multi-node deployments.
+- Database-backed migrations: `IMigration`, `MigrationRunner`, `IMigrationContext`,
+  version-ordered plans, and rollback. Migration history now lives in a table rather than a
+  local JSON file, so instances of the same application no longer each keep their own copy
+  and re-run everything.
+- CRC-gated schema state tracking plus a `pg_advisory_lock`-based sync lock, so several
+  instances starting at once no longer race on DDL.
+- Joins, typed projections, grouping, cursor (keyset) pagination, `WhereIn`, `WhereNotIn`,
+  `WhereExists` and `WhereNotExists`.
+- `ON CONFLICT` upserts (`UpsertAsync`, `UpsertManyAsync`, `UpsertWithIncrementsAsync`),
+  soft delete, a retention worker, and query observability events.
+- `EntityMetadata<T>` with compiled property accessors and a compiled row materializer,
+  replacing the previous per-row reflection -- the old mapper ran a linear property scan
+  with a `GetCustomAttribute` call for every column of every row.
+- PostgreSQL-native type support: `uuid`, `timestamptz`, `jsonb`, arrays, ranges, `inet`,
+  `macaddr`, identity columns, and `INCLUDE` covering indexes.
+
+### Security
+
+- **Fixed SQL injection through unvalidated column names.** `GetByColumnAsync`,
+  `GetPagedAsync(orderByColumn)` and the dictionary overload of `QueryBuilder.UpdateAsync`
+  interpolated caller-supplied strings directly into SQL. All string-typed column APIs now
+  resolve through an `EntityMetadata<T>` allow-list, and identifiers are rendered through
+  `PostgreSqlDialect.Quote` and validated where they enter the metadata.
+- **Fixed connection-string injection.** Connection strings were assembled by string
+  concatenation, so a `;` in a password or database name could append arbitrary connection
+  options. They are now built with `NpgsqlConnectionStringBuilder`.
+- **`AllowDestructiveSync` is no longer a dead setting.** It was declared, surfaced in the
+  configuration UI as a guard against `DROP` during schema sync, and never read anywhere in
+  the library. Destructive DDL is now gated by `SyncMode` / `SchemaSyncLevel`, with
+  `AllowDestructiveSync` honoured for backwards compatibility.
+- LIKE metacharacters in user-supplied values are escaped, so a `%` in a search term no
+  longer silently changes the result set.
+- Backup filenames are sanitised rather than interpolated from schema and table names.
+
+### Fixed
+
+- **Schema sync no longer rewrites every table on every startup.** The analyzer compared
+  `information_schema.data_type` against the generated DDL with a lowercase string compare.
+  Those vocabularies never match -- PostgreSQL reports `character varying`, `numeric`,
+  `timestamp with time zone`; the generator emitted `VARCHAR(255)`, `NUMERIC(10,2)`,
+  `TIMESTAMPTZ` -- so every string, decimal, timestamp, time and array column was issued an
+  `ALTER COLUMN ... TYPE` on each sync, taking an `ACCESS EXCLUSIVE` lock and rewriting the
+  table. Types are now canonicalised through an alias table before comparison.
+- Unique columns produced two unique constraints: one inline in the column definition and
+  one as a separate named constraint.
+- DDL scripts were split on bare `;`, which broke any statement containing a semicolon in a
+  default or comment, and each fragment ran on its own connection so a table and its indexes
+  were not created atomically.
+- `Contains()` over an empty collection emitted `IN ()`, a syntax error. It now emits a
+  false literal.
+- `ToPagedListAsync` returned the first group's row count instead of the number of groups
+  when combined with `GroupBy`.
+- `InsertManyAsync` issued one round trip per row and was not transactional, so a failure
+  part-way through left earlier rows committed. Inserts are now batched and bounded by
+  PostgreSQL's 65535-parameter statement limit.
+- Bitwise `&` and `|` in a predicate were translated to logical `AND` / `OR`, silently
+  corrupting integer bitmask comparisons.
+- The retention worker used `DELETE ... LIMIT`, which PostgreSQL does not support; batches
+  are now selected by `ctid` with `FOR UPDATE SKIP LOCKED`.
+- Cancellation tokens were not forwarded to connection acquisition, so opening a connection
+  could not be cancelled.
+- `ConnectionManager` held its configuration map in a non-concurrent `Dictionary` that could
+  be written by `RegisterConfiguration` while another thread read it.
+- `ExecuteWithConnectionAsync` disposed the connection twice.
+
+### Migration notes
+
+This release is **not source-compatible**. Renames and behaviour changes:
+
+| Before | After |
+|--------|-------|
+| `PostgreSQLConfig` | `DatabaseConfiguration` |
+| `DatabaseConfig` | `PostgreSqlDatabaseConfig` |
+| config section `mysql` (a port leftover) | `postgresql` |
+| `SslMode` | `PostgreSqlSslMode` |
+| default port `3306` | `5432` |
+| `QueryRaw()` | `SqlQueryAsync<T>()` / `ExecuteSqlAsync()` |
+| `Models/Configuration.cs` | `Configuration/DatabaseConfiguration.cs` |
+
+- The `DataType` enum is now PostgreSQL's type set. `DataType.Unspecified` is the default
+  and infers from the CLR property type; `Guid` infers `uuid` rather than `CHAR(36)`, and
+  `DateTime` infers `timestamptz`.
+- Upserts need a conflict target. `ON CONFLICT` arbitrates on one named unique key rather
+  than MySQL's "any duplicate key". It is inferred when the entity has exactly one candidate
+  and must otherwise be passed as `conflictTarget`.
+- Non-nullable CLR value types now generate `NOT NULL` columns.
+- Identifiers are emitted double-quoted and are therefore case-sensitive.
+
 ## 2026-09-12
 
 ### Changed

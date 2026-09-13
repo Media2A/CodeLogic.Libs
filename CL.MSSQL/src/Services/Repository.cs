@@ -81,7 +81,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@p_{i}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute));
                 }
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -151,7 +151,7 @@ public sealed class Repository<T> where T : class, new()
                     inserted += count;
                 }
                 return inserted;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             _logger?.Debug($"[MSSQL] Bulk-inserted {inserted} records into {table} in {sw.ElapsedMilliseconds}ms");
@@ -197,7 +197,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@p_0_{i}", TypeConverter.ToDbValue(col.Get(entity), col.EffectiveStorageType), col.Attribute));
                 }
                 return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -272,7 +272,7 @@ public sealed class Repository<T> where T : class, new()
                     affected += Convert.ToInt32(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
                 }
                 return affected;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             _logger?.Debug($"[MSSQL] Bulk-upserted {list.Count} records into {table} in {sw.ElapsedMilliseconds}ms (rows affected: {affected})");
@@ -364,7 +364,7 @@ public sealed class Repository<T> where T : class, new()
                     cmd.Parameters.Add(TypeConverter.CreateParameter($"@p_0_{i}", TypeConverter.ToDbValue(col.Get(insertSeed), col.EffectiveStorageType), col.Attribute));
                 }
                 return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -417,7 +417,7 @@ public sealed class Repository<T> where T : class, new()
                 if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
                 var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
                 return map(reader);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -453,7 +453,7 @@ public sealed class Repository<T> where T : class, new()
                 var items = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -487,7 +487,7 @@ public sealed class Repository<T> where T : class, new()
                 var items = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -542,7 +542,7 @@ public sealed class Repository<T> where T : class, new()
                 var entities = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) entities.Add(map(reader));
                 return (entities, totalCount);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
@@ -577,7 +577,7 @@ public sealed class Repository<T> where T : class, new()
                 if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
                 cmd.CommandText = sql;
                 return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<long>.Success(count);
         }
@@ -615,7 +615,7 @@ public sealed class Repository<T> where T : class, new()
                 }
                 cmd.Parameters.AddWithValue("@__pk", TypeConverter.ToDbValue(pk.Get(entity), pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -662,7 +662,7 @@ public sealed class Repository<T> where T : class, new()
                 cmd.CommandText = sql;
                 cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(table);
             return Result<bool>.Success(affected > 0);
@@ -692,7 +692,7 @@ public sealed class Repository<T> where T : class, new()
                 cmd.Parameters.AddWithValue("@now", DateTime.UtcNow);
                 cmd.Parameters.AddWithValue("@id", TypeConverter.ToDbValue(id, pk.EffectiveStorageType) ?? DBNull.Value);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(table);
             return Result<bool>.Success(affected > 0);
@@ -736,7 +736,7 @@ public sealed class Repository<T> where T : class, new()
                 cmd.Parameters.AddWithValue("@delta", delta);
                 cmd.Parameters.AddWithValue("@id", id);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(table);
             return Result<int>.Success(affected);
@@ -792,7 +792,7 @@ public sealed class Repository<T> where T : class, new()
                 var items = new List<T>();
                 while (await reader.ReadAsync(ct).ConfigureAwait(false)) items.Add(map(reader));
                 return items;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             sw.Stop();
             LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -876,12 +876,16 @@ public sealed class Repository<T> where T : class, new()
 
     private static string Q(string identifier) => SqlServerDialect.Quote(identifier);
 
-    private async Task<TResult> ExecuteAsync<TResult>(Func<SqlConnection, Task<TResult>> action)
+    private async Task<TResult> ExecuteAsync<TResult>(
+        Func<SqlConnection, Task<TResult>> action,
+        CancellationToken ct = default)
     {
         if (_transactionScope is not null)
             return await action(_transactionScope.Connection).ConfigureAwait(false);
 
-        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
+        // The token has to reach ExecuteWithConnectionAsync, otherwise opening the
+        // connection (and any transient-failure retry around it) ignores cancellation.
+        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
     private void LogSlowQuery(string sql, long elapsedMs)

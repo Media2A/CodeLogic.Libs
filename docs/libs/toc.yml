@@ -30,8 +30,10 @@
       href: postgresql/index.md
     - name: Query Builder
       href: postgresql/queries.md
-    - name: Schema & Sync
-      href: postgresql/schema.md
+    - name: Schema & Migrations
+      href: postgresql/schema-migrations.md
+    - name: Performance & Caching
+      href: postgresql/performance.md
 - name: CL.SQLite
   items:
     - name: Overview
