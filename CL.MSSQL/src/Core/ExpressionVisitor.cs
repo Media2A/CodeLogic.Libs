@@ -253,19 +253,27 @@ internal sealed class SqlServerExpressionVisitor : ExpressionVisitor
                 if (entityMember is not null)
                     _currentComparisonStorageType = ResolveStorageType(entityMember.Member);
 
-                Visit(node.Arguments[1]);
-                _sql.Append(" IN (");
-                if (collection is System.Collections.IEnumerable enumerable)
+                // Materialise first: an empty set must not emit "IN ()", which is a syntax
+                // error. An empty set matches nothing, so a false literal is the right SQL
+                // and the column reference is skipped entirely.
+                var items = collection is System.Collections.IEnumerable source
+                    ? source.Cast<object?>().ToList()
+                    : [];
+                if (items.Count == 0)
                 {
-                    bool first = true;
-                    foreach (var item in enumerable)
-                    {
-                        if (!first) _sql.Append(", ");
-                        AddParameter(item);
-                        first = false;
-                    }
+                    _sql.Append("1 = 0");
                 }
-                _sql.Append(')');
+                else
+                {
+                    Visit(node.Arguments[1]);
+                    _sql.Append(" IN (");
+                    for (var i = 0; i < items.Count; i++)
+                    {
+                        if (i > 0) _sql.Append(", ");
+                        AddParameter(items[i]);
+                    }
+                    _sql.Append(')');
+                }
                 _currentComparisonStorageType = prevStorageType;
                 break;
             }

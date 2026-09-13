@@ -2,13 +2,14 @@ using System.Linq.Expressions;
 using CodeLogic;                          // Libraries, CodeLogicOptions
 using CL.PostgreSQL;
 using CL.PostgreSQL.Models;
+using CL.PostgreSQL.Configuration;
 using Xunit;
 
 namespace PostgreSQL.Tests;
 
 // ── CL.PostgreSQL tests ─────────────────────────────────────────────────────────
 // HYBRID strategy:
-//   • Config models (PostgreSQLConfig / DatabaseConfig) are pure, offline objects —
+//   • Config models (DatabaseConfiguration / DatabaseConfig) are pure, offline objects —
 //     validation and connection-string building are exercised directly with no
 //     external service. These ALWAYS run.
 //   • Real CRUD, the query builder, and the two bug-fix regressions need a live
@@ -22,7 +23,7 @@ public sealed class DatabaseConfigTests
     [Fact]
     public void Defaults_match_source()
     {
-        var cfg = new DatabaseConfig();
+        var cfg = new PostgreSqlDatabaseConfig();
 
         Assert.True(cfg.Enabled);
         Assert.Equal("localhost", cfg.Host);
@@ -32,10 +33,10 @@ public sealed class DatabaseConfigTests
         Assert.Equal(string.Empty, cfg.Password);
         Assert.Equal(30, cfg.ConnectionTimeout);
         Assert.Equal(30, cfg.CommandTimeout);
-        Assert.Equal(5, cfg.MinPoolSize);
+        Assert.Equal(1, cfg.MinPoolSize);
         Assert.Equal(100, cfg.MaxPoolSize);
-        Assert.Equal(60, cfg.MaxIdleTime);
-        Assert.Equal(SslMode.Prefer, cfg.SslMode);
+        Assert.Equal(300, cfg.ConnectionLifetime);
+        Assert.Equal(PostgreSqlSslMode.Prefer, cfg.SslMode);
         Assert.False(cfg.AllowDestructiveSync);
         Assert.Equal(1000, cfg.SlowQueryThresholdMs);
     }
@@ -44,7 +45,7 @@ public sealed class DatabaseConfigTests
     public void Validate_fails_when_required_fields_missing()
     {
         // A default config has empty Database + Username → invalid.
-        var result = new DatabaseConfig().Validate();
+        var result = new PostgreSqlDatabaseConfig().Validate();
 
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.Contains("Database", StringComparison.OrdinalIgnoreCase));
@@ -54,7 +55,7 @@ public sealed class DatabaseConfigTests
     [Fact]
     public void Validate_fails_when_host_blank()
     {
-        var cfg = new DatabaseConfig { Host = "  ", Database = "db", Username = "u" };
+        var cfg = new PostgreSqlDatabaseConfig { Host = "  ", Database = "db", Username = "u" };
         var result = cfg.Validate();
 
         Assert.False(result.IsValid);
@@ -64,7 +65,7 @@ public sealed class DatabaseConfigTests
     [Fact]
     public void Validate_passes_when_required_fields_present()
     {
-        var cfg = new DatabaseConfig
+        var cfg = new PostgreSqlDatabaseConfig
         {
             Host = "localhost",
             Database = "mydb",
@@ -80,7 +81,7 @@ public sealed class DatabaseConfigTests
     [Fact]
     public void BuildConnectionString_contains_host_port_and_database()
     {
-        var cfg = new DatabaseConfig
+        var cfg = new PostgreSqlDatabaseConfig
         {
             Host = "db.example.com",
             Port = 6543,
@@ -95,18 +96,18 @@ public sealed class DatabaseConfigTests
         Assert.Contains("Port=6543", connStr);
         Assert.Contains("Database=widgets", connStr);
         Assert.Contains("Username=appuser", connStr);
-        Assert.Contains($"SSL Mode={SslMode.Prefer}", connStr);
-        Assert.Contains("Minimum Pool Size=5", connStr);
+        Assert.Contains($"SSL Mode={PostgreSqlSslMode.Prefer}", connStr);
+        Assert.Contains("Minimum Pool Size=1", connStr);
         Assert.Contains("Maximum Pool Size=100", connStr);
     }
 }
 
-public sealed class PostgreSQLConfigTests
+public sealed class DatabaseConfigurationTests
 {
     [Fact]
     public void Default_config_has_one_Default_database()
     {
-        var cfg = new PostgreSQLConfig();
+        var cfg = new DatabaseConfiguration();
 
         Assert.True(cfg.Databases.ContainsKey("Default"));
         Assert.Single(cfg.Databases);
@@ -116,7 +117,7 @@ public sealed class PostgreSQLConfigTests
     public void Validate_aggregates_database_errors()
     {
         // The default "Default" database has empty Database/Username → top-level invalid.
-        var cfg = new PostgreSQLConfig();
+        var cfg = new DatabaseConfiguration();
         var result = cfg.Validate();
 
         Assert.False(result.IsValid);
@@ -126,11 +127,11 @@ public sealed class PostgreSQLConfigTests
     [Fact]
     public void Validate_passes_for_fully_specified_database()
     {
-        var cfg = new PostgreSQLConfig
+        var cfg = new DatabaseConfiguration
         {
             Databases = new()
             {
-                ["Default"] = new DatabaseConfig
+                ["Default"] = new PostgreSqlDatabaseConfig
                 {
                     Host = "localhost",
                     Database = "mydb",
@@ -148,7 +149,7 @@ public sealed class PostgreSQLConfigTests
     [Fact]
     public void Validate_fails_when_no_databases()
     {
-        var cfg = new PostgreSQLConfig { Databases = new() };
+        var cfg = new DatabaseConfiguration { Databases = new() };
         var result = cfg.Validate();
 
         Assert.False(result.IsValid);
@@ -288,7 +289,7 @@ public sealed class PostgreSQLIntegrationTests
     {
         var lib = Lib;
         // Clean slate each test so row-count assertions are deterministic.
-        await lib.QueryRaw().ExecuteAsync("DROP TABLE IF EXISTS \"public\".\"it_pg_widget\"");
+        await lib.ExecuteSqlAsync("DROP TABLE IF EXISTS \"public\".\"it_pg_widget\" CASCADE");
         var sync = await lib.SyncTableAsync<PgWidget>(createBackup: false);
         Assert.True(sync.IsSuccess, sync.Error?.Message);
         Assert.True(sync.Value!.Success, string.Join("; ", sync.Value.Errors));

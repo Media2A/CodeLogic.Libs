@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -12,7 +13,9 @@ using Npgsql;
 namespace CL.PostgreSQL.Services;
 
 /// <summary>
-/// Fluent query builder for entity type T using PostgreSQL double-quoted identifiers.
+/// Fluent query builder for entity type <typeparamref name="T"/>.
+/// Chains WHERE, ORDER BY, JOIN, GROUP BY, LIMIT/OFFSET clauses and executes
+/// terminal operations returning <see cref="Result{T}"/>.
 /// </summary>
 public sealed class QueryBuilder<T> where T : class, new()
 {
@@ -22,14 +25,29 @@ public sealed class QueryBuilder<T> where T : class, new()
     private readonly TransactionScope? _transactionScope;
     private readonly int _slowQueryThresholdMs;
 
+    // Builder state
     private readonly List<(string Clause, Dictionary<string, object?> Params)> _wheres = [];
+    // Raw predicate expressions, retained so a later typed .Join can re-translate them
+    // with the left-table alias (the pre-translated SQL above is alias-less).
+    private readonly List<Expression<Func<T, bool>>> _wherePredicates = [];
     private readonly List<string> _orderBys = [];
+    private readonly List<CursorOrder> _cursorOrders = [];
     private readonly List<string> _joins = [];
     private readonly List<string> _groupBys = [];
     private int? _limit;
     private int? _offset;
-    private string? _selectColumns;
     private int _paramCounter;
+    private TimeSpan? _cacheTtl;
+    private string? _smartCachePool;
+    // Set when a subquery filter (EXISTS / IN) is present. Such filters reference a
+    // second table the result cache can't track for invalidation, and they can't be
+    // re-aliased into a typed .Join — both are gated on this flag.
+    private bool _hasSubqueryWhere;
+    // When false (default), reads on a [SoftDelete] entity append `<col> IS NULL`.
+    private bool _includeDeleted;
+    private string? _afterCursor;
+
+    // ── Constructors ──────────────────────────────────────────────────────────
 
     public QueryBuilder(
         ConnectionManager connectionManager,
@@ -60,7 +78,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     public QueryBuilder<T> Where(Expression<Func<T, bool>> predicate)
     {
-        var (clause, parms) = PostgreSQLExpressionVisitor.Translate(predicate);
+        var (clause, parms) = PostgreSqlExpressionVisitor.Translate(predicate);
         // Re-key parameters to avoid collisions. Longer parameter names are replaced
         // first so @p1 can't clobber a substring of @p10/@p11 (predicates with 11+ params).
         var rekeyed = new Dictionary<string, object?>();
@@ -71,20 +89,148 @@ public sealed class QueryBuilder<T> where T : class, new()
             clause = clause.Replace(kv.Key, newKey);
         }
         _wheres.Add((clause, rekeyed));
+        _wherePredicates.Add(predicate);
         return this;
+    }
+
+    /// <summary>
+    /// Adds a correlated <c>EXISTS</c> filter. The predicate may reference both the outer
+    /// row and a row of <typeparamref name="TInner"/>; any non-correlated condition on the
+    /// inner side belongs in the same predicate. Translates to
+    /// <c>EXISTS (SELECT 1 FROM `inner` WHERE …)</c>.
+    /// <para>Example:
+    /// <code>
+    /// mysql.Query&lt;Order&gt;()
+    ///   .WhereExists&lt;Shipment&gt;((o, s) =&gt; s.OrderId == o.Id &amp;&amp; s.Status == "sent")
+    /// </code></para>
+    /// <para><b>Not supported:</b> EXISTS against the same table as the outer query
+    /// (unqualified inner columns would be ambiguous). A query carrying a subquery filter
+    /// is not cacheable and cannot be turned into a typed <c>.Join</c>.</para>
+    /// </summary>
+    public QueryBuilder<T> WhereExists<TInner>(Expression<Func<T, TInner, bool>> predicate)
+        where TInner : class, new()
+        => AddExists(predicate, negate: false);
+
+    /// <summary>Correlated <c>NOT EXISTS</c> filter. See <see cref="WhereExists{TInner}"/>.</summary>
+    public QueryBuilder<T> WhereNotExists<TInner>(Expression<Func<T, TInner, bool>> predicate)
+        where TInner : class, new()
+        => AddExists(predicate, negate: true);
+
+    private QueryBuilder<T> AddExists<TInner>(Expression<Func<T, TInner, bool>> predicate, bool negate)
+        where TInner : class, new()
+    {
+        var outerTable = GetTableName();
+        var innerTable = EntityMetadata<TInner>.TableName;
+        if (string.Equals(outerTable, innerTable, StringComparison.OrdinalIgnoreCase))
+            throw new NotSupportedException(
+                "WhereExists/WhereNotExists against the same table as the outer query is not " +
+                "supported — unqualified inner columns would be ambiguous.");
+
+        var map = new Dictionary<ParameterExpression, string>
+        {
+            [predicate.Parameters[0]] = outerTable,
+            [predicate.Parameters[1]] = innerTable,
+        };
+        var (cond, parms) = PostgreSqlExpressionVisitor.TranslateMulti(predicate, map);
+        var keyword = negate ? "NOT EXISTS" : "EXISTS";
+        AppendSubqueryWhere($"{keyword} (SELECT 1 FROM {EntityMetadata<TInner>.QualifiedTableName} WHERE {cond})", parms);
+        return this;
+    }
+
+    /// <summary>
+    /// Adds an <c>IN (subquery)</c> filter: <c>outerColumn IN (SELECT innerColumn FROM
+    /// `inner` [WHERE innerFilter])</c>. The inner filter is uncorrelated (it sees only
+    /// <typeparamref name="TInner"/>).
+    /// <para>Example:
+    /// <code>
+    /// mysql.Query&lt;Order&gt;()
+    ///   .WhereIn&lt;Customer, long&gt;(o =&gt; o.CustomerId, c =&gt; c.Id, c =&gt; c.IsVip)
+    /// </code></para>
+    /// <para>A query carrying a subquery filter is not cacheable and cannot be turned into
+    /// a typed <c>.Join</c>.</para>
+    /// </summary>
+    public QueryBuilder<T> WhereIn<TInner, TKey>(
+        Expression<Func<T, TKey>> outerColumn,
+        Expression<Func<TInner, TKey>> innerColumn,
+        Expression<Func<TInner, bool>>? innerFilter = null)
+        where TInner : class, new()
+        => AddIn(outerColumn, innerColumn, innerFilter, negate: false);
+
+    /// <summary>Adds a <c>NOT IN (subquery)</c> filter. See <see cref="WhereIn{TInner, TKey}"/>.</summary>
+    public QueryBuilder<T> WhereNotIn<TInner, TKey>(
+        Expression<Func<T, TKey>> outerColumn,
+        Expression<Func<TInner, TKey>> innerColumn,
+        Expression<Func<TInner, bool>>? innerFilter = null)
+        where TInner : class, new()
+        => AddIn(outerColumn, innerColumn, innerFilter, negate: true);
+
+    private QueryBuilder<T> AddIn<TInner, TKey>(
+        Expression<Func<T, TKey>> outerColumn,
+        Expression<Func<TInner, TKey>> innerColumn,
+        Expression<Func<TInner, bool>>? innerFilter,
+        bool negate) where TInner : class, new()
+    {
+        var outerCol = PostgreSqlExpressionVisitor.TranslateSelector(outerColumn);
+        var innerCol = PostgreSqlExpressionVisitor.TranslateSelector(innerColumn);
+        var innerTable = EntityMetadata<TInner>.TableName;
+
+        var parms = new Dictionary<string, object?>();
+        var whereSql = string.Empty;
+        if (innerFilter is not null)
+        {
+            var (cond, p) = PostgreSqlExpressionVisitor.Translate(innerFilter);
+            whereSql = $" WHERE {cond}";
+            parms = p;
+        }
+
+        var keyword = negate ? "NOT IN" : "IN";
+        AppendSubqueryWhere(
+            $"{PostgreSqlDialect.Quote(outerCol)} {keyword} (SELECT {PostgreSqlDialect.Quote(innerCol)} FROM {EntityMetadata<TInner>.QualifiedTableName}{whereSql})", parms);
+        return this;
+    }
+
+    /// <summary>
+    /// Re-keys a subquery fragment's parameters into the outer query's namespace
+    /// (<c>@sub_N</c>) and appends it as a WHERE term. Longer parameter names are replaced
+    /// first so <c>@p1</c> can't clobber a substring of <c>@p10</c>.
+    /// </summary>
+    private void AppendSubqueryWhere(string clause, Dictionary<string, object?> parms)
+    {
+        var rekeyed = new Dictionary<string, object?>();
+        foreach (var kv in parms.OrderByDescending(k => k.Key.Length))
+        {
+            var newKey = $"@sub_{_paramCounter++}";
+            rekeyed[newKey] = kv.Value;
+            clause = clause.Replace(kv.Key, newKey);
+        }
+        _wheres.Add((clause, rekeyed));
+        _hasSubqueryWhere = true;
     }
 
     public QueryBuilder<T> OrderBy<TKey>(Expression<Func<T, TKey>> keySelector)
     {
-        var col = PostgreSQLExpressionVisitor.TranslateSelector(keySelector);
-        _orderBys.Add($"\"{col}\" ASC");
+        var col = PostgreSqlExpressionVisitor.TranslateSelector(keySelector);
+        _orderBys.Add($"{PostgreSqlDialect.Quote(col)} ASC");
+        _cursorOrders.Add(new CursorOrder(EntityMetadata<T>.RequireColumn(col), Descending: false));
         return this;
     }
 
     public QueryBuilder<T> OrderByDescending<TKey>(Expression<Func<T, TKey>> keySelector)
     {
-        var col = PostgreSQLExpressionVisitor.TranslateSelector(keySelector);
-        _orderBys.Add($"\"{col}\" DESC");
+        var col = PostgreSqlExpressionVisitor.TranslateSelector(keySelector);
+        _orderBys.Add($"{PostgreSqlDialect.Quote(col)} DESC");
+        _cursorOrders.Add(new CursorOrder(EntityMetadata<T>.RequireColumn(col), Descending: true));
+        return this;
+    }
+
+    /// <summary>
+    /// Continues a cursor-paged query after <paramref name="cursor"/>. The cursor must have
+    /// been returned by <see cref="ToCursorPagedListAsync"/> for the same entity and ordering.
+    /// A null cursor selects the first page.
+    /// </summary>
+    public QueryBuilder<T> After(string? cursor)
+    {
+        _afterCursor = cursor;
         return this;
     }
 
@@ -95,6 +241,7 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     public QueryBuilder<T> Join(string table, string condition, JoinType type = JoinType.Inner)
     {
+        EnsureCursorNotSet(nameof(Join));
         var keyword = type switch
         {
             JoinType.Left  => "LEFT JOIN",
@@ -102,31 +249,119 @@ public sealed class QueryBuilder<T> where T : class, new()
             JoinType.Cross => "CROSS JOIN",
             _              => "INNER JOIN"
         };
-        _joins.Add($"{keyword} \"{table}\" ON {condition}");
+        _joins.Add($"{keyword} {PostgreSqlDialect.QuoteMultipart(table)} ON {condition}");
         return this;
     }
 
-    public QueryBuilder<T> Select(Expression<Func<T, object?>> selector)
+    /// <summary>
+    /// Strongly-typed equi-join to <typeparamref name="TRight"/>, translated to real SQL with
+    /// table aliases (left <c>t0</c>, right <c>t1</c>) and a compiled projection into
+    /// <typeparamref name="TResult"/> — only the referenced columns are transferred.
+    /// <para>
+    /// Example:
+    /// <code>
+    /// await mysql.Query&lt;Order&gt;()
+    ///     .Where(o =&gt; o.Total &gt; 100)
+    ///     .Join&lt;Customer, long, OrderView&gt;(
+    ///         o =&gt; o.CustomerId,             // left key
+    ///         c =&gt; c.Id,                     // right key
+    ///         (o, c) =&gt; new OrderView { OrderId = o.Id, Customer = c.Name })
+    ///     .OrderByDescending((o, c) =&gt; o.Total)
+    ///     .ToListAsync();
+    /// </code>
+    /// </para>
+    /// <para>
+    /// Keys may be single members or composite anonymous keys
+    /// (<c>o =&gt; new { o.A, o.B }</c> matched with <c>c =&gt; new { c.X, c.Y }</c>).
+    /// <c>.Where(...)</c> calls made before <c>.Join</c> are carried over and re-qualified
+    /// to the left table. Apply ordering and paging <i>after</i> the join via the returned
+    /// <see cref="JoinedQuery{TLeft, TRight, TResult}"/>.
+    /// </para>
+    /// </summary>
+    public JoinedQuery<T, TRight, TResult> Join<TRight, TKey, TResult>(
+        Expression<Func<T, TKey>> leftKey,
+        Expression<Func<TRight, TKey>> rightKey,
+        Expression<Func<T, TRight, TResult>> resultSelector,
+        JoinType type = JoinType.Inner)
+        where TRight : class, new()
     {
-        if (selector.Body is NewExpression newExpr)
+        EnsureCursorNotSet(nameof(Join));
+        if (_orderBys.Count > 0 || _limit.HasValue || _offset.HasValue)
+            throw new InvalidOperationException(
+                "Apply OrderBy / Take / Skip after .Join, on the returned JoinedQuery — " +
+                "ordering and paging set before the join would be silently dropped.");
+        if (_joins.Count > 0 || _groupBys.Count > 0)
+            throw new InvalidOperationException(
+                "Typed .Join cannot be combined with raw .Join(string,...) or .GroupBy on the same query.");
+        if (_hasSubqueryWhere)
+            throw new InvalidOperationException(
+                "Typed .Join cannot be combined with a subquery filter (WhereExists / WhereIn) — " +
+                "express the relationship through the join instead.");
+
+        const string leftAlias = "t0";
+        const string rightAlias = "t1";
+
+        var onClause = JoinTranslator.OnClause(leftKey, leftAlias, rightKey, rightAlias);
+
+        var aliasMap = new Dictionary<ParameterExpression, string>
         {
-            var cols = newExpr.Members!
-                .Select(m => $"\"{GetColumnNameFromMember(m)}\"");
-            _selectColumns = string.Join(", ", cols);
-        }
-        else
-        {
-            var col = PostgreSQLExpressionVisitor.TranslateSelector(selector);
-            _selectColumns = $"\"{col}\"";
-        }
-        return this;
+            [resultSelector.Parameters[0]] = leftAlias,
+            [resultSelector.Parameters[1]] = rightAlias,
+        };
+        var columns = JoinTranslator.ProjectionColumns(resultSelector.Body, aliasMap);
+        var projection = ProjectionCompiler.CompileFromColumns<T, TResult>(resultSelector.Body, columns);
+
+        var joined = new JoinedQuery<T, TRight, TResult>(
+            _connectionManager, _logger, _connectionId, _transactionScope, _slowQueryThresholdMs,
+            EntityMetadata<T>.TableName, EntityMetadata<TRight>.TableName, type, onClause, projection);
+
+        // Carry forward any left-side filters applied before the join.
+        foreach (var predicate in _wherePredicates)
+            joined.AddLeftPredicate(predicate);
+
+        return joined;
     }
 
-    public QueryBuilder<T> GroupBy<TKey>(Expression<Func<T, TKey>> keySelector)
+    /// <summary>
+    /// Typed projection: transforms rows of <typeparamref name="T"/> into rows of
+    /// <typeparamref name="TResult"/>. Emits a real <c>SELECT col1, col2 AS alias</c>
+    /// column list and returns a pipeline whose terminals hydrate
+    /// <typeparamref name="TResult"/> directly — skipping <typeparamref name="T"/>
+    /// materialization and any columns not referenced by the projection.
+    /// </summary>
+    public ProjectedQuery<T, TResult> Select<TResult>(Expression<Func<T, TResult>> selector)
     {
-        var col = PostgreSQLExpressionVisitor.TranslateSelector(keySelector);
-        _groupBys.Add($"\"{col}\"");
-        return this;
+        EnsureCursorNotSet(nameof(Select));
+        var compiled = ProjectionCompiler.Compile(selector);
+
+        var tableName = GetTableName();
+        var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
+        var (whereClause, parms) = BuildWhereSql();
+        var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
+        var orderBySql = _orderBys.Count > 0 ? $" ORDER BY {string.Join(", ", _orderBys)}" : string.Empty;
+        var limitSql = _limit.HasValue ? $" LIMIT {_limit.Value}" : string.Empty;
+        var offsetSql = _offset.HasValue ? $" OFFSET {_offset.Value}" : string.Empty;
+
+        var sql = $"SELECT {compiled.SelectList} FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+
+        return new ProjectedQuery<T, TResult>(
+            _connectionManager, _logger, _connectionId, _transactionScope,
+            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl, _smartCachePool);
+    }
+
+    /// <summary>
+    /// Groups rows by the key selector and returns a <see cref="GroupedQuery{TKey, TSource}"/>.
+    /// Collapse the groups with <c>.Select(g =&gt; new { … g.Sum(...) … })</c>; nothing is
+    /// executed until a terminal on the projected query.
+    /// </summary>
+    public GroupedQuery<TKey, T> GroupBy<TKey>(Expression<Func<T, TKey>> keySelector)
+    {
+        EnsureCursorNotSet(nameof(GroupBy));
+        var (whereClause, parms) = BuildWhereSql();
+        return new GroupedQuery<TKey, T>(
+            _connectionManager, _logger, _connectionId, _transactionScope,
+            _slowQueryThresholdMs, whereClause, parms, keySelector,
+            _cacheTtl, _orderBys, _limit, _offset);
     }
 
     public QueryBuilder<T> WithConnection(string connectionId)
@@ -135,62 +370,215 @@ public sealed class QueryBuilder<T> where T : class, new()
         return this;
     }
 
+    /// <summary>
+    /// Includes soft-deleted rows in the results. Only meaningful when the entity carries
+    /// <see cref="Models.SoftDeleteAttribute"/>; otherwise a no-op. Reads exclude soft-deleted
+    /// rows by default.
+    /// </summary>
+    public QueryBuilder<T> IncludeDeleted()
+    {
+        _includeDeleted = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Enable result caching for this query. Cached results are automatically invalidated
+    /// when any mutation (INSERT/UPDATE/DELETE) occurs on the same table.
+    /// Has no effect inside a transaction scope (reads in transactions see uncommitted writes).
+    /// </summary>
+    public QueryBuilder<T> WithCache(TimeSpan ttl)
+    {
+        _cacheTtl = ttl;
+        return this;
+    }
+
+    /// <summary>
+    /// Opt this query into a named <see cref="SmartCachePool"/>. The pool's
+    /// background timer keeps the cache entry warm — readers never block on
+    /// the DB once the entry is populated. The pool must be registered via
+    /// <c>PostgreSQLLibrary.RegisterCachePool</c> beforehand; an unknown name
+    /// falls back to non-cached execution (logged at warn).
+    /// <para>
+    /// Mutually exclusive with <see cref="WithCache(TimeSpan)"/> — if both
+    /// are set, <c>SmartCache</c> wins and the TTL is derived from the
+    /// pool's refresh interval.
+    /// </para>
+    /// </summary>
+    public QueryBuilder<T> SmartCache(string poolName)
+    {
+        _smartCachePool = poolName;
+        return this;
+    }
+
+    // Plain cache-aside requires an explicit TTL. A query that asked for
+    // SmartCache against an UNREGISTERED pool must fall through to truly
+    // uncached execution (the logged fallback) — including _smartCachePool
+    // here used to send it into the TTL branch and dereference a null
+    // _cacheTtl ("Nullable object must have a value").
+    // Subquery-filtered queries are not cacheable: the cache stamps entries with a single
+    // table's version, so a mutation on the EXISTS/IN inner table couldn't invalidate them.
+    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null && !_hasSubqueryWhere;
+    private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null && !_hasSubqueryWhere;
+
     // ── Terminal methods ──────────────────────────────────────────────────────
 
     public async Task<Result<List<T>>> ToListAsync(CancellationToken ct = default)
     {
         try
         {
+            EnsureCursorNotSet(nameof(ToListAsync));
             var (sql, parms) = BuildSelectSql();
-            LogQuery(sql);
-            var sw = Stopwatch.StartNew();
+            var tableName = GetTableName();
 
-            var list = await ExecuteAsync(async conn =>
+            if (ShouldSmartCache)
             {
-                await using var cmd = BuildCommand(conn, sql, parms);
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                var items = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    items.Add(MapReader(reader));
-                return items;
-            }).ConfigureAwait(false);
+                var pool = SmartCachePoolRegistry.Get(_smartCachePool!);
+                if (pool is null)
+                {
+                    _logger?.Warning($"[PostgreSQL] SmartCache pool '{_smartCachePool}' is not registered — falling back to uncached execution.");
+                }
+                else
+                {
+                    var ttl = TimeSpan.FromMilliseconds(pool.RefreshEvery.TotalMilliseconds * 2);
+                    pool.RegisterOrTouch(_connectionId, tableName, sql, parms,
+                        refreshFactory: async tickCt =>
+                        {
+                            // Store the full Result — GetOrSetAsync reads it back as Result<List<T>> and casts.
+                            var r = await ExecuteToList(sql, parms, tickCt).ConfigureAwait(false);
+                            return r.IsSuccess ? (object?)r : null;
+                        });
 
-            sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
-            return Result<List<T>>.Success(list);
+                    var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                    pool.Touch(_connectionId, tableName, sql, parms);
+                    return await QueryCache.GetOrSetAsync(
+                        cacheKey, tableName,
+                        () => ExecuteToList(sql, parms, ct), ttl, _connectionId).ConfigureAwait(false);
+                }
+            }
+
+            if (ShouldCache)
+            {
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                // connectionId passed in so cache hits / misses fire observability events.
+                return await QueryCache.GetOrSetAsync(cacheKey, tableName, () => ExecuteToList(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+            }
+
+            return await ExecuteToList(sql, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.ToListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder.ToListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<List<T>>.Failure(Error.FromException(ex, "postgresql.query_failed"));
         }
+    }
+
+
+    /// <summary>
+    /// Best-effort query description for error logs — the SELECT shape (table +
+    /// WHERE) pinpoints the failing call site even for update/delete variants.
+    /// Never throws.
+    /// </summary>
+    private string DescribeQueryForLog()
+    {
+        try
+        {
+            var (sql, _) = BuildSelectSql();
+            return sql;
+        }
+        catch
+        {
+            try { return $"<table {GetTableName()}>"; } catch { return "<unknown>"; }
+        }
+    }
+
+    private async Task<Result<List<T>>> ExecuteToList(string sql, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        LogQuery(sql);
+        var sw = Stopwatch.StartNew();
+
+        var list = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+            var items = new List<T>();
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                items.Add(map(reader));
+            return items;
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        return Result<List<T>>.Success(list);
     }
 
     public async Task<Result<T?>> FirstOrDefaultAsync(CancellationToken ct = default)
     {
         try
         {
+            EnsureCursorNotSet(nameof(FirstOrDefaultAsync));
             Limit(1);
             var (sql, parms) = BuildSelectSql();
-            LogQuery(sql);
-            var sw = Stopwatch.StartNew();
+            var tableName = GetTableName();
 
-            var result = await ExecuteAsync(async conn =>
+            if (ShouldSmartCache)
             {
-                await using var cmd = BuildCommand(conn, sql, parms);
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapReader(reader) : null;
-            }).ConfigureAwait(false);
+                var pool = SmartCachePoolRegistry.Get(_smartCachePool!);
+                if (pool is null)
+                {
+                    _logger?.Warning($"[PostgreSQL] SmartCache pool '{_smartCachePool}' is not registered — falling back to uncached execution.");
+                }
+                else
+                {
+                    var ttl = TimeSpan.FromMilliseconds(pool.RefreshEvery.TotalMilliseconds * 2);
+                    pool.RegisterOrTouch(_connectionId, tableName, sql, parms,
+                        refreshFactory: async tickCt =>
+                        {
+                            var r = await ExecuteFirstOrDefault(sql, parms, tickCt).ConfigureAwait(false);
+                            return r.IsSuccess ? (object?)r : null;
+                        });
 
-            sw.Stop();
-            LogSlowQuery(sql, sw.ElapsedMilliseconds);
-            return Result<T?>.Success(result);
+                    var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                    pool.Touch(_connectionId, tableName, sql, parms);
+                    return await QueryCache.GetOrSetAsync(
+                        cacheKey, tableName,
+                        () => ExecuteFirstOrDefault(sql, parms, ct), ttl, _connectionId).ConfigureAwait(false);
+                }
+            }
+
+            if (ShouldCache)
+            {
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                // connectionId passed in so cache hits / misses fire observability events.
+                return await QueryCache.GetOrSetAsync(cacheKey, tableName, () => ExecuteFirstOrDefault(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+            }
+
+            return await ExecuteFirstOrDefault(sql, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.FirstOrDefaultAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder.FirstOrDefaultAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<T?>.Failure(Error.FromException(ex, "postgresql.query_failed"));
         }
+    }
+
+    private async Task<Result<T?>> ExecuteFirstOrDefault(string sql, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        LogQuery(sql);
+        var sw = Stopwatch.StartNew();
+
+        var result = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+            return map(reader);
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(sql, sw.ElapsedMilliseconds);
+        return Result<T?>.Success(result);
     }
 
     public async Task<Result<PagedResult<T>>> ToPagedListAsync(
@@ -200,72 +588,225 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
-            var (schemaName, tableName) = GetTableInfo();
+            EnsureCursorNotSet(nameof(ToPagedListAsync));
+            var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
             var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
 
-            var countSql = $"SELECT COUNT(*) FROM \"{schemaName}\".\"{tableName}\"{joinSql}{whereClause}{groupBySql}";
+            var countSql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}";
             var dataSql = BuildSelectSql(page, pageSize).Sql;
-            LogQuery(dataSql);
 
-            var sw = Stopwatch.StartNew();
-            var (items, total) = await ExecuteAsync(async conn =>
+            if (ShouldCache)
             {
-                await using var countCmd = BuildCommand(conn, countSql, parms);
-                var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), dataSql, parms);
+                return await QueryCache.GetOrSetAsync(cacheKey, tblName,
+                    () => ExecutePagedList(countSql, page, pageSize, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+            }
 
-                var (dSql, dParms) = BuildSelectSql(page, pageSize);
-                await using var cmd = BuildCommand(conn, dSql, dParms);
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                var entities = new List<T>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                    entities.Add(MapReader(reader));
-
-                return (entities, totalCount);
-            }).ConfigureAwait(false);
-
-            sw.Stop();
-            LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
-
-            return Result<PagedResult<T>>.Success(new PagedResult<T>
-            {
-                Items = items,
-                PageNumber = page,
-                PageSize = pageSize,
-                TotalItems = total
-            });
+            return await ExecutePagedList(countSql, page, pageSize, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.ToPagedListAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder.ToPagedListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<PagedResult<T>>.Failure(Error.FromException(ex, "postgresql.query_failed"));
         }
+    }
+
+    private async Task<Result<PagedResult<T>>> ExecutePagedList(
+        string countSql, int page, int pageSize, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        var dataSql = BuildSelectSql(page, pageSize).Sql;
+        LogQuery(dataSql);
+
+        var sw = Stopwatch.StartNew();
+        var (items, total) = await ExecuteAsync(async conn =>
+        {
+            await using var countCmd = BuildCommand(conn, countSql, parms);
+            var totalCount = Convert.ToInt64(await countCmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+
+            var (dSql, dParms) = BuildSelectSql(page, pageSize);
+            await using var cmd = BuildCommand(conn, dSql, dParms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+            var entities = new List<T>();
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                entities.Add(map(reader));
+
+            return (entities, totalCount);
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
+
+        return Result<PagedResult<T>>.Success(new PagedResult<T>
+        {
+            Items = items,
+            PageNumber = page,
+            PageSize = pageSize,
+            TotalItems = total
+        });
+    }
+
+    /// <summary>
+    /// Executes a forward-only keyset page. At least one explicit ordering is required;
+    /// the mapped primary key is appended automatically when it is not already present.
+    /// </summary>
+    public async Task<Result<CursorPagedResult<T>>> ToCursorPagedListAsync(
+        int pageSize,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (pageSize <= 0 || pageSize == int.MaxValue)
+                throw new CursorPagingException("Cursor page size must be between 1 and Int32.MaxValue - 1.");
+            if (_limit.HasValue || _offset.HasValue)
+                throw new CursorPagingException(
+                    "Take/Limit and Skip/Offset cannot be combined with ToCursorPagedListAsync; pass the size to the terminal.");
+            if (_joins.Count > 0 || _groupBys.Count > 0)
+                throw new CursorPagingException(
+                    "Cursor paging is supported only for plain entity queries, not raw joins or grouped queries.");
+
+            var orders = CursorPagination.GetEffectiveOrder<T>(_cursorOrders);
+            var (whereClause, parms) = BuildWhereSql();
+
+            if (_afterCursor is not null)
+            {
+                var values = CursorTokenCodec.Decode<T>(_afterCursor, orders);
+                var (seekSql, seekParms) = CursorPagination.BuildSeekPredicate(orders, values);
+                whereClause = AppendWherePredicate(whereClause, seekSql);
+                foreach (var pair in seekParms)
+                    parms.Add(pair.Key, pair.Value);
+            }
+
+            var orderSql = string.Join(", ", orders.Select(RenderOrder));
+            var sql = $"SELECT * FROM {EntityMetadata<T>.QualifiedTableName}{whereClause} ORDER BY {orderSql} LIMIT {pageSize + 1}";
+            var tableName = GetTableName();
+
+            if (ShouldCache)
+            {
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, tableName, sql, parms);
+                return await QueryCache.GetOrSetAsync(
+                    cacheKey, tableName,
+                    () => ExecuteCursorPage(sql, parms, orders, pageSize, ct),
+                    _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+            }
+
+            return await ExecuteCursorPage(sql, parms, orders, pageSize, ct).ConfigureAwait(false);
+        }
+        catch (CursorPagingException ex)
+        {
+            _logger?.Warning($"[PostgreSQL] QueryBuilder.ToCursorPagedListAsync rejected the query: {ex.Message}");
+            return Result<CursorPagedResult<T>>.Failure(Error.FromException(ex, ex.ErrorCode));
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[PostgreSQL] QueryBuilder.ToCursorPagedListAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
+            return Result<CursorPagedResult<T>>.Failure(Error.FromException(ex, "postgresql.query_failed"));
+        }
+    }
+
+    private async Task<Result<CursorPagedResult<T>>> ExecuteCursorPage(
+        string sql,
+        Dictionary<string, object?> parms,
+        IReadOnlyList<CursorOrder> orders,
+        int pageSize,
+        CancellationToken ct)
+    {
+        LogQuery(sql);
+        var sw = Stopwatch.StartNew();
+
+        var items = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
+            var entities = new List<T>(pageSize + 1);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                entities.Add(map(reader));
+            return entities;
+        }).ConfigureAwait(false);
+
+        sw.Stop();
+        LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count);
+
+        var hasNextPage = items.Count > pageSize;
+        if (hasNextPage)
+            items.RemoveAt(pageSize);
+
+        var nextCursor = hasNextPage && items.Count > 0
+            ? CursorTokenCodec.Encode(items[^1], orders)
+            : null;
+
+        return Result<CursorPagedResult<T>>.Success(new CursorPagedResult<T>
+        {
+            Items = items,
+            PageSize = pageSize,
+            NextCursor = nextCursor
+        });
     }
 
     public async Task<Result<long>> CountAsync(CancellationToken ct = default)
     {
         try
         {
-            var (schemaName, tableName) = GetTableInfo();
+            EnsureCursorNotSet(nameof(CountAsync));
+            var tblName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
             var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
-            var sql = $"SELECT COUNT(*) FROM \"{schemaName}\".\"{tableName}\"{joinSql}{whereClause}";
+            var sql = $"SELECT COUNT(*) FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}";
 
-            LogQuery(sql);
-            var count = await ExecuteAsync(async conn =>
+            if (ShouldSmartCache)
             {
-                await using var cmd = BuildCommand(conn, sql, parms);
-                return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-            }).ConfigureAwait(false);
+                var pool = SmartCachePoolRegistry.Get(_smartCachePool!);
+                if (pool is null)
+                {
+                    _logger?.Warning($"[PostgreSQL] SmartCache pool '{_smartCachePool}' is not registered — falling back to uncached execution.");
+                }
+                else
+                {
+                    var ttl = TimeSpan.FromMilliseconds(pool.RefreshEvery.TotalMilliseconds * 2);
+                    pool.RegisterOrTouch(_connectionId, tblName, sql, parms,
+                        refreshFactory: async tickCt =>
+                        {
+                            var r = await ExecuteCount(sql, parms, tickCt).ConfigureAwait(false);
+                            return r.IsSuccess ? (object?)r : null;
+                        });
 
-            return Result<long>.Success(count);
+                    var cacheKey = QueryCache.BuildCacheKey(_connectionId, tblName, sql, parms);
+                    pool.Touch(_connectionId, tblName, sql, parms);
+                    return await QueryCache.GetOrSetAsync(
+                        cacheKey, tblName,
+                        () => ExecuteCount(sql, parms, ct), ttl, _connectionId).ConfigureAwait(false);
+                }
+            }
+
+            if (ShouldCache)
+            {
+                var cacheKey = QueryCache.BuildCacheKey(_connectionId, GetTableName(), sql, parms);
+                // connectionId passed in so cache hits / misses fire observability events.
+                return await QueryCache.GetOrSetAsync(cacheKey, tblName, () => ExecuteCount(sql, parms, ct), _cacheTtl!.Value, _connectionId).ConfigureAwait(false);
+            }
+
+            return await ExecuteCount(sql, parms, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.CountAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder.CountAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<long>.Failure(Error.FromException(ex, "postgresql.query_failed"));
         }
+    }
+
+    private async Task<Result<long>> ExecuteCount(string sql, Dictionary<string, object?> parms, CancellationToken ct)
+    {
+        LogQuery(sql);
+        var count = await ExecuteAsync(async conn =>
+        {
+            await using var cmd = BuildCommand(conn, sql, parms);
+            return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
+        }).ConfigureAwait(false);
+
+        return Result<long>.Success(count);
     }
 
     public Task<Result<TResult>> MaxAsync<TResult>(
@@ -289,10 +830,11 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
-            var col = PostgreSQLExpressionVisitor.TranslateSelector(selector);
-            var (schemaName, tableName) = GetTableInfo();
+            EnsureCursorNotSet(nameof(AverageAsync));
+            var col = PostgreSqlExpressionVisitor.TranslateSelector(selector);
+            var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
-            var sql = $"SELECT AVG(\"{col}\") FROM \"{schemaName}\".\"{tableName}\"{whereClause}";
+            var sql = $"SELECT AVG({PostgreSqlDialect.Quote(col)}) FROM {EntityMetadata<T>.QualifiedTableName}{whereClause}";
 
             LogQuery(sql);
             var value = await ExecuteAsync(async conn =>
@@ -306,7 +848,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.AverageAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder.AverageAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<double>.Failure(Error.FromException(ex, "postgresql.query_failed"));
         }
     }
@@ -315,9 +857,11 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
-            var (schemaName, tableName) = GetTableInfo();
-            var (whereClause, parms) = BuildWhereSql();
-            var sql = $"DELETE FROM \"{schemaName}\".\"{tableName}\"{whereClause}";
+            EnsureCursorNotSet(nameof(DeleteAsync));
+            var tableName = GetTableName();
+            // Hard delete — bypass the soft-delete read filter so it targets all matching rows.
+            var (whereClause, parms) = BuildWhereSql(applySoftDelete: false);
+            var sql = $"DELETE FROM {EntityMetadata<T>.QualifiedTableName}{whereClause}";
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -326,12 +870,119 @@ public sealed class QueryBuilder<T> where T : class, new()
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
+            QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.DeleteAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder.DeleteAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "postgresql.delete_failed"));
+        }
+    }
+
+    /// <summary>
+    /// Bulk-update matching rows with a typed setter expression. Emits a single
+    /// <c>UPDATE … SET … WHERE …</c> statement; no rows are fetched client-side.
+    /// <para>
+    /// Example:
+    /// <code>
+    /// await mysql.Query&lt;Ticket&gt;()
+    ///     .Where(t =&gt; t.Status == "open" &amp;&amp; t.CreatedUtc &lt; cutoff)
+    ///     .UpdateAsync(t =&gt; new Ticket { Status = "stale", ReviewedUtc = now });
+    /// </code>
+    /// </para>
+    /// Each <c>new T { Prop = value }</c> binding maps to one <c>SET col = value</c>.
+    /// Values may reference captured variables (parameterized) or other columns of the
+    /// same row (<c>new T { Counter = t.Counter + 1 }</c>).
+    /// </summary>
+    public async Task<Result<int>> UpdateAsync(
+        Expression<Func<T, T>> setExpression,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            EnsureCursorNotSet(nameof(UpdateAsync));
+            if (setExpression.Body is not MemberInitExpression mi)
+                throw new ArgumentException(
+                    "UpdateAsync setter must be a member-init expression like x => new T { Prop = value }.",
+                    nameof(setExpression));
+
+            var rowParam = setExpression.Parameters[0];
+            var tableName = GetTableName();
+            // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
+            var (whereClause, whereParms) = BuildWhereSql(applySoftDelete: false);
+            var allParms = new Dictionary<string, object?>(whereParms);
+
+            var sets = new List<string>();
+            var idx = 0;
+            foreach (var binding in mi.Bindings)
+            {
+                if (binding is not MemberAssignment ma) continue;
+
+                var colMeta = EntityMetadata<T>.TryResolve(ma.Member.Name)
+                              ?? throw new ArgumentException(
+                                  $"Property '{ma.Member.Name}' is not mapped on '{typeof(T).Name}'.");
+                if (colMeta.IsAutoIncrement)
+                    throw new ArgumentException(
+                        $"Property '{ma.Member.Name}' is database-generated and cannot be updated.");
+                var colName = colMeta.ColumnName;
+
+                // If the value only depends on captured state (closure), bind as a parameter.
+                // Otherwise translate it as a column expression so `Counter = t.Counter + 1`
+                // becomes `counter = counter + 1`.
+                if (ReferencesRowParameter(ma.Expression, rowParam))
+                {
+                    var (sql, _) = SqlExpressionTranslator.Translate(ma.Expression, rowParam, null, null);
+                    sets.Add($"{PostgreSqlDialect.Quote(colName)} = {sql}");
+                }
+                else
+                {
+                    var paramName = $"@upd_{idx++}";
+                    var value = ClosureEvaluator.Evaluate(ma.Expression);
+                    allParms[paramName] = TypeConverter.ToDbValue(value, colMeta.EffectiveStorageType);
+                    sets.Add($"{PostgreSqlDialect.Quote(colName)} = {paramName}");
+                }
+            }
+
+            if (sets.Count == 0)
+                return Result<int>.Success(0);
+
+            var sql_full = $"UPDATE {EntityMetadata<T>.QualifiedTableName} SET {string.Join(", ", sets)}{whereClause}";
+            LogQuery(sql_full);
+
+            var affected = await ExecuteAsync(async conn =>
+            {
+                await using var cmd = BuildCommand(conn, sql_full, allParms);
+                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+            QueryCache.Invalidate(tableName);
+            return Result<int>.Success(affected);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Error($"[PostgreSQL] QueryBuilder.UpdateAsync (typed) failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
+            return Result<int>.Failure(Error.FromException(ex, "postgresql.update_failed"));
+        }
+    }
+
+    private static bool ReferencesRowParameter(Expression expr, ParameterExpression row)
+    {
+        var found = false;
+        var walker = new RowParamWalker(row, () => found = true);
+        walker.Visit(expr);
+        return found;
+    }
+
+    private sealed class RowParamWalker : ExpressionVisitor
+    {
+        private readonly ParameterExpression _row;
+        private readonly Action _onHit;
+        public RowParamWalker(ParameterExpression row, Action onHit) { _row = row; _onHit = onHit; }
+        protected override Expression VisitParameter(ParameterExpression node)
+        {
+            if (node == _row) _onHit();
+            return base.VisitParameter(node);
         }
     }
 
@@ -339,14 +990,29 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
-            var (schemaName, tableName) = GetTableInfo();
-            var (whereClause, whereParms) = BuildWhereSql();
-            var setClauses = string.Join(", ", updates.Keys.Select(k => $"\"{k}\" = @upd_{k}"));
-            var sql = $"UPDATE \"{schemaName}\".\"{tableName}\" SET {setClauses}{whereClause}";
+            EnsureCursorNotSet(nameof(UpdateAsync));
+            foreach (var key in updates.Keys)
+            {
+                EnsureValidColumn(key);
+                var column = EntityMetadata<T>.RequireColumn(key);
+                if (column.IsAutoIncrement)
+                    throw new ArgumentException(
+                        $"Column '{key}' is database-generated and cannot be updated.", nameof(updates));
+            }
+            var tableName = GetTableName();
+            // Bulk update bypasses the soft-delete read filter so it can target / restore deleted rows.
+            var (whereClause, whereParms) = BuildWhereSql(applySoftDelete: false);
+            // Parameters are named by ordinal, never by the caller's key, so a key that is a
+            // valid column name but not a valid parameter name cannot corrupt the statement.
+            var mappedUpdates = updates.Select((pair, index) =>
+                (Pair: pair, Column: EntityMetadata<T>.RequireColumn(pair.Key), Parameter: $"@upd_{index}")).ToArray();
+            var setClauses = string.Join(", ", mappedUpdates.Select(item =>
+                $"{PostgreSqlDialect.Quote(item.Column.ColumnName)} = {item.Parameter}"));
+            var sql = $"UPDATE {EntityMetadata<T>.QualifiedTableName} SET {setClauses}{whereClause}";
 
             var allParms = new Dictionary<string, object?>(whereParms);
-            foreach (var kv in updates)
-                allParms[$"@upd_{kv.Key}"] = TypeConverter.ToDbValue(kv.Value);
+            foreach (var item in mappedUpdates)
+                allParms[item.Parameter] = TypeConverter.ToDbValue(item.Pair.Value, item.Column.EffectiveStorageType);
 
             LogQuery(sql);
             var affected = await ExecuteAsync(async conn =>
@@ -355,11 +1021,12 @@ public sealed class QueryBuilder<T> where T : class, new()
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }).ConfigureAwait(false);
 
+            QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.UpdateAsync failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder.UpdateAsync failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<int>.Failure(Error.FromException(ex, "postgresql.update_failed"));
         }
     }
@@ -370,8 +1037,8 @@ public sealed class QueryBuilder<T> where T : class, new()
         int? page = null,
         int? pageSize = null)
     {
-        var (schemaName, tableName) = GetTableInfo();
-        var selectCols = _selectColumns ?? "*";
+        var tableName = GetTableName();
+        var selectCols = "*";
         var joinSql = _joins.Count > 0 ? " " + string.Join(" ", _joins) : string.Empty;
         var (whereClause, parms) = BuildWhereSql();
         var groupBySql = _groupBys.Count > 0 ? $" GROUP BY {string.Join(", ", _groupBys)}" : string.Empty;
@@ -383,14 +1050,12 @@ public sealed class QueryBuilder<T> where T : class, new()
         var limitSql = effectiveLimit.HasValue ? $" LIMIT {effectiveLimit.Value}" : string.Empty;
         var offsetSql = effectiveOffset.HasValue ? $" OFFSET {effectiveOffset.Value}" : string.Empty;
 
-        var sql = $"SELECT {selectCols} FROM \"{schemaName}\".\"{tableName}\"{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
+        var sql = $"SELECT {selectCols} FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}{orderBySql}{limitSql}{offsetSql}";
         return (sql, parms);
     }
 
-    private (string Clause, Dictionary<string, object?> Params) BuildWhereSql()
+    private (string Clause, Dictionary<string, object?> Params) BuildWhereSql(bool applySoftDelete = true)
     {
-        if (_wheres.Count == 0) return (string.Empty, new());
-
         var allParms = new Dictionary<string, object?>();
         var clauses = new List<string>();
 
@@ -401,7 +1066,29 @@ public sealed class QueryBuilder<T> where T : class, new()
                 allParms[kv.Key] = kv.Value;
         }
 
+        // Reads on a [SoftDelete] entity hide deleted rows unless .IncludeDeleted() was called.
+        // Writers (UpdateAsync/DeleteAsync) pass applySoftDelete:false so they can still target
+        // or restore soft-deleted rows.
+        if (applySoftDelete && !_includeDeleted && EntityMetadata<T>.SoftDeleteColumn is { } sd)
+            clauses.Add($"{PostgreSqlDialect.Quote(sd.ColumnName)} IS NULL");
+
+        if (clauses.Count == 0) return (string.Empty, allParms);
         return ($" WHERE {string.Join(" AND ", clauses)}", allParms);
+    }
+
+    private static string AppendWherePredicate(string whereClause, string predicate) =>
+        string.IsNullOrEmpty(whereClause)
+            ? $" WHERE {predicate}"
+            : $"{whereClause} AND {predicate}";
+
+    private static string RenderOrder(CursorOrder order) =>
+        $"{PostgreSqlDialect.Quote(order.Column.ColumnName)} {(order.Descending ? "DESC" : "ASC")}";
+
+    private void EnsureCursorNotSet(string operation)
+    {
+        if (_afterCursor is not null)
+            throw new InvalidOperationException(
+                $"After(cursor) can only be consumed by ToCursorPagedListAsync; '{operation}' is not a cursor terminal.");
     }
 
     private async Task<TResult> ExecuteAsync<TResult>(Func<NpgsqlConnection, Task<TResult>> action)
@@ -422,31 +1109,6 @@ public sealed class QueryBuilder<T> where T : class, new()
         return cmd;
     }
 
-    private static T MapReader(NpgsqlDataReader reader)
-    {
-        var entity = new T();
-        var props = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)
-            .ToArray();
-
-        for (int i = 0; i < reader.FieldCount; i++)
-        {
-            var colName = reader.GetName(i);
-            var prop = props.FirstOrDefault(p =>
-            {
-                var attr = p.GetCustomAttribute<ColumnAttribute>();
-                var mapped = !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : p.Name;
-                return string.Equals(mapped, colName, StringComparison.OrdinalIgnoreCase);
-            });
-
-            if (prop is null || !prop.CanWrite) continue;
-            var raw = reader.IsDBNull(i) ? null : reader.GetValue(i);
-            prop.SetValue(entity, TypeConverter.FromDbValue(raw, prop.PropertyType));
-        }
-
-        return entity;
-    }
-
     private async Task<Result<TResult>> ExecuteAggregateAsync<TResult>(
         string func,
         Expression<Func<T, TResult>> selector,
@@ -454,10 +1116,11 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         try
         {
-            var col = PostgreSQLExpressionVisitor.TranslateSelector(selector);
-            var (schemaName, tableName) = GetTableInfo();
+            EnsureCursorNotSet($"{func} aggregate");
+            var col = PostgreSqlExpressionVisitor.TranslateSelector(selector);
+            var tableName = GetTableName();
             var (whereClause, parms) = BuildWhereSql();
-            var sql = $"SELECT {func}(\"{col}\") FROM \"{schemaName}\".\"{tableName}\"{whereClause}";
+            var sql = $"SELECT {func}({PostgreSqlDialect.Quote(col)}) FROM {EntityMetadata<T>.QualifiedTableName}{whereClause}";
 
             LogQuery(sql);
             var value = await ExecuteAsync(async conn =>
@@ -472,111 +1135,32 @@ public sealed class QueryBuilder<T> where T : class, new()
         }
         catch (Exception ex)
         {
-            _logger?.Error($"[PostgreSQL] QueryBuilder aggregate failed: {ex.Message}", ex);
+            _logger?.Error($"[PostgreSQL] QueryBuilder aggregate failed: {ex.Message} — query: {DescribeQueryForLog()}", ex);
             return Result<TResult>.Failure(Error.FromException(ex, "postgresql.query_failed"));
         }
     }
 
-    private static (string Schema, string Table) GetTableInfo()
-    {
-        var attr = typeof(T).GetCustomAttribute<TableAttribute>();
-        var table = !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : typeof(T).Name;
-        var schema = !string.IsNullOrEmpty(attr?.Schema) ? attr.Schema! : "public";
-        return (schema, table);
-    }
+    private static string GetTableName() => EntityMetadata<T>.TableName;
 
-    private static string GetColumnNameFromMember(MemberInfo member)
+    private static string GetColumnName(MemberInfo member)
     {
         var attr = member.GetCustomAttribute<ColumnAttribute>();
         return !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : member.Name;
     }
 
-    private void LogSlowQuery(string sql, long elapsedMs)
+    private static void EnsureValidColumn(string column) =>
+        _ = EntityMetadata<T>.RequireColumn(column);
+
+    private void LogSlowQuery(string sql, long elapsedMs, int rowCount = -1)
     {
+        QueryObservability.RecordExecuted(_connectionId, sql, elapsedMs, rowCount, cacheHit: false);
         if (elapsedMs >= _slowQueryThresholdMs)
-            _logger?.Warning($"[PostgreSQL] Slow query ({elapsedMs}ms): {sql}");
+            QueryObservability.RecordSlow(_connectionId, sql, elapsedMs);
     }
 
     private void LogQuery(string sql)
     {
         if (CodeLogicEnvironment.IsDevelopment)
             _logger?.Debug($"[PostgreSQL] SQL: {sql}");
-    }
-}
-
-/// <summary>
-/// Non-generic query builder for raw SQL operations returning dynamic result sets.
-/// </summary>
-public sealed class QueryBuilder
-{
-    private readonly ConnectionManager _connectionManager;
-    private readonly ILogger? _logger;
-
-    public QueryBuilder(ConnectionManager connectionManager, ILogger? logger = null)
-    {
-        _connectionManager = connectionManager ?? throw new ArgumentNullException(nameof(connectionManager));
-        _logger = logger;
-    }
-
-    public async Task<Result<List<Dictionary<string, object?>>>> QueryAsync(
-        string sql,
-        Dictionary<string, object?>? parameters = null,
-        CancellationToken ct = default)
-    {
-        try
-        {
-            var list = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
-            {
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = sql;
-                if (parameters is not null)
-                    foreach (var kv in parameters)
-                        cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
-
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                var rows = new List<Dictionary<string, object?>>();
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                {
-                    var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                    for (int i = 0; i < reader.FieldCount; i++)
-                        row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
-                    rows.Add(row);
-                }
-                return rows;
-            }, ct: ct).ConfigureAwait(false);
-
-            return Result<List<Dictionary<string, object?>>>.Success(list);
-        }
-        catch (Exception ex)
-        {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.QueryAsync failed: {ex.Message}", ex);
-            return Result<List<Dictionary<string, object?>>>.Failure(Error.FromException(ex, "postgresql.query_failed"));
-        }
-    }
-
-    public async Task<Result<int>> ExecuteAsync(
-        string sql,
-        Dictionary<string, object?>? parameters = null,
-        CancellationToken ct = default)
-    {
-        try
-        {
-            var affected = await _connectionManager.ExecuteWithConnectionAsync(async conn =>
-            {
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = sql;
-                if (parameters is not null)
-                    foreach (var kv in parameters)
-                        cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
-                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }, ct: ct).ConfigureAwait(false);
-
-            return Result<int>.Success(affected);
-        }
-        catch (Exception ex)
-        {
-            _logger?.Error($"[PostgreSQL] QueryBuilder.ExecuteAsync failed: {ex.Message}", ex);
-            return Result<int>.Failure(Error.FromException(ex, "postgresql.execute_failed"));
-        }
     }
 }
