@@ -216,7 +216,11 @@ public sealed class BackupManager
                 {
                     clearState.Transaction = transaction;
                     clearState.CommandText = "IF OBJECT_ID(N'[dbo].[__schema_state]', N'U') IS NOT NULL DELETE FROM [dbo].[__schema_state] WHERE [TableName]=@table";
-                    clearState.Parameters.Add(new SqlParameter("@table", System.Data.SqlDbType.NVarChar, 255) { Value = tableName.Split('.').Last() });
+                    // The sentinel is keyed schema.table; deleting by the bare name would
+                    // match nothing and leave a stale CRC, so the next sync would skip a
+                    // table that had just been rebuilt from a backup.
+                    clearState.Parameters.Add(new SqlParameter("@table", System.Data.SqlDbType.NVarChar, 255)
+                    { Value = tableName.Contains('.') ? tableName : $"dbo.{tableName}" });
                     await clearState.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
                 return true;

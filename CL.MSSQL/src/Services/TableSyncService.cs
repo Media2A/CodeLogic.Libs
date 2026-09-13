@@ -92,6 +92,10 @@ public sealed class TableSyncService
     {
         var tableName = SchemaAnalyzer.GetTableName(entityType);
         var schemaName = SchemaAnalyzer.GetSchemaName(entityType);
+        // Tables are unique per schema, not per database, so the sentinel key must carry
+        // the schema. Keying on the bare name let two same-named entities in different
+        // schemas share one row and mask each other's CRC.
+        var stateKey = $"{schemaName}.{tableName}";
         var sw = Stopwatch.StartNew();
         var operations = new List<string>();
         var errors = new List<string>();
@@ -121,7 +125,7 @@ public sealed class TableSyncService
 
             // ── CRC fast-path ── consult the sentinel before any sys catalog diffing.
             var modelCrc = _analyzer.ComputeSchemaCrc(entityType);
-            var state = await _stateStore.GetStateAsync(tableName, connectionId, ct).ConfigureAwait(false);
+            var state = await _stateStore.GetStateAsync(stateKey, connectionId, ct).ConfigureAwait(false);
 
             // Skip only when the CRC matches, the row is Synced, AND the table really exists — a
             // single cheap existence check guards against the table being dropped out-of-band.
@@ -154,7 +158,7 @@ public sealed class TableSyncService
                     return Result<SyncResult>.Success(SkipResult(modelCrc));
                 }
                 // Re-read under the lock — a peer may have just reconciled this table.
-                state = await _stateStore.GetStateAsync(tableName, connectionId, ct).ConfigureAwait(false);
+                state = await _stateStore.GetStateAsync(stateKey, connectionId, ct).ConfigureAwait(false);
                 if (await CanSkipAsync().ConfigureAwait(false))
                 {
                     await ownLock.DisposeAsync().ConfigureAwait(false);
@@ -230,7 +234,7 @@ public sealed class TableSyncService
                 // Record the new CRC + status — only after DDL succeeded. SQL Server auto-commits DDL,
                 // so a half-applied table is intentionally left without an updated CRC and retried.
                 await _stateStore.UpsertStateAsync(
-                    tableName, modelCrc, status, mode.ToString(), _appVersion,
+                    stateKey, modelCrc, status, mode.ToString(), _appVersion,
                     _analyzer.GenerateCreateTable(entityType), connectionId, ct).ConfigureAwait(false);
 
                 sw.Stop();

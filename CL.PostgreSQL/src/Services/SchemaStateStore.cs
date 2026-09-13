@@ -88,7 +88,7 @@ public sealed class SchemaStateStore
                 cmd.CommandText = $@"
                     SELECT ""TableName"", ""SchemaCrc"", ""Status"", ""SyncMode"", ""AppVersion"", ""UpdatedAt"", ""UpdatedByNode""
                     FROM {PostgreSqlDialect.Quote(StateTable)} WHERE ""TableName"" = @tbl";
-                cmd.Parameters.AddWithValue("@tbl", tableName);
+                cmd.Parameters.AddWithValue("@tbl", NormalizeKey(tableName));
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 if (!await reader.ReadAsync(ct).ConfigureAwait(false))
@@ -139,7 +139,7 @@ public sealed class SchemaStateStore
                         ""ModelInfo"" = EXCLUDED.""ModelInfo"",
                         ""UpdatedAt"" = EXCLUDED.""UpdatedAt"",
                         ""UpdatedByNode"" = EXCLUDED.""UpdatedByNode""";
-                cmd.Parameters.AddWithValue("@tbl", tableName);
+                cmd.Parameters.AddWithValue("@tbl", NormalizeKey(tableName));
                 cmd.Parameters.AddWithValue("@crc", schemaCrc);
                 cmd.Parameters.AddWithValue("@status", status.ToString());
                 cmd.Parameters.AddWithValue("@mode", syncMode);
@@ -170,7 +170,7 @@ public sealed class SchemaStateStore
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $"DELETE FROM {PostgreSqlDialect.Quote(StateTable)} WHERE \"TableName\" = @tbl";
-                cmd.Parameters.AddWithValue("@tbl", tableName);
+                cmd.Parameters.AddWithValue("@tbl", NormalizeKey(tableName));
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 return true;
             }, connectionId, ct).ConfigureAwait(false);
@@ -222,6 +222,17 @@ public sealed class SchemaStateStore
 
     private static SchemaSyncStatus ParseStatus(string value) =>
         Enum.TryParse<SchemaSyncStatus>(value, ignoreCase: true, out var s) ? s : SchemaSyncStatus.Synced;
+
+    /// <summary>
+    /// Sentinel rows are keyed <c>schema.table</c>, because a table name is only unique
+    /// within its schema. Callers of this diagnostic API reasonably pass a bare name, so an
+    /// unqualified key is resolved against the default schema rather than quietly missing.
+    /// </summary>
+    private static string NormalizeKey(string tableName) =>
+        tableName.Contains('.', StringComparison.Ordinal)
+            ? tableName
+            : $"{CL.PostgreSQL.Core.PostgreSqlDialect.DefaultSchema}.{tableName}";
+
 }
 
 /// <summary>A single row from the <c>__schema_state</c> sentinel table.</summary>

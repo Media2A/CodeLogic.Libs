@@ -188,7 +188,7 @@ public sealed class LiveFeatureTests
         // catalog is read. Clearing the sentinel is what a real model change would do, and
         // is what forces the diff path under test here.
         await lib.ExecuteSqlAsync(
-            "DELETE FROM public.__schema_state WHERE \"TableName\" = 'it_live_item'");
+            "DELETE FROM public.__schema_state WHERE \"TableName\" = 'public.it_live_item'");
 
         var sync = await lib.SyncTableAsync<LiveItem>(createBackup: false);
         Assert.True(sync.IsSuccess, sync.Error?.ToString());
@@ -579,6 +579,33 @@ public sealed class LiveFeatureTests
             WHERE table_schema = 'public' AND table_name = 'it_live_item'
             """);
         Assert.Equal(10, cols.Value);   // id, sku, name, qty, price, external_id, created_utc, touched_utc, payload, note
+    }
+
+    /// <summary>
+    /// A restore rebuilds the table from captured DDL, which may not match the current
+    /// model, so the CRC sentinel must be cleared. Leaving it would let the next sync skip
+    /// a table that had just been replaced.
+    /// </summary>
+    [FactRequiresEnv(Gate, Reason)]
+    public async Task Restore_clears_the_schema_state_sentinel()
+    {
+        var lib = await FreshAsync();
+
+        var sentinelBefore = await lib.SqlScalarAsync<long>(
+            "SELECT count(*) FROM public.__schema_state WHERE \"TableName\" = 'public.it_live_item'");
+        Assert.Equal(1, sentinelBefore.Value);
+
+        Assert.True((await lib.BackupManager.BackupTableSchemaAsync("it_live_item", "public")).Value);
+        var restored = await lib.BackupManager.RestoreTableSchemaAsync("it_live_item", "public");
+        Assert.True(restored.IsSuccess, restored.Error?.ToString());
+
+        var sentinelAfter = await lib.SqlScalarAsync<long>(
+            "SELECT count(*) FROM public.__schema_state WHERE \"TableName\" = 'public.it_live_item'");
+        Assert.Equal(0, sentinelAfter.Value);
+
+        // And the next sync therefore actually runs instead of short-circuiting.
+        var next = await lib.SyncTableAsync<LiveItem>(createBackup: false);
+        Assert.True(next.IsSuccess, next.Error?.ToString());
     }
 
     public sealed class ColRow

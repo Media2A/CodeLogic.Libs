@@ -56,6 +56,12 @@ internal sealed class SchemaAnalyzer
         var qualifiedTable = PostgreSqlDialect.Qualify(schemaName, tableName);
 
         var sql = new StringBuilder();
+        // Create the schema first. Sync already creates tables, indexes, constraints and
+        // triggers, so requiring the schema to exist beforehand would be the one gap in an
+        // otherwise declarative story -- and CL.MSSQL already does this for its schemas.
+        // IF NOT EXISTS keeps it idempotent and costs nothing on the common path.
+        if (!string.Equals(schemaName, PostgreSqlDialect.DefaultSchema, StringComparison.Ordinal))
+            sql.AppendLine($"CREATE SCHEMA IF NOT EXISTS {PostgreSqlDialect.Quote(schemaName)};");
         sql.AppendLine($"CREATE TABLE IF NOT EXISTS {qualifiedTable} (");
 
         var columns = new List<string>();

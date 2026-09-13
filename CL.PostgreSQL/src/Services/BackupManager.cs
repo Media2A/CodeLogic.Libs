@@ -212,6 +212,17 @@ public sealed class BackupManager
                     create.CommandText = script;
                     await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 }
+                await using (var clearState = conn.CreateCommand())
+                {
+                    // The restored table may not match the current model, so the CRC
+                    // sentinel has to go: leaving it would let the next sync skip a table
+                    // that was just rebuilt from a backup. Keyed schema.table.
+                    clearState.Transaction = tx;
+                    clearState.CommandText =
+                        "DELETE FROM public.__schema_state WHERE \"TableName\" = @table";
+                    clearState.Parameters.AddWithValue("@table", $"{schemaName}.{tableName}");
+                    await clearState.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
                 return true;
             }, connectionId, ct).ConfigureAwait(false);
 

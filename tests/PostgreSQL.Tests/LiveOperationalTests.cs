@@ -39,7 +39,8 @@ public sealed class LiveOperationalTests
     private async Task ClearSentinelAsync(string table) =>
         await Lib.ExecuteSqlAsync(
             "DELETE FROM public.__schema_state WHERE \"TableName\" = @t",
-            new Dictionary<string, object?> { ["@t"] = table });
+            // Sentinel rows are keyed schema.table, not by the bare name.
+            new Dictionary<string, object?> { ["@t"] = $"public.{table}" });
 
     private void SetMode(SyncMode mode) =>
         Lib.SetSyncMode(mode);

@@ -2,6 +2,15 @@
 
 ## 2026-09-13
 
+### Fixed
+
+- **The schema-state sentinel was keyed on the bare table name**, so two entities with the
+  same table name in different schemas shared one row and masked each other's CRC. The key
+  is now `schema.table`; `SchemaStateStore` resolves an unqualified name against `dbo`, so
+  the public diagnostic API still accepts a bare table name.
+- Restoring a table from backup cleared the sentinel by the bare name, which no longer
+  matches the qualified key and left a stale CRC behind.
+
 ### Added
 
 - `RetentionWorker.RunOnceAsync()` is now public; it already existed but was internal, so

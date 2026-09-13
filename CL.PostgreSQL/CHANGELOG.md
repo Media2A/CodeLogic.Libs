@@ -5,6 +5,20 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
 
 ## 2026-09-13
 
+### Fixed (schema scoping)
+
+- **The schema-state sentinel was keyed on the bare table name.** Two entities with the
+  same table name in different schemas therefore shared one row: whichever synced last
+  owned the CRC, and a later model change to the other was skipped by the fast path. The
+  key is now `schema.table`. `SchemaStateStore` resolves an unqualified name against the
+  default schema, so the public diagnostic API still accepts a bare table name.
+- **Sync now creates the schema it needs.** An entity declaring
+  `[Table(Schema = "...")]` failed on first run with `3F000: schema does not exist`, even
+  though sync already creates tables, indexes, constraints and triggers. `CL.MSSQL` had
+  always created its own; PostgreSQL now matches.
+- **Restoring a table from backup did not clear its CRC sentinel**, so the next sync would
+  skip a table that had just been rebuilt from possibly-different DDL.
+
 ### Changed
 
 - **Rebuilt on the `CL.MySQL2` architecture.** The library's internals were replaced with a
