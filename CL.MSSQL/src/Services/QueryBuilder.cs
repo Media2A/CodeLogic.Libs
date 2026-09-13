@@ -78,7 +78,8 @@ public sealed class QueryBuilder<T> where T : class, new()
 
     public QueryBuilder<T> Where(Expression<Func<T, bool>> predicate)
     {
-        var (clause, parms) = SqlServerExpressionVisitor.Translate(predicate);
+        var (clause, parms) = SqlServerExpressionVisitor.Translate(predicate, string.Empty, out var inListCount);
+        WarnOnLargeInList(inListCount);
         // Re-key parameters to avoid collisions. Longer parameter names are replaced
         // first so @p1 can't clobber a substring of @p10/@p11 (predicates with 11+ params).
         var rekeyed = new Dictionary<string, object?>();
@@ -346,9 +347,22 @@ public sealed class QueryBuilder<T> where T : class, new()
 
         var sql = $"SELECT {topSql}{compiled.SelectList} FROM {EntityMetadata<T>.QualifiedTableName}{joinSql}{whereClause}{groupBySql}{orderBySql}{pagingSql}";
 
+        // A subquery-filtered query is not cacheable — the cache stamps an entry with a single
+        // table's version, so a mutation on the EXISTS / IN inner table could never invalidate
+        // it. ShouldCache / ShouldSmartCache refuse it here; the projection must refuse it too,
+        // otherwise .WhereExists(...).Select(...).WithCache(...) would serve a stale cross-table
+        // result.
+        var projectionCacheTtl = _hasSubqueryWhere ? null : _cacheTtl;
+        var projectionCachePool = _hasSubqueryWhere ? null : _smartCachePool;
+        if (_hasSubqueryWhere && (_cacheTtl is not null || _smartCachePool is not null))
+            _logger?.Warning(
+                "[MSSQL] Caching is not applied to a projected query with a subquery filter " +
+                "(WhereExists / WhereIn) — the entry could not be invalidated by the inner table.");
+
         return new ProjectedQuery<T, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, sql, parms, compiled, _cacheTtl, _smartCachePool);
+            _slowQueryThresholdMs, sql, parms, compiled, projectionCacheTtl, projectionCachePool,
+            cacheDisallowed: _hasSubqueryWhere);
     }
 
     /// <summary>
@@ -360,10 +374,12 @@ public sealed class QueryBuilder<T> where T : class, new()
     {
         EnsureCursorNotSet(nameof(GroupBy));
         var (whereClause, parms) = BuildWhereSql();
+        // Same guard as Select: a grouped projection over a subquery filter is not cacheable.
         return new GroupedQuery<TKey, T>(
             _connectionManager, _logger, _connectionId, _transactionScope,
             _slowQueryThresholdMs, whereClause, parms, keySelector,
-            _cacheTtl, _orderBys, _limit, _offset);
+            _hasSubqueryWhere ? null : _cacheTtl, _orderBys, _limit, _offset,
+            cacheDisallowed: _hasSubqueryWhere);
     }
 
     public QueryBuilder<T> WithConnection(string connectionId)
@@ -395,6 +411,13 @@ public sealed class QueryBuilder<T> where T : class, new()
     }
 
     /// <summary>
+    /// Enable result caching using the configured default TTL
+    /// (<c>mssql.cache</c> → <c>DefaultTtlSeconds</c>, 60 s out of the box). Equivalent to
+    /// <see cref="WithCache(TimeSpan)"/> with that value.
+    /// </summary>
+    public QueryBuilder<T> WithCache() => WithCache(QueryCache.DefaultTtl);
+
+    /// <summary>
     /// Opt this query into a named <see cref="SmartCachePool"/>. The pool's
     /// background timer keeps the cache entry warm — readers never block on
     /// the DB once the entry is populated. The pool must be registered via
@@ -419,6 +442,22 @@ public sealed class QueryBuilder<T> where T : class, new()
     // _cacheTtl ("Nullable object must have a value").
     // Subquery-filtered queries are not cacheable: the cache stamps entries with a single
     // table's version, so a mutation on the EXISTS/IN inner table couldn't invalidate them.
+    // MaxInClauseValues is advisory: a list above it still executes (chunking or throwing
+    // would break callers who exceed it today), but it is logged once per query build.
+    private bool _inListWarningIssued;
+
+    private void WarnOnLargeInList(int count)
+    {
+        if (count <= 0 || _inListWarningIssued) return;
+        var max = _connectionManager.GetConfiguration(_connectionId)?.MaxInClauseValues ?? 0;
+        if (max <= 0 || count <= max) return;
+        _inListWarningIssued = true;
+        _logger?.Warning(
+            $"[MSSQL] {typeof(T).Name}: a generated IN (...) list holds {count} values, above the " +
+            $"configured MaxInClauseValues of {max}. The query still runs — consider a join or a " +
+            "temp table if SQL Server rejects it on the 2,100-parameter limit.");
+    }
+
     private bool ShouldCache => _cacheTtl is not null && _transactionScope is null && !_hasSubqueryWhere;
     private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null && !_hasSubqueryWhere;
 
@@ -507,7 +546,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 items.Add(map(reader));
             return items;
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -576,7 +615,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
             var map = EntityMetadata<T>.Materializer.CompileForReader(reader);
             return map(reader);
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(sql, sw.ElapsedMilliseconds);
@@ -636,7 +675,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 entities.Add(map(reader));
 
             return (entities, totalCount);
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(dataSql, sw.ElapsedMilliseconds);
@@ -727,7 +766,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 entities.Add(map(reader));
             return entities;
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
         LogSlowQuery(sql, sw.ElapsedMilliseconds, items.Count);
@@ -806,7 +845,7 @@ public sealed class QueryBuilder<T> where T : class, new()
         {
             await using var cmd = BuildCommand(conn, sql, parms);
             return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         return Result<long>.Success(count);
     }
@@ -844,7 +883,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 await using var cmd = BuildCommand(conn, sql, parms);
                 var raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 return raw is null || raw is DBNull ? 0.0 : Convert.ToDouble(raw);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<double>.Success(value);
         }
@@ -870,7 +909,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql, parms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
@@ -955,7 +994,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql_full, allParms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(tableName);
             return Result<int>.Success(affected);
@@ -1019,7 +1058,7 @@ public sealed class QueryBuilder<T> where T : class, new()
             {
                 await using var cmd = BuildCommand(conn, sql, allParms);
                 return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             QueryCache.Invalidate(GetTableName());
             return Result<int>.Success(affected);
@@ -1094,17 +1133,25 @@ public sealed class QueryBuilder<T> where T : class, new()
                 $"After(cursor) can only be consumed by ToCursorPagedListAsync; '{operation}' is not a cursor terminal.");
     }
 
-    private async Task<TResult> ExecuteAsync<TResult>(Func<SqlConnection, Task<TResult>> action)
+    private async Task<TResult> ExecuteAsync<TResult>(
+        Func<SqlConnection, Task<TResult>> action,
+        CancellationToken ct = default)
     {
         if (_transactionScope is not null)
             return await action(_transactionScope.Connection).ConfigureAwait(false);
 
-        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
+        // The token has to reach ExecuteWithConnectionAsync, otherwise opening the
+        // connection (and any transient-failure retry around it) ignores cancellation.
+        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
     private SqlCommand BuildCommand(SqlConnection conn, string sql, Dictionary<string, object?> parms)
     {
         var cmd = conn.CreateCommand();
+        // Configured QueryTimeoutMs wins over the connection string's Command Timeout for
+        // commands this library issues.
+        if (_connectionManager.QueryCommandTimeoutSeconds(_connectionId) is { } timeoutSeconds)
+            cmd.CommandTimeout = timeoutSeconds;
         if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
         cmd.CommandText = sql;
         foreach (var kv in parms)
@@ -1132,7 +1179,7 @@ public sealed class QueryBuilder<T> where T : class, new()
                 var raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
                 if (raw is null || raw is DBNull) return default!;
                 return (TResult)Convert.ChangeType(raw, typeof(TResult))!;
-            }).ConfigureAwait(false);
+            }, ct).ConfigureAwait(false);
 
             return Result<TResult>.Success(value);
         }

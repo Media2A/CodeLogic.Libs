@@ -39,7 +39,7 @@ internal sealed class SchemaAnalyzer
         var tableName = !string.IsNullOrEmpty(tableAttr.Name) ? tableAttr.Name! : entityType.Name;
 
         var sql = new StringBuilder();
-        sql.AppendLine($"CREATE TABLE IF NOT EXISTS `{tableName}` (");
+        sql.AppendLine($"CREATE TABLE IF NOT EXISTS {MySqlDialect.Quote(tableName)} (");
 
         var columns = new List<string>();
         var primaryKeys = new List<string>();
@@ -57,13 +57,13 @@ internal sealed class SchemaAnalyzer
             columns.Add($"  {colDef}");
 
             if (colAttr?.Primary == true)
-                primaryKeys.Add($"`{colName}`");
+                primaryKeys.Add($"{MySqlDialect.Quote(colName)}");
 
             if (colAttr?.Index == true && colAttr.Primary == false && colAttr.Unique == false)
-                indexes.Add($"  INDEX `idx_{tableName}_{colName}` (`{colName}`)");
+                indexes.Add($"  INDEX `idx_{tableName}_{colName}` ({MySqlDialect.Quote(colName)})");
 
             if (colAttr?.Unique == true && colAttr.Primary == false)
-                uniqueIndexes.Add($"  UNIQUE KEY `uq_{tableName}_{colName}` (`{colName}`)");
+                uniqueIndexes.Add($"  UNIQUE KEY `uq_{tableName}_{colName}` ({MySqlDialect.Quote(colName)})");
 
             // [Index] attributes — modern form supporting covering Include columns.
             foreach (var idxAttr in prop.GetCustomAttributes<IndexAttribute>())
@@ -75,9 +75,9 @@ internal sealed class SchemaAnalyzer
                     .Select(propName => ResolveColumnName(entityType, propName))
                     .ToArray();
                 var colList = string.Join(", ",
-                    new[] { $"`{colName}`" }.Concat(includeCols.Select(c => $"`{c}`")));
-                if (idxAttr.Unique) uniqueIndexes.Add($"  UNIQUE KEY `{idxName}` ({colList})");
-                else                indexes.Add($"  INDEX `{idxName}` ({colList})");
+                    new[] { $"{MySqlDialect.Quote(colName)}" }.Concat(includeCols.Select(c => $"{MySqlDialect.Quote(c)}")));
+                if (idxAttr.Unique) uniqueIndexes.Add($"  UNIQUE KEY {MySqlDialect.Quote(idxName)} ({colList})");
+                else                indexes.Add($"  INDEX {MySqlDialect.Quote(idxName)} ({colList})");
             }
 
             // Foreign key
@@ -89,8 +89,8 @@ internal sealed class SchemaAnalyzer
                 var onDelete = FkActionToSql(fkAttr.OnDelete);
                 var onUpdate = FkActionToSql(fkAttr.OnUpdate);
                 foreignKeys.Add(
-                    $"  CONSTRAINT `{constraintName}` FOREIGN KEY (`{colName}`) " +
-                    $"REFERENCES `{fkAttr.ReferenceTable}` (`{fkAttr.ReferenceColumn}`) " +
+                    $"  CONSTRAINT {MySqlDialect.Quote(constraintName)} FOREIGN KEY ({MySqlDialect.Quote(colName)}) " +
+                    $"REFERENCES {MySqlDialect.Quote(fkAttr.ReferenceTable)} ({MySqlDialect.Quote(fkAttr.ReferenceColumn)}) " +
                     $"ON DELETE {onDelete} ON UPDATE {onUpdate}");
             }
         }
@@ -99,11 +99,11 @@ internal sealed class SchemaAnalyzer
         var compositeIndexes = entityType.GetCustomAttributes<CompositeIndexAttribute>();
         foreach (var ci in compositeIndexes)
         {
-            var cols = string.Join(", ", ci.ColumnNames.Select(c => $"`{c}`"));
+            var cols = string.Join(", ", ci.ColumnNames.Select(c => $"{MySqlDialect.Quote(c)}"));
             if (ci.Unique)
-                uniqueIndexes.Add($"  UNIQUE KEY `{ci.IndexName}` ({cols})");
+                uniqueIndexes.Add($"  UNIQUE KEY {MySqlDialect.Quote(ci.IndexName)} ({cols})");
             else
-                indexes.Add($"  INDEX `{ci.IndexName}` ({cols})");
+                indexes.Add($"  INDEX {MySqlDialect.Quote(ci.IndexName)} ({cols})");
         }
 
         var allDefs = columns.ToList();
@@ -237,7 +237,7 @@ internal sealed class SchemaAnalyzer
                     // Renamed property — CHANGE COLUMN preserves the data instead of the
                     // drop-old + add-new that would otherwise lose it. Works at Safe+.
                     var colDef = BuildColumnDef(prop, colAttr, colName);
-                    alterStatements.Add($"ALTER TABLE `{tableName}` CHANGE COLUMN `{previous}` {colDef};");
+                    alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} CHANGE COLUMN {MySqlDialect.Quote(previous)} {colDef};");
                     // The old name is consumed by the rename — keep it out of the Full drop set.
                     modelColumnNames.Add(previous);
                     _logger?.Info($"[MySQL2] Will rename column `{tableName}`.`{previous}` → `{colName}`");
@@ -246,7 +246,7 @@ internal sealed class SchemaAnalyzer
                 {
                     // Column missing — ADD COLUMN
                     var colDef = BuildColumnDef(prop, colAttr, colName);
-                    alterStatements.Add($"ALTER TABLE `{tableName}` ADD COLUMN {colDef};");
+                    alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} ADD COLUMN {colDef};");
                     _logger?.Debug($"[MySQL2] Will add column `{tableName}`.`{colName}`");
                 }
             }
@@ -257,7 +257,7 @@ internal sealed class SchemaAnalyzer
                 if (ColumnNeedsModify(existing, prop, colAttr))
                 {
                     var modifyDef = BuildColumnDef(prop, colAttr, colName);
-                    alterStatements.Add($"ALTER TABLE `{tableName}` MODIFY COLUMN {modifyDef};");
+                    alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} MODIFY COLUMN {modifyDef};");
                     _logger?.Debug($"[MySQL2] Will modify column `{tableName}`.`{colName}`");
                 }
             }
@@ -268,7 +268,7 @@ internal sealed class SchemaAnalyzer
                 var idxName = $"idx_{tableName}_{colName}";
                 modelIndexNames.Add(idxName);
                 if (!existingIndexes.ContainsKey(idxName))
-                    alterStatements.Add($"ALTER TABLE `{tableName}` ADD INDEX `{idxName}` (`{colName}`);");
+                    alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} ADD INDEX {MySqlDialect.Quote(idxName)} ({MySqlDialect.Quote(colName)});");
             }
 
             if (colAttr?.Unique == true && colAttr.Primary == false)
@@ -276,7 +276,7 @@ internal sealed class SchemaAnalyzer
                 var idxName = $"uq_{tableName}_{colName}";
                 modelIndexNames.Add(idxName);
                 if (!existingIndexes.ContainsKey(idxName))
-                    alterStatements.Add($"ALTER TABLE `{tableName}` ADD UNIQUE KEY `{idxName}` (`{colName}`);");
+                    alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} ADD UNIQUE KEY {MySqlDialect.Quote(idxName)} ({MySqlDialect.Quote(colName)});");
             }
 
             // [Index] attributes — same as CREATE TABLE path.
@@ -292,9 +292,9 @@ internal sealed class SchemaAnalyzer
                         .Select(propName => ResolveColumnName(entityType, propName))
                         .ToArray();
                     var colList = string.Join(", ",
-                        new[] { $"`{colName}`" }.Concat(includeCols.Select(c => $"`{c}`")));
+                        new[] { $"{MySqlDialect.Quote(colName)}" }.Concat(includeCols.Select(c => $"{MySqlDialect.Quote(c)}")));
                     var keyword = idxAttr.Unique ? "UNIQUE KEY" : "INDEX";
-                    alterStatements.Add($"ALTER TABLE `{tableName}` ADD {keyword} `{idxName}` ({colList});");
+                    alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} ADD {keyword} {MySqlDialect.Quote(idxName)} ({colList});");
                 }
             }
 
@@ -310,8 +310,8 @@ internal sealed class SchemaAnalyzer
                     var onDelete = FkActionToSql(fkAttr.OnDelete);
                     var onUpdate = FkActionToSql(fkAttr.OnUpdate);
                     alterStatements.Add(
-                        $"ALTER TABLE `{tableName}` ADD CONSTRAINT `{constraintName}` " +
-                        $"FOREIGN KEY (`{colName}`) REFERENCES `{fkAttr.ReferenceTable}` (`{fkAttr.ReferenceColumn}`) " +
+                        $"ALTER TABLE {MySqlDialect.Quote(tableName)} ADD CONSTRAINT {MySqlDialect.Quote(constraintName)} " +
+                        $"FOREIGN KEY ({MySqlDialect.Quote(colName)}) REFERENCES {MySqlDialect.Quote(fkAttr.ReferenceTable)} ({MySqlDialect.Quote(fkAttr.ReferenceColumn)}) " +
                         $"ON DELETE {onDelete} ON UPDATE {onUpdate};");
                 }
             }
@@ -324,9 +324,9 @@ internal sealed class SchemaAnalyzer
             modelIndexNames.Add(ci.IndexName);
             if (!existingIndexes.ContainsKey(ci.IndexName))
             {
-                var cols = string.Join(", ", ci.ColumnNames.Select(c => $"`{c}`"));
+                var cols = string.Join(", ", ci.ColumnNames.Select(c => $"{MySqlDialect.Quote(c)}"));
                 var keyword = ci.Unique ? "UNIQUE KEY" : "INDEX";
-                alterStatements.Add($"ALTER TABLE `{tableName}` ADD {keyword} `{ci.IndexName}` ({cols});");
+                alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} ADD {keyword} {MySqlDialect.Quote(ci.IndexName)} ({cols});");
             }
         }
 
@@ -338,7 +338,7 @@ internal sealed class SchemaAnalyzer
             foreach (var fkName in existingFks.Keys)
             {
                 if (modelFkNames.Contains(fkName)) continue;
-                alterStatements.Add($"ALTER TABLE `{tableName}` DROP FOREIGN KEY `{fkName}`;");
+                alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} DROP FOREIGN KEY {MySqlDialect.Quote(fkName)};");
                 _logger?.Debug($"[MySQL2] Will drop foreign key `{tableName}`.`{fkName}`");
             }
 
@@ -350,7 +350,7 @@ internal sealed class SchemaAnalyzer
                 if (string.Equals(idxName, "PRIMARY", StringComparison.OrdinalIgnoreCase)) continue;
                 // Skip indexes that share a name with an existing FK (auto-created by MySQL for FK)
                 if (existingFks.ContainsKey(idxName)) continue;
-                alterStatements.Add($"ALTER TABLE `{tableName}` DROP INDEX `{idxName}`;");
+                alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} DROP INDEX {MySqlDialect.Quote(idxName)};");
                 _logger?.Debug($"[MySQL2] Will drop index `{tableName}`.`{idxName}`");
             }
         }
@@ -361,7 +361,7 @@ internal sealed class SchemaAnalyzer
             foreach (var dbColName in existingColumns.Keys)
             {
                 if (modelColumnNames.Contains(dbColName)) continue;
-                alterStatements.Add($"ALTER TABLE `{tableName}` DROP COLUMN `{dbColName}`;");
+                alterStatements.Add($"ALTER TABLE {MySqlDialect.Quote(tableName)} DROP COLUMN {MySqlDialect.Quote(dbColName)};");
                 _logger?.Warning($"[MySQL2] Will drop column `{tableName}`.`{dbColName}` (SchemaSyncLevel.Full)");
             }
         }
@@ -374,17 +374,13 @@ internal sealed class SchemaAnalyzer
     private static string BuildColumnDef(PropertyInfo prop, ColumnAttribute? colAttr, string colName)
     {
         var sb = new StringBuilder();
-        sb.Append($"`{colName}` ");
+        sb.Append($"{MySqlDialect.Quote(colName)} ");
 
-        var dataType = colAttr?.DataType ?? TypeConverter.InferDataType(prop.PropertyType);
-        var fakeAttr = colAttr ?? new ColumnAttribute { DataType = dataType };
-
-        if (colAttr is null)
-            fakeAttr = new ColumnAttribute { DataType = dataType };
-        else
-            fakeAttr = colAttr;
-
-        sb.Append(TypeConverter.GetMySqlType(fakeAttr, colAttr?.StorageType ?? StorageType.Default, prop.PropertyType));
+        // An absent attribute, or one that leaves DataType at Unspecified, is resolved
+        // against the CLR property type inside GetMySqlType — which also recovers the
+        // inferred size (Guid -> CHAR(36), string -> VARCHAR(255)).
+        var effective = colAttr ?? new ColumnAttribute();
+        sb.Append(TypeConverter.GetMySqlType(effective, effective.StorageType, prop.PropertyType));
 
         if (!string.IsNullOrEmpty(colAttr?.Charset))
             sb.Append($" CHARACTER SET {colAttr.Charset}");
@@ -562,7 +558,8 @@ internal sealed class SchemaAnalyzer
         }
 
         // 6. Charset (only for string types; only if the model explicitly sets one)
-        if (!string.IsNullOrWhiteSpace(colAttr?.Charset) && IsStringType(colAttr?.DataType))
+        if (!string.IsNullOrWhiteSpace(colAttr?.Charset) &&
+            IsStringType(TypeConverter.ResolveColumn(colAttr!, prop.PropertyType).DataType))
         {
             var dbCharset = existing.CharacterSet ?? "";
             if (!string.Equals(colAttr!.Charset, dbCharset, StringComparison.OrdinalIgnoreCase))
@@ -586,9 +583,8 @@ internal sealed class SchemaAnalyzer
 
     private static string BuildExpectedTypeString(PropertyInfo prop, ColumnAttribute? colAttr)
     {
-        var dataType = colAttr?.DataType ?? TypeConverter.InferDataType(prop.PropertyType);
-        var fakeAttr = colAttr ?? new ColumnAttribute { DataType = dataType };
-        return TypeConverter.GetMySqlType(fakeAttr, colAttr?.StorageType ?? StorageType.Default, prop.PropertyType);
+        var effective = colAttr ?? new ColumnAttribute();
+        return TypeConverter.GetMySqlType(effective, effective.StorageType, prop.PropertyType);
     }
 
     private static string NormalizeDefault(string? value, bool isNullable)

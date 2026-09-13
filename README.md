@@ -24,7 +24,7 @@
 | [CodeLogic.Common](CL.Common/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Common?label=)](https://www.nuget.org/packages/CodeLogic.Common) | Utility toolkit — encryption, hashing, ID/password generation, JSON, cron, imaging, networking |
 | [CodeLogic.MySQL2](CL.MySQL2/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.MySQL2?label=)](https://www.nuget.org/packages/CodeLogic.MySQL2) | MySQL / MariaDB / Percona — typed LINQ → SQL, result cache, schema-sync modes, migrations |
 | [CodeLogic.MSSQL](CL.MSSQL/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.MSSQL?label=)](https://www.nuget.org/packages/CodeLogic.MSSQL) | SQL Server 2019+ / Azure SQL — typed LINQ → SQL, caching, schema sync, migrations |
-| [CodeLogic.PostgreSQL](CL.PostgreSQL/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.PostgreSQL?label=)](https://www.nuget.org/packages/CodeLogic.PostgreSQL) | PostgreSQL — multi-database, repository + query builder, table sync, backups |
+| [CodeLogic.PostgreSQL](CL.PostgreSQL/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.PostgreSQL?label=)](https://www.nuget.org/packages/CodeLogic.PostgreSQL) | PostgreSQL — multi-database, repository + query builder, joins, cursor paging, caching, migrations, schema sync |
 | [CodeLogic.SQLite](CL.SQLite/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SQLite?label=)](https://www.nuget.org/packages/CodeLogic.SQLite) | SQLite — connection pool, WAL, repository + query builder, migration ledger |
 | [CodeLogic.Mail](CL.Mail/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Mail?label=)](https://www.nuget.org/packages/CodeLogic.Mail) | SMTP send, IMAP read + IDLE, and a lightweight template engine |
 | [CodeLogic.Storage](CL.Storage/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Storage?label=)](https://www.nuget.org/packages/CodeLogic.Storage) | Safe mounted local, S3, FTP/SFTP, WebDAV, Azure, GCS, and Swift storage |
@@ -36,6 +36,10 @@
 | [CodeLogic.TwoFactorAuth](CL.TwoFactorAuth/) | [![NuGet](https://img.shields.io/nuget/v/CodeLogic.TwoFactorAuth?label=)](https://www.nuget.org/packages/CodeLogic.TwoFactorAuth) | TOTP 2FA with QR-code generation |
 
 All packages target **.NET 10** and depend on **CodeLogic 4** (range `[4.0.0, 5.0.0)`).
+
+Every library and the CodeLogic framework itself share one version line: **`4.8.<patch>`**.
+The `major.minor` is hand-controlled in the repo-root `version.txt`; the patch is the CI run
+number. See [Versioning](docs/versioning.md) for the full scheme.
 
 ## Quick start
 

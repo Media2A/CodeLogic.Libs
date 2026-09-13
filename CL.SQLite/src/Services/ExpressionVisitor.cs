@@ -23,18 +23,18 @@ internal static class SQLiteExpressionVisitor
         return GetMemberName(keySelector.Body);
     }
 
+    /// <summary>
+    /// Builds the SELECT column list for a projection. Each projected member is resolved back to
+    /// the <em>source entity's</em> mapped column — the members of an anonymous type carry no
+    /// <see cref="SQLiteColumnAttribute"/> of their own — and every name is double-quoted, so a
+    /// renamed column or a reserved word is emitted correctly.
+    /// </summary>
     public static string ParseSelect<T>(Expression<Func<T, object?>> selector)
     {
         if (selector.Body is NewExpression newExpr)
-        {
-            var cols = newExpr.Members!.Select(m =>
-            {
-                var colAttr = m.GetCustomAttribute<SQLiteColumnAttribute>();
-                return colAttr?.ColumnName ?? m.Name;
-            });
-            return string.Join(", ", cols);
-        }
-        return GetMemberName(selector.Body);
+            return string.Join(", ", newExpr.Arguments.Select(GetQuotedColumn));
+
+        return GetQuotedColumn(selector.Body);
     }
 
     public static string ParseGroupBy<T, TKey>(Expression<Func<T, TKey>> keySelector)
@@ -176,9 +176,14 @@ internal static class SQLiteExpressionVisitor
 
         if (expr.Method.Name == "Contains" && expr.Method.DeclaringType != typeof(string))
         {
-            // list.Contains(x.Prop)
-            var collection = GetValue(expr.Arguments[0]);
-            var col = GetQuotedColumn(expr.Arguments.Count > 1 ? expr.Arguments[1] : expr.Object!);
+            // Two shapes reach here, with the operands in opposite positions:
+            //   static  Enumerable.Contains(collection, item) -> Arguments[0], Arguments[1]
+            //   instance collection.Contains(item)            -> Object,       Arguments[0]
+            // Reading the collection from Arguments[0] in both cases fed the instance form
+            // the item expression, i.e. a lambda parameter, which the compiler rejects.
+            var isStatic = expr.Arguments.Count > 1;
+            var collection = GetValue(isStatic ? expr.Arguments[0] : expr.Object!);
+            var col = GetQuotedColumn(isStatic ? expr.Arguments[1] : expr.Arguments[0]);
             if (collection is System.Collections.IEnumerable items)
             {
                 var inParams = new List<string>();
@@ -217,7 +222,7 @@ internal static class SQLiteExpressionVisitor
     /// <summary>
     /// Returns a member's column name wrapped in double quotes so reserved words
     /// (e.g. <c>Order</c>, <c>Group</c>, <c>Index</c>) are valid SQL identifiers.
-    /// Used at WHERE-clause emission sites; ORDER BY / SELECT quote separately.
+    /// Used at the WHERE and SELECT emission sites; ORDER BY quotes separately.
     /// </summary>
     private static string GetQuotedColumn(Expression expr) => $"\"{GetMemberName(expr)}\"";
 

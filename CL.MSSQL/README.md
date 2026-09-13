@@ -61,6 +61,6 @@ Configuration lives in `config.mssql.json`. Structured SQL-login and integrated-
 }
 ```
 
-Highlights include `OUTPUT INSERTED` identity handling, dynamically parameter-capped batches, non-`MERGE` serializable upserts, `TOP`/`OFFSET … FETCH`, SQL Server-native type inference and JSON checks, `sys.*` catalog schema management, `sp_getapplock`, catalog DDL snapshots, transient Azure retry, and cached estimated ShowPlan XML capture.
+Highlights include `OUTPUT INSERTED` identity handling, dynamically parameter-capped batches, non-`MERGE` serializable upserts, `TOP`/`OFFSET … FETCH`, SQL Server-native type inference and JSON checks, `sys.*` catalog schema management, `sp_getapplock`, catalog DDL snapshots, transient Azure retry, rolling-window N+1 detection, and cached estimated ShowPlan XML capture.
 
 See the [full documentation](../docs/libs/mssql/index.md) and [capability parity matrix](../docs/libs/mssql/parity.md).

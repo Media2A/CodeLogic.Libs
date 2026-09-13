@@ -53,16 +53,79 @@ mssql.SetSyncMode(SyncMode.Production);
 
 Schema inspection uses `sys.schemas`, `sys.tables`, `sys.columns`, `sys.types`, indexes, defaults, checks, foreign keys, and extended properties. Model CRC and reconciliation status are stored in `[dbo].[__schema_state]` using UTC timestamps. `PreviousName` invokes `sys.sp_rename` for in-place column renames.
 
+## Soft delete
+
+`[SoftDelete(timestampColumn)]` marks a nullable `DateTime` column as the delete marker.
+`Repository.DeleteAsync` then sets it to `DateTime.UtcNow` instead of issuing a physical
+`DELETE`, and single-table reads (`mssql.Query<T>()` terminals and the repository getters —
+including `Repository.CountAsync`) automatically exclude rows where it is set.
+
+```csharp
+[Table(Name = "accounts", Schema = "dbo")]
+[SoftDelete(nameof(DeletedUtc))]
+public class Account
+{
+    [Column(DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(DataType = DataType.DateTime2)] public DateTime? DeletedUtc { get; set; }
+}
+
+await repo.DeleteAsync(id);             // stamps DeletedUtc
+await repo.HardDeleteAsync(id);         // physically removes the row
+
+var all = await mssql.Query<Account>().IncludeDeleted().ToListAsync();   // override the filter
+```
+
+> Auto-filtering applies to single-table reads only. It does **not** apply to joins, subquery
+> filters, the query builder's bulk `UpdateAsync` / `DeleteAsync`, or the by-key writes
+> `Repository.UpdateAsync` / `AdjustAsync` / `IncrementAsync` / `DecrementAsync` — those stay
+> raw so you can target or restore deleted rows.
+
+## Retention
+
+`[RetainDays(days, timestampColumn)]` opts an entity into a background `RetentionWorker` that
+deletes rows older than `days` in bounded `DELETE TOP (@batch)` passes (`BatchSize` default
+5000), looping until one pass deletes fewer rows than `BatchSize`.
+
+```csharp
+[Table(Name = "audit_log", Schema = "dbo")]
+[RetainDays(90, nameof(CreatedUtc), BatchSize = 10000)]
+public class AuditLog
+{
+    [Column(DataType = DataType.BigInt, Primary = true, AutoIncrement = true)] public long Id { get; set; }
+    [Column(DataType = DataType.DateTime2)] public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+}
+```
+
+The worker is created during the library's start phase and its entity list is **live**: every
+type you register through `SyncTableAsync<T>` / `SyncSchemaAsync` is handed to it, and the
+background loop starts the first time one of them carries `[RetainDays]` — including
+registrations made long after `CodeLogic.StartAsync()` has returned, which is the normal
+application flow. Once running it waits 5 minutes, purges, then repeats every 24 hours, and a
+new entity registered mid-flight is picked up on the next pass.
+
+For an operator-triggered or test purge, `RunRetentionOnceAsync` runs one pass immediately over
+every registered `[RetainDays]` entity and returns the number of rows deleted:
+
+```csharp
+int removed = await mssql.RunRetentionOnceAsync();
+```
+
+You can also drive a worker of your own over a specific set of entities:
+
+```csharp
+var worker = new RetentionWorker(mssql.ConnectionManager, logger, [typeof(AuditLog)]);
+int removed = await worker.RunOnceAsync();
+```
+
 ## Imperative migrations
 
 Implement `IMigration` or derive from `Migration`, register instances, then inspect or execute the ordered plan.
 
 ```csharp
-public sealed class SeedRoles : Migration
+// The Migration base takes (appVersion, order, description); Version and Description are
+// supplied by that constructor and are not virtual.
+public sealed class SeedRoles() : Migration("1.0.0", 1, "Seed roles")
 {
-    public override MigrationVersion Version => new("1.0.0", 1);
-    public override string Description => "Seed roles";
-
     public override Task UpAsync(IMigrationContext db, CancellationToken ct) =>
         db.ExecuteAsync("INSERT INTO [app].[roles] ([name]) VALUES (N'admin')", ct: ct);
 
@@ -70,11 +133,16 @@ public sealed class SeedRoles : Migration
         db.ExecuteAsync("DELETE FROM [app].[roles] WHERE [name]=N'admin'", ct: ct);
 }
 
-mssql.RegisterMigration(new SeedRoles());
-var pending = await mssql.GetPendingMigrationsAsync();
-await mssql.MigrateAsync();
+mssql.RegisterMigration(new SeedRoles());              // or RegisterMigrationsFrom(assembly)
+var pending = await mssql.GetPendingMigrationsAsync();  // IReadOnlyList<MigrationPlanItem>
+await mssql.MigrateAsync();                             // caller-driven; never auto-run on start
 await mssql.RollbackAsync(new MigrationVersion("1.0.0", 0));
 ```
+
+`DownAsync` is optional: the `Migration` base throws `NotSupportedException` unless you
+override it, so a rollback that reaches an irreversible migration fails rather than skipping it.
+SQL Server commits DDL implicitly, so a migration that mixes `ALTER` with data changes is not
+atomic — keep `UpAsync` idempotent and split heavy DDL from heavy backfill.
 
 Migration IDs, descriptions, checksums, and application times are stored in `[dbo].[__migrations]` with `SYSUTCDATETIME()`.
 

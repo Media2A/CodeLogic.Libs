@@ -3,6 +3,172 @@
 All notable changes to **CodeLogic.SQLite** are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## 2026-09-13
+
+### Fixed
+
+- **A bulk `UpdateAsync` dictionary key could escape its quoted identifier.** Keys were
+  interpolated into the `SET` clause verbatim, so a key containing a double quote could
+  close its own identifier and append an assignment to a column the caller never named.
+  Keys are now resolved against the entity's mapped columns — by column name or property
+  name — and only the resolved name is quoted; an unmapped key is rejected. This matches
+  what the three sibling libraries already did through `RequireColumn`.
+- **A `Guid` or `DateTime` primary key could not be read back or deleted.** `InsertAsync`
+  wrote key values through the value converter while `GetByIdAsync`, `GetByKeysAsync` and
+  `DeleteByKeysAsync` bound them raw, and the provider maps a raw `Guid` to a BLOB — so the
+  lookup never matched the row that had just been written, returning "not found" and
+  deleting nothing. All key paths now use the same converter as the write path.
+- Bulk `UpdateAsync` values also go through the value converter, so the bulk path and the
+  repository write the same representation for the same column.
+- **`ids.Contains(x.Id)` on a `List<T>` or `HashSet<T>` threw** with
+  `InvalidOperationException: variable 'x' ... referenced from scope '', but it is not
+  defined`. Two shapes reach the membership branch with their operands in opposite
+  positions — the static `Enumerable.Contains(collection, item)` and the one-argument
+  instance `collection.Contains(item)` — but both read the collection from the first
+  argument, so the instance form was handed the item expression (a lambda parameter) to
+  evaluate. Arrays were unaffected because they bind to the static form. Since a
+  `List<T>` is the idiomatic way to write an IN clause in C#, this broke ordinary usage.
+
+- **Composite primary keys produced invalid DDL.** `GenerateCreateTableSql` emitted one inline
+  `PRIMARY KEY` per key column, so SQLite rejected the table with *"table has more than one
+  primary key"* and no entity with a multi-column key could ever be synced. Two or more key
+  columns are now declared as a single table-level `PRIMARY KEY (k1, k2)` constraint, each key
+  column `NOT NULL`; a single key stays inline, which is the only form that accepts
+  `AUTOINCREMENT`.
+- **Inserting an entity whose only column is the auto-increment key** emitted
+  `INSERT INTO "t" () VALUES ()` — an empty column list — and failed with a syntax error. It now
+  emits `INSERT INTO "t" DEFAULT VALUES`.
+- **`Skip`/`Offset` without `Take`/`Limit` was a syntax error.** SQLite's grammar is
+  `LIMIT expr [OFFSET expr]`; a bare `OFFSET` is now emitted as `LIMIT -1 OFFSET n`.
+- **Column names that are not legal parameter tokens broke every write.** `Repository`
+  insert/upsert/update and `QueryBuilder.UpdateAsync` derived parameter names from the column
+  name (`@{col}`, `@set_{col}`, `@upd_{col}`), so a column such as `"select from"` produced a
+  malformed statement. All four sites now bind positionally (`@p0`, `@p1`, …).
+- **`Select` emitted an unquoted column list, and the wrong names for an anonymous
+  projection.** Reserved-word and awkward column names were syntax errors, and
+  `Select(o => new { o.CreatedUtc })` emitted the C# property name rather than the mapped
+  column. Every projected member is now resolved back to the source entity's
+  `[SQLiteColumn]` name and double-quoted, matching `WHERE` and `ORDER BY`.
+- **`ToPagedListAsync` on a grouped query reported the first group's row count** as
+  `TotalItems`, because it appended `GROUP BY` to its `COUNT(*)`. The grouped query is now
+  wrapped — `SELECT COUNT(*) FROM (SELECT 1 FROM … GROUP BY …)` — so the total is the number of
+  groups, which is what the page is paging through.
+- **`CountAsync` silently dropped `GroupBy`.** On a grouped builder it now returns the number of
+  groups, by the same wrap, and so agrees with `ToPagedListAsync`.
+- **`DateTimeOffset` was write-only.** There was a write conversion but no matching read branch,
+  so materializing a row with a `DateTimeOffset` property failed. The
+  `yyyy-MM-dd HH:mm:ss.fffzzz` form the writer produces is now parsed back, offset included, and
+  the duplicated converter pair in `Repository` and `QueryBuilder` is one shared helper.
+- **`SyncNamespaceAsync` never found anything.** It called `Assembly.GetCallingAssembly()` from
+  inside an `async` method, where the stack is the state machine rather than the caller. The
+  assembly is captured in a non-async wrapper before the state machine starts.
+- **`FirstOrDefaultAsync` permanently capped the builder** by calling `Limit(1)` on shared
+  state, so a builder reused after it returned at most one row. The limit is now local to
+  the call.
+- **`Repository.CountAsync` and `QueryBuilder.CountAsync` were never timed**, so a slow count
+  was neither logged nor (now) published. Both are instrumented like every other terminal.
+- **A corrupt `migration_history.json` was discarded in silence.** Recovery is unchanged — the
+  file is treated as empty and overwritten on the next write — but a warning naming the file is
+  logged first, so the loss is traceable.
+
+### Added
+
+- **`SlowQueryEvent` is now published** for any repository or query-builder statement at or
+  above `slowQueryThresholdMs`, alongside the existing logger warning. It carries `TableName`,
+  `Query`, `ElapsedMs` and `DetectedAt`. The record has existed since the library shipped but
+  nothing ever constructed it. Publishing goes through the new `SQLiteObservability` sink, which
+  `SQLiteLibrary` binds to the event bus at initialization — the same shape the `CL.MySQL2` and
+  `CL.PostgreSQL` siblings use.
+- **`SyncNamespaceAsync(Assembly, …)` overload**, so callers can name the assembly to scan
+  instead of depending on the call stack. The existing signature is unchanged.
+- **`SQLiteObservability`** (public, static): the event sink above, and the holder for the
+  library's localized strings.
+- `[assembly: InternalsVisibleTo("SQLite.Tests")]`, matching `CL.MSSQL` / `CL.MySQL2` /
+  `CL.PostgreSQL`.
+
+### Changed
+
+- **`connectionTimeoutSeconds` is now applied** as the connection string's `Default Timeout`.
+  Its default of 30 is Microsoft.Data.Sqlite's own default, so a configuration that never set it
+  opens exactly the connection it opened before. `commandTimeoutSeconds` remains unwired and is
+  now documented as such: SQLite has one timeout knob, not two — a command's `CommandTimeout` is
+  inherited from the connection's `DefaultTimeout`, which `connectionTimeoutSeconds` owns — and
+  its declared default of 120 would not have reproduced today's 30.
+- **`skipTableSync` is now honoured.** With it set, `SyncTableAsync` / `SyncTablesAsync` /
+  `SyncNamespaceAsync` read and write nothing for that database and return a success whose
+  message says the sync was skipped. The default is `false`, so nothing changes unless you set it.
+- **`enableForeignKeys: false` now actually disables enforcement.** Only `PRAGMA
+  foreign_keys=ON` was ever sent, and Microsoft.Data.Sqlite enables foreign keys by default, so
+  the false setting did nothing. Both directions are now sent explicitly. The default is `true`
+  and its behaviour is unchanged. **If you have been setting `false` and relying on constraints
+  still being enforced, they will now be off.**
+- **`cacheMode: "Private"` now requests `Cache=Private`** instead of opening the same connection
+  as `Default`. `Default` still omits the keyword entirely.
+- **`[SQLiteColumn(Size = n)]` is now emitted** as a length modifier on the declared type
+  (`"col" TEXT(64)`) in `CREATE TABLE` and `ALTER TABLE ADD COLUMN`. SQLite records the declared
+  type but does not enforce the length, and the modifier does not change type affinity; it was
+  applied rather than deprecated so the generated file reads correctly in other tools. `Size = 0`
+  (the default) emits nothing, so existing entities generate byte-identical DDL.
+- **`SumAsync` / `MinAsync` / `MaxAsync` now throw `NotSupportedException` on a grouped
+  builder** rather than quietly ignoring the `GroupBy` and aggregating the whole filtered set.
+  A per-group aggregate has no single scalar answer; the message points at `ToListAsync`.
+- The eight localized strings that were declared but never used (`ConnectionCreated`,
+  `ConnectionReused`, `ConnectionReleased`, `TableSyncStarted`, `TableCreated`, `TableSynced`,
+  `TableSyncFailed`, `SlowQueryDetected`) now back their log sites, which previously hard-coded
+  English. They were used rather than deleted because `SQLiteStrings` is public surface. Log
+  wording changes slightly; no log site was added or removed.
+
+### Documentation
+
+- **Configuration** is documented against the wired behaviour above: what
+  `connectionTimeoutSeconds` maps to, why `commandTimeoutSeconds` is not applied and what to use
+  instead, what `skipTableSync` short-circuits, and that `enableForeignKeys: false` now really
+  turns enforcement off.
+- **`cacheMode`**: all three values are documented, including that `Default` omits the keyword
+  and leaves the provider's own choice in place.
+- **`maxPoolSize`** is documented as what it is: a cap on concurrently live connections as well
+  as pooled ones. Once it is reached the next caller waits, rather than getting a fresh
+  connection on demand as the old text claimed.
+- **`DataType` is not inferred.** The docs claimed an omitted `DataType` was inferred from the
+  property type. It is not — an omitted `DataType` is the enum default, `INTEGER`, so a `string`
+  property with no explicit `DataType` is declared `INTEGER`. Documented, with a note on when
+  that matters under SQLite's dynamic typing.
+- **`DateTimeOffset` round-trips** and is documented with its storage format, next to the note
+  that a `DateTime` carries no kind or offset and always reads back as `Unspecified`.
+- **`[SQLiteColumn(Size = …)]`** is documented as a declared length that SQLite records but
+  never enforces.
+- **`GroupBy` and the terminals**: the query-builder page and the `GroupBy` XML comment now
+  state which terminals grouping reaches — rows, `CountAsync` and `ToPagedListAsync` count
+  groups; the typed aggregates refuse it.
+- **`Select`** is documented as resolving every projected member, anonymous projections
+  included, to the mapped column name, quoted.
+- **`Where` expression support is now enumerated**, including `IN` translation from
+  `collection.Contains(x.Id)` for arrays, `List<T>`, `HashSet<T>` and any `IEnumerable`
+  (an empty collection emits `1=0`), the `bool`-member shorthand, and the fact that an
+  unsupported predicate throws `NotSupportedException` out of `QueryBuilder.Where` itself
+  rather than returning a failed `Result` (`Repository.FindAsync` does return a failed `Result`).
+- **Events**: both `TableSyncedEvent` and `SlowQueryEvent` are listed with their payloads and
+  the conditions that raise them.
+- **Added a "Not included" section** naming what this library does not have that its
+  `CL.MySQL2` / `CL.MSSQL` / `CL.PostgreSQL` siblings do — result cache, `SqlFn`, typed joins,
+  cursor paging, transaction scopes, soft delete, bulk insert, a migration runner — plus how to
+  get multi-statement atomicity via `ConnectionManager.ExecuteAsync`.
+- `SyncNamespaceAsync` is documented as scanning the **calling assembly**, with the explicit
+  `Assembly` overload for everything else.
+- Noted that there is no `AverageAsync` / `AnyAsync` / `SingleAsync`, and that
+  `ToPagedListAsync` rejects `page` or `pageSize` below 1.
+
+## 2026-09-12
+
+### Changed
+
+- Unified the version line with the CodeLogic framework on **4.8.x**. Every official
+  library and the framework now share one `major.minor`, so a given `4.8.<patch>`
+  means the same generation across all packages.
+- `version.txt` moved from `4.6` to `4.8`. The patch component remains the CI run
+  number, composed at pack time; `AssemblyVersion` stays pinned at `Major.Minor.0.0`
+  (now `4.8.0.0`) so every patch in the line loads interchangeably.
+
 ## 2026-06-20
 
 ### Fixed

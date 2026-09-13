@@ -3,7 +3,7 @@
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.PostgreSQL)](https://www.nuget.org/packages/CodeLogic.PostgreSQL)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
 
-> A typed PostgreSQL data-access layer for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — multi-database connections, an attribute-driven repository, a fluent LINQ query builder, transactions, and declarative schema sync with backups and migration tracking.
+> A typed PostgreSQL data-access layer for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — multi-database connections, an attribute-driven repository, a fluent LINQ query builder, joins and projections, cursor paging, upserts, caching, migrations, and declarative schema sync.
 
 Map a plain class with attributes and the library reconciles the live table to match, then exposes a typed `Repository<T>` and a chainable `QueryBuilder<T>` over it. It builds on [Npgsql](https://www.nuget.org/packages/Npgsql) and connects to one or many PostgreSQL instances from a single config. Every fallible operation returns a framework `Result<T>` — no exceptions on the expected failure paths.
 
@@ -19,45 +19,56 @@ dotnet add package CodeLogic.PostgreSQL
 using CL.PostgreSQL;
 using CL.PostgreSQL.Models;
 
+[Table(Name = "users", Schema = "public")]
+public sealed class User
+{
+    [Column(Name = "id", Primary = true, AutoIncrement = true)]
+    public long Id { get; set; }
+
+    [Column(Name = "email", Size = 160, Unique = true, NotNull = true)]
+    public string Email { get; set; } = "";
+
+    // No DataType: inferred from the CLR type — Guid maps to uuid, DateTime to timestamptz.
+    [Column(Name = "external_id")]
+    public Guid ExternalId { get; set; }
+
+    [Column(Name = "created_utc", DefaultValue = "now()")]
+    public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+}
+
 await Libraries.LoadAsync<PostgreSQLLibrary>();   // register before ConfigureAsync()
 await CodeLogic.ConfigureAsync();
 await CodeLogic.StartAsync();
 
-var pg = Libraries.Get<PostgreSQLLibrary>();
+var pg = Libraries.Get<PostgreSQLLibrary>()!;
 
-// Define an entity
-[Table(Name = "users", Schema = "public")]
-public class User
-{
-    [Column(Primary = true, AutoIncrement = true)] public int Id { get; set; }
-    [Column(NotNull = true)]                        public string Name { get; set; } = "";
-    [Column] public bool IsActive { get; set; }
-}
+// Reconcile the table to match the entity (creates it, or adds missing columns/indexes)
+await pg.SyncTableAsync<User>();
 
-// 1. Reconcile the table to match the entity (creates it, or adds missing columns/indexes)
-Result<SyncResult> sync = await pg.SyncTableAsync<User>();
-
-// 2. Typed repository CRUD
+// Typed repository CRUD
 var repo = pg.GetRepository<User>();
-Result<User> created = await repo.InsertAsync(new User { Name = "Ada", IsActive = true });
+var created = await repo.InsertAsync(new User { Email = "ada@example.com" });
 
-// 3. Fluent query builder
-Result<List<User>> users = await pg.Query<User>()
-    .Where(u => u.IsActive)
-    .OrderBy(u => u.Name)
-    .Limit(50)
+// Fluent query builder
+var recent = await pg.Query<User>()
+    .Where(u => u.CreatedUtc >= DateTime.UtcNow.AddDays(-7))
+    .OrderByDescending(u => u.CreatedUtc)
+    .Take(20)
     .ToListAsync();
 ```
 
 ## Features
 
-- **Multi-database** — manage connections to several PostgreSQL instances from one config; pick the target per call with a `connectionId` (default `"Default"`), or `RegisterDatabase` one at runtime.
-- **Repository pattern** — `GetRepository<T>()` for full CRUD plus bulk insert, paging, find, raw SQL, and atomic increment/decrement.
-- **Fluent query builder** — `Query<T>()` with `Where`, `OrderBy`/`OrderByDescending`, `Limit`/`Offset` (aliases `Take`/`Skip`), `Join`, `Select`, `GroupBy`, aggregates, paging, and bulk update/delete.
-- **Attribute-driven schema** — `[Table]`, `[Column]`, `[ForeignKey]`, `[CompositeIndex]`, `[Ignore]` map a plain class to a real table.
-- **Schema sync & migrations** — create or alter tables to match entities (single, set, or whole namespace), with timestamped schema backups and a JSON migration history.
+- **Multi-database** — manage connections to several PostgreSQL instances from one config; pick the target per call with a `connectionId` (default `"Default"`), or add one at runtime with `pg.ConnectionManager.RegisterConfiguration(config, id)`.
+- **Repository** — full CRUD plus batched bulk insert, `ON CONFLICT` upserts, paging, find, raw SQL, soft delete, and atomic increment/decrement.
+- **Fluent query builder** — `Where`, `OrderBy`, `Limit`/`Offset` (aliases `Take`/`Skip`), `Join`, typed `Select` projections, `GroupBy`, aggregates, `WhereIn`/`WhereExists`, bulk update/delete.
+- **Cursor paging** — `After(cursor).ToCursorPagedListAsync()` for stable keyset pagination that does not drift as rows are inserted. Tokens are validated against the issuing query's entity and ordering, but are not signed — treat a cursor as a position, not as an authorisation.
+- **Caching** — per-query `WithCache(ttl)`, named smart-cache pools with background refresh, table-version invalidation, and a pluggable store/coordinator for multi-node setups.
+- **Migrations** — `IMigration` classes with up/down, ordered by app version, tracked in a database table (not a local file) and applied under an advisory lock so only one node runs them.
+- **Schema sync** — create or alter tables to match entities (single, set, or whole namespace), CRC-gated so unchanged models cost nothing, with `SyncMode` controlling how destructive a reconcile may be.
+- **PostgreSQL-native** — `uuid`, `timestamptz`, `jsonb`, arrays, ranges, `inet`; identity columns; `INCLUDE` covering indexes; `pg_advisory_lock`; `ctid`-batched retention.
+- **Observability** — query-executed, slow-query, and cache hit/miss events on the framework bus.
 - **Transactions** — `BeginTransactionAsync()` returns an `await using` scope that auto-rolls-back if it is never committed.
-- **Health checks & events** — `HealthCheckAsync()` plus events for connect/disconnect, table sync, slow query, and health changes.
 
 ## Configuration
 
@@ -65,22 +76,20 @@ Auto-generated on first run as `config.postgresql.json` (section `postgresql`). 
 
 ```json
 {
-  "Databases": {
+  "databases": {
     "Default": {
-      "Enabled": true,
-      "Host": "localhost",
-      "Port": 5432,
-      "Database": "mydb",
-      "Username": "postgres",
-      "Password": "",
-      "ConnectionTimeout": 30,
-      "CommandTimeout": 30,
-      "MinPoolSize": 5,
-      "MaxPoolSize": 100,
-      "MaxIdleTime": 60,
-      "SslMode": "Prefer",
-      "AllowDestructiveSync": false,
-      "SlowQueryThresholdMs": 1000
+      "enabled": true,
+      "host": "localhost",
+      "port": 5432,
+      "database": "app",
+      "username": "postgres",
+      "password": "",
+      "sslMode": "Prefer",
+      "defaultSchema": "public",
+      "minPoolSize": 1,
+      "maxPoolSize": 100,
+      "syncMode": "production",
+      "slowQueryThresholdMs": 1000
     }
   }
 }
@@ -88,29 +97,52 @@ Auto-generated on first run as `config.postgresql.json` (section `postgresql`). 
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `Enabled` | `true` | Per-database switch; disabled databases are skipped at startup. |
-| `Host` / `Port` | `localhost` / `5432` | Server endpoint. |
-| `Database` / `Username` / `Password` | `""` | Connection credentials. |
-| `ConnectionTimeout` | `30` | Seconds to wait when opening a connection. |
-| `CommandTimeout` | `30` | Seconds before a command times out. |
-| `MinPoolSize` / `MaxPoolSize` | `5` / `100` | Connection-pool bounds. |
-| `MaxIdleTime` | `60` | Seconds an idle pooled connection is kept before being closed. |
-| `SslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, or `VerifyFull`. |
-| `AllowDestructiveSync` | `false` | Dev-only; allows DROP operations during schema sync. |
-| `SlowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
+| `enabled` | `true` | Per-database switch; disabled databases are skipped at startup. |
+| `host` / `port` | `localhost` / `5432` | Server endpoint. |
+| `database` / `username` / `password` | `""` | Connection credentials. The database is not the schema — see `defaultSchema`. |
+| `sslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, `VerifyFull`. **`Prefer` encrypts but does not verify the certificate; use `VerifyFull` in production.** |
+| `sslCertificatePath` / `sslKeyPath` / `sslRootCertificatePath` | `null` | Client certificate, its key, and the CA bundle used by `VerifyCA`/`VerifyFull`. |
+| `defaultSchema` | `public` | The schema unqualified entities live in, and the connection's `search_path`. A `[Table]` without a `Schema` is created in — and every statement for it qualified with — this schema; `[Table(Schema = "…")]` still wins. Created if missing. **Changing it moves where your tables are read and written.** |
+| `applicationName` | `null` | Reported to the server; shows up in `pg_stat_activity`. |
+| `minPoolSize` / `maxPoolSize` | `1` / `100` | Connection-pool bounds. |
+| `connectionLifetime` | `300` | Seconds a pooled connection may sit idle before being closed. |
+| `connectionTimeout` / `commandTimeout` | `30` / `30` | Seconds to wait when opening a connection / running a command. |
+| `syncMode` | `production` | `developer` (drops freely), `production` (add and modify only), `migration` (one-shot destructive reconcile, backup first). |
+| `allowDestructiveSync` | `false` | Legacy escape hatch; promotes `production` to a full reconcile. |
+| `maxBatchInsertSize` | `500` | Rows per batched insert/upsert, capped so a statement stays under PostgreSQL's 65535-parameter limit. |
+| `queryTimeoutMs` | `30000` | Command timeout applied to every command the library creates (rounded up to whole seconds). `0` = no timeout. |
+| `maxInClauseValues` | `1000` | Warn (once per query build) when a generated `IN` list is wider than this. The list is still sent whole — nothing is chunked and nothing throws. |
+| `defaultStringSize` | `255` | `varchar` length for a string column with no explicit `[Column(Size = …)]`. |
+| `cacheEnabledOverride` | `null` | Per-database override of the global cache switch. `null` inherits. |
+| `backupDirectory` | `null` | Where schema backups are written. `null` = `DataDirectory/backups`. |
+| `n1DetectorThreshold` | `0` | Publish `N1QueryDetectedEvent` when one query template repeats this often within a one-second window. `0` disables. |
+| `captureExplainOnSlowQuery` | `false` | Attach `EXPLAIN (FORMAT JSON)` to `SlowQueryEvent` for slow queries. Best-effort. |
+| `slowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
+| `transientRetryCount` | `3` | Retries for serialization failures, deadlocks and unavailable locks (SQLSTATE `40001`, `40P01`, `55P03`). |
+
+## Notes for PostgreSQL
+
+A few places where PostgreSQL genuinely differs from the MySQL and SQL Server siblings:
+
+- **Upserts need a conflict target.** `ON CONFLICT` arbitrates on one named unique key, not "whichever key collides". The target is inferred when the entity has exactly one candidate; when it has several, pass `conflictTarget` explicitly rather than have one chosen for you.
+- **Identifiers are case-sensitive.** Everything is emitted double-quoted, so `[Column(Name = "userId")]` is a different column from `userid`. Prefer `snake_case` names.
+- **Schemas are namespaces.** A connection targets one database; `defaultSchema` picks the schema inside it for entities that do not name one, and `[Table(Schema = "…")]` overrides that per entity. Every generated statement is schema-qualified, and two named connections may target different schemas with the same entity types.
+- **`OnUpdateCurrentTimestamp`** has no column-clause equivalent, so schema sync creates a `BEFORE UPDATE` trigger for it.
+- **`DateTime` maps to `timestamptz`** and values with `Unspecified` kind are treated as UTC.
 
 ## Documentation
 
 Full guide: **[CL.PostgreSQL documentation](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/index.html)**
 
 - [Overview](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/index.html) — load, multi-database, repository CRUD, config, health, events.
-- [Query Builder](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/queries.html) — fluent methods, terminals, aggregates, bulk writes, raw SQL, transactions.
-- [Schema & Sync](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/schema.html) — entity attributes, table & namespace sync, backups, migration tracker.
+- [Query Builder](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/queries.html) — fluent methods, terminals, aggregates, projections, cursor paging, bulk writes, transactions.
+- [Schema & Migrations](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/schema-migrations.html) — entity attributes, sync modes, the CRC sentinel, soft delete, retention, migrations, backups.
+- [Performance & Caching](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/performance.html) — result cache, smart pools, multi-node coordination, retry, N+1 detection, batch limits.
 
 ## Requirements
 
 - [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
-- Npgsql 9.x · PostgreSQL 12+
+- Npgsql 9.x · PostgreSQL 12+ (covering `INCLUDE` indexes need 11+; identity columns need 10+)
 
 ## License
 

@@ -17,7 +17,9 @@ public sealed class ConnectionManager
     private readonly IEventBus? _events;
 
     // Per-connection-id configuration storage
-    private readonly Dictionary<string, MySqlDatabaseConfig> _configs = new(StringComparer.OrdinalIgnoreCase);
+    // Concurrent: RegisterConfiguration can run while other threads resolve a
+    // connection, and a plain Dictionary is not safe under that mix.
+    private readonly ConcurrentDictionary<string, MySqlDatabaseConfig> _configs = new(StringComparer.OrdinalIgnoreCase);
 
     // Per-connection-id open connection counter
     private readonly ConcurrentDictionary<string, int> _openCounts = new(StringComparer.OrdinalIgnoreCase);
@@ -66,6 +68,20 @@ public sealed class ConnectionManager
     /// <summary>Builds the ADO.NET connection string for the given connection ID.</summary>
     public string GetConnectionString(string connectionId = "Default")
         => RequireConfig(connectionId).BuildConnectionString();
+
+    /// <summary>
+    /// Applies the connection's configured <c>QueryTimeoutMs</c> to a command as its
+    /// <see cref="MySqlCommand.CommandTimeout"/> (rounded up to whole seconds, MySqlConnector's
+    /// unit). A value of 0 — or an unregistered connection id — leaves the command on the
+    /// connection string's <c>DefaultCommandTimeout</c>. The shipped default of 30000ms equals
+    /// that 30-second default, so this is a no-op until the value is changed.
+    /// </summary>
+    internal void ApplyCommandTimeout(MySqlCommand cmd, string connectionId)
+    {
+        var ms = GetConfiguration(connectionId)?.QueryTimeoutMs ?? 0;
+        if (ms <= 0) return;
+        cmd.CommandTimeout = (int)Math.Max(1, Math.Min(int.MaxValue, ((long)ms + 999) / 1000));
+    }
 
     // ── Connection lifecycle ───────────────────────────────────────────────────
 

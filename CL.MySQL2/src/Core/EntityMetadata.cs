@@ -40,7 +40,8 @@ internal static class EntityMetadata<T> where T : class
     {
         var type = typeof(T);
         TableAttr = type.GetCustomAttribute<TableAttribute>();
-        TableName = !string.IsNullOrEmpty(TableAttr?.Name) ? TableAttr.Name! : type.Name;
+        TableName = RequireSafeIdentifier(
+            !string.IsNullOrEmpty(TableAttr?.Name) ? TableAttr.Name! : type.Name, type, "table");
 
         var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(p => p.CanRead && p.CanWrite && p.GetCustomAttribute<IgnoreAttribute>() is null)
@@ -50,7 +51,8 @@ internal static class EntityMetadata<T> where T : class
         foreach (var prop in props)
         {
             var attr = prop.GetCustomAttribute<ColumnAttribute>();
-            var colName = !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : prop.Name;
+            var colName = RequireSafeIdentifier(
+                !string.IsNullOrEmpty(attr?.Name) ? attr.Name! : prop.Name, type, "column");
             cols.Add(new ColumnMetadata(prop, attr, colName));
         }
 
@@ -72,6 +74,29 @@ internal static class EntityMetadata<T> where T : class
         }
 
         Materializer = new Materializer<T>();
+    }
+
+    /// <summary>
+    /// Rejects any mapped identifier containing a backtick, a NUL, or a newline before it can
+    /// reach generated SQL. Identifiers normally originate from compile-time attributes, so
+    /// this is defence in depth: combined with <see cref="MySqlDialect.Quote"/> at the render
+    /// sites it makes identifier injection structurally impossible rather than merely unlikely.
+    /// </summary>
+    private static string RequireSafeIdentifier(string identifier, Type owner, string kind)
+    {
+        if (string.IsNullOrWhiteSpace(identifier))
+            throw new InvalidOperationException(
+                $"Entity '{owner.Name}' declares an empty {kind} name.");
+
+        foreach (var c in identifier)
+        {
+            if (c is '`' or '\0' or '\n' or '\r')
+                throw new InvalidOperationException(
+                    $"Entity '{owner.Name}' declares the {kind} name '{identifier}', which contains " +
+                    $"a character that is not permitted in a MySQL identifier.");
+        }
+
+        return identifier;
     }
 
     /// <summary>

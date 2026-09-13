@@ -25,17 +25,39 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
     private readonly ProjectionCompiler.Compiled<TSource, TResult> _projection;
     private readonly TimeSpan? _cacheTtl;
     private readonly string? _smartCachePool;
+    private readonly bool _cacheDisallowed;
 
     /// <summary>
     /// Enable result caching for this projected query. TTL and time-quantize behaviour come
     /// from <see cref="Configuration.CacheConfiguration"/> globally; per-call TTL wins here.
+    /// <para>
+    /// Ignored (with a warning) when the projection came from a subquery-filtered query
+    /// (<c>WhereExists</c> / <c>WhereIn</c>): the cache stamps an entry with a single table's
+    /// version, so a mutation on the inner table could never invalidate it.
+    /// </para>
     /// </summary>
     public ProjectedQuery<TSource, TResult> WithCache(TimeSpan ttl)
     {
+        WarnIfCacheDisallowed();
         return new ProjectedQuery<TSource, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, _sql, _parameters, _projection, ttl, _smartCachePool);
+            _slowQueryThresholdMs, _sql, _parameters, _projection, ttl, _smartCachePool, _cacheDisallowed);
     }
+
+    private void WarnIfCacheDisallowed()
+    {
+        if (!_cacheDisallowed) return;
+        _logger?.Warning(
+            "[MSSQL] Caching is not applied to a projection built from a subquery filter " +
+            "(WhereExists / WhereIn) — the entry could not be invalidated when the inner table " +
+            "changes, so the request is ignored and the query executes uncached.");
+    }
+
+    /// <summary>
+    /// Enable result caching using the configured default TTL
+    /// (<c>mssql.cache</c> → <c>DefaultTtlSeconds</c>, 60 s out of the box).
+    /// </summary>
+    public ProjectedQuery<TSource, TResult> WithCache() => WithCache(QueryCache.DefaultTtl);
 
     /// <summary>
     /// Opt this projected query into a named <see cref="SmartCachePool"/>.
@@ -43,9 +65,10 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
     /// </summary>
     public ProjectedQuery<TSource, TResult> SmartCache(string poolName)
     {
+        WarnIfCacheDisallowed();
         return new ProjectedQuery<TSource, TResult>(
             _connectionManager, _logger, _connectionId, _transactionScope,
-            _slowQueryThresholdMs, _sql, _parameters, _projection, _cacheTtl, poolName);
+            _slowQueryThresholdMs, _sql, _parameters, _projection, _cacheTtl, poolName, _cacheDisallowed);
     }
 
     internal ProjectedQuery(
@@ -58,7 +81,8 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         Dictionary<string, object?> parameters,
         ProjectionCompiler.Compiled<TSource, TResult> projection,
         TimeSpan? cacheTtl,
-        string? smartCachePool = null)
+        string? smartCachePool = null,
+        bool cacheDisallowed = false)
     {
         _connectionManager = connectionManager;
         _logger = logger;
@@ -70,6 +94,7 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         _projection = projection;
         _cacheTtl = cacheTtl;
         _smartCachePool = smartCachePool;
+        _cacheDisallowed = cacheDisallowed;
     }
 
     // Plain cache-aside requires an explicit TTL. A query that asked for
@@ -77,8 +102,10 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
     // uncached execution (the logged fallback) — including _smartCachePool
     // here used to send it into the TTL branch and dereference a null
     // _cacheTtl ("Nullable object must have a value").
-    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null;
-    private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null;
+    // _cacheDisallowed is set when the source query carried a subquery filter: the cache key
+    // is stamped with one table's version, so an entry could not be invalidated by the other.
+    private bool ShouldCache => _cacheTtl is not null && _transactionScope is null && !_cacheDisallowed;
+    private bool ShouldSmartCache => _smartCachePool is not null && _transactionScope is null && !_cacheDisallowed;
 
     public async Task<Result<List<TResult>>> ToListAsync(CancellationToken ct = default)
     {
@@ -140,7 +167,7 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
 
         var items = await ExecuteAsync(async conn =>
         {
-            await using var cmd = conn.CreateCommand();
+            await using var cmd = NewCommand(conn);
             if (_transactionScope is not null) cmd.Transaction = _transactionScope.Transaction;
             cmd.CommandText = _sql;
             foreach (var kv in _parameters)
@@ -150,7 +177,7 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 list.Add(_projection.Materializer(reader));
             return list;
-        }).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
 
         sw.Stop();
 
@@ -161,11 +188,25 @@ public sealed class ProjectedQuery<TSource, TResult> where TSource : class, new(
         return Result<List<TResult>>.Success(items);
     }
 
-    private async Task<T> ExecuteAsync<T>(Func<SqlConnection, Task<T>> action)
+    /// <summary>
+    /// Creates a command carrying the configured <c>QueryTimeoutMs</c> for this connection.
+    /// </summary>
+    private SqlCommand NewCommand(SqlConnection conn)
+    {
+        var cmd = conn.CreateCommand();
+        if (_connectionManager.QueryCommandTimeoutSeconds(_connectionId) is { } timeoutSeconds)
+            cmd.CommandTimeout = timeoutSeconds;
+        return cmd;
+    }
+
+    private async Task<T> ExecuteAsync<T>(Func<SqlConnection, Task<T>> action, CancellationToken ct)
     {
         if (_transactionScope is not null)
             return await action(_transactionScope.Connection).ConfigureAwait(false);
-        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId).ConfigureAwait(false);
+
+        // The token has to reach ExecuteWithConnectionAsync, otherwise opening the
+        // connection (and any transient-failure retry around it) ignores cancellation.
+        return await _connectionManager.ExecuteWithConnectionAsync(action, _connectionId, ct).ConfigureAwait(false);
     }
 
     private void LogQuery(string sql)

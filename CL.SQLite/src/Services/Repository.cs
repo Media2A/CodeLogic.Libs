@@ -70,12 +70,19 @@ public sealed class Repository<T> where T : class, new()
                 var colAttr = prop.GetCustomAttribute<SQLiteColumnAttribute>();
                 if (colAttr?.IsAutoIncrement == true) continue;
                 var colName = colAttr?.ColumnName ?? prop.Name;
+                // Parameter names are positional rather than derived from the column name: a
+                // column name is an arbitrary quoted identifier and need not be a legal token.
+                var paramName = $"@p{values.Count}";
                 cols.Add($"\"{colName}\"");
-                paramNames.Add($"@{colName}");
-                values[$"@{colName}"] = ConvertToDbValue(prop.GetValue(entity), prop.PropertyType);
+                paramNames.Add(paramName);
+                values[paramName] = SQLiteValueConverter.ToDbValue(prop.GetValue(entity), prop.PropertyType);
             }
 
-            var sql = $"INSERT INTO \"{_tableName}\" ({string.Join(", ", cols)}) VALUES ({string.Join(", ", paramNames)}); SELECT last_insert_rowid();";
+            // An entity whose only column is the auto-increment key leaves nothing to write;
+            // SQLite spells that INSERT INTO "t" DEFAULT VALUES, not an empty column list.
+            var sql = cols.Count == 0
+                ? $"INSERT INTO \"{_tableName}\" DEFAULT VALUES; SELECT last_insert_rowid();"
+                : $"INSERT INTO \"{_tableName}\" ({string.Join(", ", cols)}) VALUES ({string.Join(", ", paramNames)}); SELECT last_insert_rowid();";
             LogQuery(sql);
             var sw = Stopwatch.StartNew();
 
@@ -129,9 +136,10 @@ public sealed class Repository<T> where T : class, new()
             {
                 var colAttr = prop.GetCustomAttribute<SQLiteColumnAttribute>();
                 var colName = colAttr?.ColumnName ?? prop.Name;
+                var paramName = $"@p{values.Count}";
                 cols.Add($"\"{colName}\"");
-                paramNames.Add($"@{colName}");
-                values[$"@{colName}"] = ConvertToDbValue(prop.GetValue(entity), prop.PropertyType);
+                paramNames.Add(paramName);
+                values[paramName] = SQLiteValueConverter.ToDbValue(prop.GetValue(entity), prop.PropertyType);
             }
 
             var sql = $"INSERT OR REPLACE INTO \"{_tableName}\" ({string.Join(", ", cols)}) VALUES ({string.Join(", ", paramNames)});";
@@ -181,7 +189,7 @@ public sealed class Repository<T> where T : class, new()
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", id ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@id", ConvertKey(id) ?? DBNull.Value);
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                 return await reader.ReadAsync(ct).ConfigureAwait(false) ? MapFromReader(reader) : null;
             }, _connectionId, ct).ConfigureAwait(false);
@@ -340,8 +348,9 @@ public sealed class Repository<T> where T : class, new()
                 var colAttr = prop.GetCustomAttribute<SQLiteColumnAttribute>();
                 var colName = colAttr?.ColumnName ?? prop.Name;
                 if (pkColNames.Contains(colName)) continue;
-                setClauses.Add($"\"{colName}\" = @set_{colName}");
-                values[$"@set_{colName}"] = ConvertToDbValue(prop.GetValue(entity), prop.PropertyType);
+                var paramName = $"@p{setClauses.Count}";
+                setClauses.Add($"\"{colName}\" = {paramName}");
+                values[paramName] = SQLiteValueConverter.ToDbValue(prop.GetValue(entity), prop.PropertyType);
             }
 
             var pkValues = pkCols.Select(pk => pk.Property.GetValue(entity)).ToArray();
@@ -395,7 +404,7 @@ public sealed class Repository<T> where T : class, new()
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = sql;
-                cmd.Parameters.AddWithValue("@id", id ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@id", ConvertKey(id) ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }, _connectionId, ct).ConfigureAwait(false);
 
@@ -462,6 +471,7 @@ public sealed class Repository<T> where T : class, new()
         {
             var sql = $"SELECT COUNT(*) FROM \"{_tableName}\";";
             LogQuery(sql);
+            var sw = Stopwatch.StartNew();
 
             var count = await _connectionManager.ExecuteAsync<long>(async conn =>
             {
@@ -471,6 +481,8 @@ public sealed class Repository<T> where T : class, new()
                 return result is null ? 0L : Convert.ToInt64(result);
             }, _connectionId, ct).ConfigureAwait(false);
 
+            sw.Stop();
+            LogSlowQuery(sql, sw.ElapsedMilliseconds);
             return Result<long>.Success(count);
         }
         catch (Exception ex)
@@ -644,48 +656,10 @@ public sealed class Repository<T> where T : class, new()
 
             if (prop is null || !prop.CanWrite) continue;
             var raw = reader.IsDBNull(i) ? null : reader.GetValue(i);
-            prop.SetValue(entity, ConvertFromDbValue(raw, prop.PropertyType));
+            prop.SetValue(entity, SQLiteValueConverter.FromDbValue(raw, prop.PropertyType));
         }
 
         return entity;
-    }
-
-    private static object? ConvertToDbValue(object? value, Type type)
-    {
-        if (value is null) return null;
-
-        var underlying = Nullable.GetUnderlyingType(type) ?? type;
-
-        if (underlying == typeof(bool)) return (bool)value ? 1 : 0;
-        if (underlying == typeof(DateTime)) return ((DateTime)value).ToString("yyyy-MM-dd HH:mm:ss.fff");
-        if (underlying == typeof(DateTimeOffset)) return ((DateTimeOffset)value).ToString("yyyy-MM-dd HH:mm:ss.fffzzz");
-        if (underlying == typeof(Guid)) return value.ToString();
-        if (underlying.IsEnum) return Convert.ToInt64(value);
-
-        return value;
-    }
-
-    private static object? ConvertFromDbValue(object? value, Type targetType)
-    {
-        if (value is null || value is DBNull) return null;
-
-        var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
-
-        if (underlying == typeof(bool)) return Convert.ToInt64(value) != 0;
-        if (underlying == typeof(int)) return Convert.ToInt32(value);
-        if (underlying == typeof(long)) return Convert.ToInt64(value);
-        if (underlying == typeof(double)) return Convert.ToDouble(value);
-        if (underlying == typeof(float)) return Convert.ToSingle(value);
-        if (underlying == typeof(decimal)) return Convert.ToDecimal(value);
-        if (underlying == typeof(DateTime) && value is string dtStr)
-            return DateTime.Parse(dtStr);
-        if (underlying == typeof(Guid) && value is string guidStr)
-            return Guid.Parse(guidStr);
-        if (underlying.IsEnum)
-            return Enum.ToObject(underlying, Convert.ToInt64(value));
-
-        try { return Convert.ChangeType(value, underlying); }
-        catch { return value; }
     }
 
     private static List<(string ColumnName, PropertyInfo Property)> GetPrimaryKeyColumns()
@@ -710,6 +684,17 @@ public sealed class Repository<T> where T : class, new()
             })
             .ToArray();
 
+    /// <summary>
+    /// Converts a primary-key value the same way the write path does, so a lookup matches
+    /// what was stored. Falls back to the raw value when the entity has no single key.
+    /// </summary>
+    private object? ConvertKey(object? id)
+    {
+        if (id is null) return null;
+        var pk = GetPrimaryKeyColumns().FirstOrDefault();
+        return pk.Property is null ? id : SQLiteValueConverter.ToDbValue(id, pk.Property.PropertyType);
+    }
+
     private static (string Clause, Dictionary<string, object?> Parameters) BuildPrimaryKeyWhere(
         List<(string ColumnName, PropertyInfo Property)> pkCols,
         object[] values)
@@ -721,7 +706,11 @@ public sealed class Repository<T> where T : class, new()
         {
             var paramName = $"@pk{i}";
             clauses.Add($"\"{pkCols[i].ColumnName}\" = {paramName}");
-            parameters[paramName] = values[i];
+            // Through the same converter InsertAsync writes with: a raw Guid binds as a
+            // BLOB and a raw DateTime in the provider's own format, neither of which
+            // matches what was stored, so the lookup silently found nothing.
+            parameters[paramName] = SQLiteValueConverter.ToDbValue(
+                values[i], pkCols[i].Property.PropertyType);
         }
 
         return (string.Join(" AND ", clauses), parameters);
@@ -749,8 +738,10 @@ public sealed class Repository<T> where T : class, new()
 
     private void LogSlowQuery(string sql, long elapsedMs)
     {
-        if (elapsedMs >= _slowQueryThresholdMs)
-            _logger?.Warning($"[SQLite] Slow query ({elapsedMs}ms): {sql}");
+        if (elapsedMs < _slowQueryThresholdMs) return;
+
+        _logger?.Warning($"[SQLite] {string.Format(SQLiteObservability.Strings.SlowQueryDetected, elapsedMs, sql)}");
+        SQLiteObservability.RecordSlowQuery(_tableName, sql, elapsedMs);
     }
 
     private void LogQuery(string sql)

@@ -7,7 +7,8 @@ namespace CL.SQLite;
 
 /// <summary>
 /// <b>CL.SQLite</b> — CodeLogic library providing SQLite database access with a connection pool,
-/// LINQ query builder, automatic table synchronization, and migration tracking.
+/// a LINQ query builder, on-demand table synchronization, and a migration ledger.
+/// Table sync is not automatic: call <see cref="TableSync"/> yourself for the entities you want reconciled.
 /// </summary>
 public sealed class SQLiteLibrary : ILibrary
 {
@@ -50,6 +51,10 @@ public sealed class SQLiteLibrary : ILibrary
 
         _config = context.Configuration.Get<SQLiteConfig>();
         _strings = context.Localization.Get<SQLiteStrings>();
+
+        // The services are constructed without an event bus, so they reach it — and the
+        // localized strings — through the process-wide sink.
+        SQLiteObservability.Configure(context.Events, _strings);
 
         var enabledDbs = _config.Databases
             .Where(kvp => kvp.Value.Enabled)
@@ -110,6 +115,10 @@ public sealed class SQLiteLibrary : ILibrary
     public Task OnStopAsync()
     {
         _context?.Logger.Info($"Stopping {Manifest.Name}");
+
+        // Only unbind the sink if this instance is the one that bound it; a library that was
+        // never initialized must not tear down a running one's wiring.
+        if (_isEnabled) SQLiteObservability.Reset();
 
         _connectionManager?.Dispose();
         _connectionManager = null;

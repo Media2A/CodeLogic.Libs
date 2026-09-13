@@ -70,7 +70,7 @@ public sealed class ConnectionManager : IDisposable
                 {
                     pooled.MarkInUse();
                     Interlocked.Increment(ref state.ActiveCount);
-                    _logger?.Debug($"[SQLite] Reused pooled connection for '{connectionId}'");
+                    _logger?.Debug($"[SQLite] [{connectionId}] {SQLiteObservability.Strings.ConnectionReused}");
                     return pooled.Connection;
                 }
 
@@ -111,7 +111,7 @@ public sealed class ConnectionManager : IDisposable
             var pooled = new PooledConnection(connection);
             pooled.MarkAvailable();
             state.Pool.Push(pooled);
-            _logger?.Debug($"[SQLite] Connection returned to pool for '{connectionId}'");
+            _logger?.Debug($"[SQLite] [{connectionId}] {SQLiteObservability.Strings.ConnectionReleased}");
         }
         else
         {
@@ -211,18 +211,21 @@ public sealed class ConnectionManager : IDisposable
     {
         var builder = new SqliteConnectionStringBuilder
         {
-            DataSource = state.DatabasePath
+            DataSource = state.DatabasePath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            // Microsoft.Data.Sqlite's own default is 30s, which is also this setting's default,
+            // so a default configuration opens exactly the connection it opened before.
+            DefaultTimeout = (int)Math.Clamp(state.Config.ConnectionTimeoutSeconds, 1u, int.MaxValue)
         };
 
-        builder.Mode = state.Config.CacheMode switch
+        // Default is left off the connection string entirely, so a default configuration opens
+        // exactly the connection it opened before; the other two are requested explicitly.
+        if (state.Config.CacheMode is CacheMode.Shared or CacheMode.Private)
         {
-            CacheMode.Shared => SqliteOpenMode.ReadWriteCreate,
-            CacheMode.Private => SqliteOpenMode.ReadWriteCreate,
-            _ => SqliteOpenMode.ReadWriteCreate
-        };
-
-        if (state.Config.CacheMode == CacheMode.Shared)
-            builder.Cache = SqliteCacheMode.Shared;
+            builder.Cache = state.Config.CacheMode == CacheMode.Shared
+                ? SqliteCacheMode.Shared
+                : SqliteCacheMode.Private;
+        }
 
         var conn = new SqliteConnection(builder.ToString());
         await conn.OpenAsync(ct).ConfigureAwait(false);
@@ -234,14 +237,17 @@ public sealed class ConnectionManager : IDisposable
             await walCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        if (state.Config.EnableForeignKeys)
+        // Both directions are sent: Microsoft.Data.Sqlite turns foreign keys ON for every
+        // connection it opens, so without the OFF form the false setting would do nothing.
+        await using (var fkCmd = conn.CreateCommand())
         {
-            await using var fkCmd = conn.CreateCommand();
-            fkCmd.CommandText = "PRAGMA foreign_keys=ON;";
+            fkCmd.CommandText = state.Config.EnableForeignKeys
+                ? "PRAGMA foreign_keys=ON;"
+                : "PRAGMA foreign_keys=OFF;";
             await fkCmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        _logger?.Debug($"[SQLite] Created new connection for '{state.DatabasePath}'");
+        _logger?.Debug($"[SQLite] {string.Format(SQLiteObservability.Strings.ConnectionCreated, state.DatabasePath)}");
         return conn;
     }
 

@@ -1,5 +1,6 @@
 using CodeLogic.Core.Logging;
 using MySqlConnector;
+using CL.MySQL2.Core;
 
 namespace CL.MySQL2.Services;
 
@@ -34,7 +35,7 @@ public sealed class MigrationTracker
         try
         {
             var sql = $@"
-                CREATE TABLE IF NOT EXISTS `{MigrationsTable}` (
+                CREATE TABLE IF NOT EXISTS {MySqlDialect.Quote(MigrationsTable)} (
                     `Id` INT NOT NULL AUTO_INCREMENT,
                     `MigrationId` VARCHAR(255) NOT NULL,
                     `Description` VARCHAR(500) NULL,
@@ -78,7 +79,7 @@ public sealed class MigrationTracker
             return await _connectionManager.ExecuteWithConnectionAsync(async conn =>
             {
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandText = $"SELECT COUNT(*) FROM `{MigrationsTable}` WHERE `MigrationId` = @id";
+                cmd.CommandText = $"SELECT COUNT(*) FROM {MySqlDialect.Quote(MigrationsTable)} WHERE `MigrationId` = @id";
                 cmd.Parameters.AddWithValue("@id", migrationId);
                 var count = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false));
                 return count > 0;
@@ -112,7 +113,7 @@ public sealed class MigrationTracker
             {
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
-                    INSERT IGNORE INTO `{MigrationsTable}` (`MigrationId`, `Description`, `Checksum`, `AppliedAt`)
+                    INSERT IGNORE INTO {MySqlDialect.Quote(MigrationsTable)} (`MigrationId`, `Description`, `Checksum`, `AppliedAt`)
                     VALUES (@id, @desc, @checksum, UTC_TIMESTAMP())";
                 cmd.Parameters.AddWithValue("@id", migrationId);
                 cmd.Parameters.AddWithValue("@desc", (object?)description ?? DBNull.Value);
@@ -147,7 +148,7 @@ public sealed class MigrationTracker
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
                     SELECT `Id`, `MigrationId`, `Description`, `AppliedAt`, `Checksum`
-                    FROM `{MigrationsTable}`
+                    FROM {MySqlDialect.Quote(MigrationsTable)}
                     ORDER BY `AppliedAt` ASC";
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -187,7 +188,7 @@ public sealed class MigrationTracker
             await _connectionManager.ExecuteWithConnectionAsync(async conn =>
             {
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandText = $"DELETE FROM `{MigrationsTable}` WHERE `MigrationId` = @id";
+                cmd.CommandText = $"DELETE FROM {MySqlDialect.Quote(MigrationsTable)} WHERE `MigrationId` = @id";
                 cmd.Parameters.AddWithValue("@id", migrationId);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 return true;

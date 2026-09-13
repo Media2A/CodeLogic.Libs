@@ -1,21 +1,24 @@
 # CL.PostgreSQL
 
-> A typed PostgreSQL data-access layer for CodeLogic 4 — multi-database connections, an attribute-driven repository, a fluent LINQ query builder, transactions, and declarative schema sync with backups and migration tracking.
+> A typed data-access layer for PostgreSQL — repositories, a LINQ query builder, declarative schema sync, imperative migrations, and a self-invalidating result cache.
 
-`CL.PostgreSQL` is the PostgreSQL sibling of the flagship [CL.MySQL2](../mysql2/index.md). Map a plain class with attributes and the library reconciles the live table to match, then exposes a typed `Repository<T>` and a chainable `QueryBuilder<T>` over it. It builds on [Npgsql](https://www.nuget.org/packages/Npgsql) and connects to one or many PostgreSQL instances from a single config. Every fallible operation returns a framework `Result<T>` — check `IsSuccess` / `IsFailure` and read `.Value` or `.Error?.Message`.
+`CL.PostgreSQL` maps a plain class with attributes, keeps the live table in shape, generates reflection-free row mappers, translates LINQ-shaped expressions to real SQL, and caches results with version-stamped invalidation. It builds on [Npgsql](https://www.nuget.org/packages/Npgsql). Every fallible operation returns a framework `Result<T>` — no exceptions for the expected failure paths.
+
+It shares its architecture with [`CL.MySQL2`](../mysql2/index.md) and [`CL.MSSQL`](../mssql/index.md), so the API is nearly identical across the three. Where PostgreSQL genuinely differs — `ON CONFLICT` arbitration, schemas, case-sensitive identifiers — the difference is called out rather than papered over. See [Dialect notes](#dialect-notes) below.
 
 | | |
 |---|---|
 | **Package** | [`CodeLogic.PostgreSQL`](https://www.nuget.org/packages/CodeLogic.PostgreSQL) |
 | **Library class** | `CL.PostgreSQL.PostgreSQLLibrary` |
-| **Config file** | `config.postgresql.json` (section `postgresql`) |
+| **Config files** | `config.postgresql.json` · `config.postgresql.cache.json` |
 | **Dependencies** | Npgsql 9.x |
 | **Engines** | PostgreSQL 12+ |
 
-This overview covers loading, the entry points, multi-database, repository CRUD, configuration, health, and events. The deep material lives on two sub-pages:
+This overview covers loading, the entry points, and configuration. The deep material lives on three sub-pages:
 
-- **[Query Builder](queries.md)** — fluent `Where` / ordering / paging / joins / projections / `GroupBy` aggregates / terminals / bulk update & delete / raw SQL / transactions.
-- **[Schema & Sync](schema.md)** — entity attributes, the `DataType` enum, table / set / namespace sync, `SyncResult`, schema backups, and the migration tracker.
+- **[Query Builder](queries.md)** — `Where` / subquery filters / ordering / paging / cursor paging / joins / projections / `GroupBy` aggregates / terminals / bulk update & delete / raw SQL / transactions.
+- **[Schema & Migrations](schema-migrations.md)** — entity attributes, `SyncMode` & `SchemaSyncLevel`, `SyncTableAsync` / `SyncSchemaAsync`, the CRC sentinel, soft delete, retention, imperative migrations, backups & restore.
+- **[Performance & Caching](performance.md)** — the result cache, time quantization, table-version invalidation, `SmartCachePool`, multi-node coordination, transient retry, the N+1 detector, slow-query / `EXPLAIN`, compiled materializers, projection pushdown.
 
 ## Install & load
 
@@ -30,174 +33,198 @@ await Libraries.LoadAsync<PostgreSQLLibrary>();   // register before ConfigureAs
 await CodeLogic.ConfigureAsync();
 await CodeLogic.StartAsync();
 
-var pg = Libraries.Get<PostgreSQLLibrary>();
+var pg = Libraries.Get<PostgreSQLLibrary>()!;
 ```
 
 Set your connection in `config.postgresql.json` (auto-generated on first run) before `ConfigureAsync()`.
 
 ## Define an entity
 
-A mapped class is a plain C# type decorated with attributes from `CL.PostgreSQL.Models`. The full attribute set is documented on the [Schema & Sync](schema.md) page.
+A mapped class is a plain C# type decorated with attributes from `CL.PostgreSQL.Models`. The full attribute set is documented on the [Schema & Migrations](schema-migrations.md) page.
 
 ```csharp
 using CL.PostgreSQL.Models;
 
 [Table(Name = "users", Schema = "public")]
-public class User
+public sealed class User
 {
-    [Column(Primary = true, AutoIncrement = true)] public int Id { get; set; }
-    [Column(Size = 120, Unique = true)]            public string Email { get; set; } = "";
-    [Column(Size = 80, Index = true, NotNull = true)] public string Name { get; set; } = "";
-    [Column] public int LoginCount { get; set; }
-    [Column] public bool IsActive { get; set; }
+    [Column(Name = "id", Primary = true, AutoIncrement = true)]
+    public long Id { get; set; }
+
+    [Column(Name = "email", Size = 160, Unique = true, NotNull = true)]
+    public string Email { get; set; } = "";
+
+    // No DataType: inferred from the CLR type. Guid -> uuid, DateTime -> timestamptz.
+    [Column(Name = "external_id")]
+    public Guid ExternalId { get; set; }
+
+    [Column(Name = "created_utc", DefaultValue = "now()", Index = true)]
+    public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+
+    [Column(Name = "settings", DataType = DataType.Jsonb)]
+    public string? Settings { get; set; }
 }
 ```
 
-Reconcile it to the database once, at startup:
-
-```csharp
-Result<SyncResult> sync = await pg.SyncTableAsync<User>();   // createBackup: true by default
-```
-
-## Repository basics
-
-`GetRepository<T>()` returns a `Repository<T>` covering common CRUD, paging, count, find, raw SQL, and atomic increment/decrement. Almost everything returns `Result<…>`.
-
-```csharp
-var repo = pg.GetRepository<User>();
-
-// Create
-Result<User> created = await repo.InsertAsync(new User { Email = "ada@example.com", Name = "Ada" });
-Result<int>  many    = await repo.InsertManyAsync(batch);
-
-// Read
-Result<User?>      byId  = await repo.GetByIdAsync(1);
-Result<List<User>> byCol = await repo.GetByColumnAsync(nameof(User.Name), "Ada");
-Result<List<User>> all   = await repo.GetAllAsync();
-Result<List<User>> found = await repo.FindAsync(u => u.LoginCount > 10);
-Result<long>       count = await repo.CountAsync();
-
-// Paged
-Result<PagedResult<User>> page =
-    await repo.GetPagedAsync(page: 1, pageSize: 25, orderByColumn: nameof(User.Name), descending: false);
-
-// Update / delete
-Result<User> updated = await repo.UpdateAsync(created.Value!);   // by primary key, RETURNING *
-Result<bool> deleted = await repo.DeleteAsync(1);
-
-// Atomic counter adjustments (single UPDATE … SET col = col ± delta)
-Result<int> inc = await repo.IncrementAsync(1, u => u.LoginCount, 1);
-Result<int> dec = await repo.DecrementAsync(1, u => u.LoginCount, 1);
-
-// Raw SQL materialized into T / executed as a non-query
-Result<List<User>> raw = await repo.RawQueryAsync(
-    "SELECT * FROM \"users\" WHERE \"Name\" = @n", new() { ["@n"] = "Ada" });
-Result<int> affected = await repo.RawExecuteAsync("UPDATE \"users\" SET \"IsActive\" = false");
-```
-
-A primary key (`[Column(Primary = true)]`) is required for `GetByIdAsync`, `UpdateAsync`, `DeleteAsync`, and the increment/decrement helpers. `InsertAsync` / `UpdateAsync` issue `INSERT … RETURNING *` so the returned entity reflects database-generated values.
-
-Both the repository's `CountAsync` and the query builder's `CountAsync` return `Result<long>` — see [Query Builder](queries.md) for filtered counts.
-
-`PagedResult<T>` carries `Items`, `PageNumber`, `PageSize`, `TotalItems`, `TotalPages`, `HasPreviousPage`, and `HasNextPage`.
+Leaving `DataType` off is the common case: the CLR property type decides, and it picks the
+native PostgreSQL type rather than a lowest-common-denominator one. Set it explicitly when
+you want something the CLR type does not imply, such as `Jsonb` for a `string`.
 
 ## Entry points
 
-Everything flows through a handful of methods on the library.
+| Member | Purpose |
+|---|---|
+| `SyncTableAsync<T>()` | Reconcile one table to the entity definition. |
+| `SyncSchemaAsync(params Type[])` | Reconcile several entities in one pass. |
+| `GetRepository<T>()` | Typed CRUD: insert, batched bulk insert, upsert, update, delete, paging, increment. |
+| `Query<T>()` | Fluent query builder: filters, ordering, joins, projections, aggregates, cursor paging. |
+| `SqlQueryAsync<T>()` / `SqlScalarAsync<T>()` / `ExecuteSqlAsync()` | Parameterised raw SQL. |
+| `BeginTransactionAsync()` | An `await using` scope that rolls back unless committed. |
+| `Migrations` | The migration runner: `MigrateAsync`, `RollbackAsync`, `GetPendingAsync`. |
+| `ConnectionManager.RegisterConfiguration(config, id)` | Add a connection at runtime. |
+| `HealthCheckAsync()` | Per-connection health for the framework's health endpoint. |
+| `GetCacheStats()` / `GetCachePoolStats()` | Cache counters. |
 
-| Member | Returns | Purpose |
-|--------|---------|---------|
-| `GetRepository<T>(connectionId = "Default")` | `Repository<T>` | CRUD / paging / find / raw / increment. |
-| `Query<T>(connectionId = "Default")` | `QueryBuilder<T>` | Fluent LINQ-to-SQL queries. See [Query Builder](queries.md). |
-| `QueryRaw(connectionId = "Default")` | `QueryBuilder` | Parameterized raw SQL (dictionary rows). See [Query Builder](queries.md). |
-| `BeginTransactionAsync(connectionId, ct)` | `Task<TransactionScope>` | Explicit transaction (`IAsyncDisposable`, auto-rollback). |
-| `SyncTableAsync<T>(createBackup = true, connectionId = "Default")` | `Task<Result<SyncResult>>` | Reconcile one table. See [Schema & Sync](schema.md). |
-| `RegisterDatabase(connectionId, config)` | `void` | Add a named database at runtime. |
+```csharp
+await pg.SyncTableAsync<User>();
 
-Library properties expose the underlying machinery for advanced use: `ConnectionManager`, `TableSync`, `BackupManager`, and `MigrationTracker`.
+var repo = pg.GetRepository<User>();
+var created = await repo.InsertAsync(new User { Email = "ada@example.com" });
+
+var recent = await pg.Query<User>()
+    .Where(u => u.CreatedUtc >= DateTime.UtcNow.AddDays(-7))
+    .OrderByDescending(u => u.CreatedUtc)
+    .Take(20)
+    .ToListAsync();
+```
 
 ## Multi-database
 
-Every entry point takes an optional `connectionId` (default `"Default"`) that selects one of the databases configured under `Databases`. Add more keys in `config.postgresql.json` and pass the key:
+`Databases` is a named map. Every entry point takes an optional `connectionId` that defaults
+to `"Default"`.
 
 ```csharp
-var reportRepo = pg.GetRepository<Sale>("Reporting");
-var query      = pg.Query<Sale>("Reporting").Where(s => s.Year == 2026);
+var reporting = pg.GetRepository<User>("Reporting");
+var rows = await pg.Query<User>("Reporting").Where(u => u.Email != null).ToListAsync();
 ```
 
-On the query builder, `.WithConnection("Reporting")` does the same fluently. You can also register a database at runtime:
+Register one at runtime instead of in config:
 
 ```csharp
-pg.RegisterDatabase("Reporting", new DatabaseConfig
+pg.ConnectionManager.RegisterConfiguration(new PostgreSqlDatabaseConfig
 {
-    Host = "reports.internal", Database = "analytics",
-    Username = "reader", Password = "***"
-});
+    Host = "tenant42.db.internal",
+    Database = "tenant42",
+    Username = "app",
+    Password = secret,
+    SslMode = PostgreSqlSslMode.VerifyFull,
+}, "Tenant42");
 ```
 
 ## Configuration
 
-`config.postgresql.json` (section `postgresql`) holds a `Databases` dictionary keyed by connection id — `Default` is created automatically with the defaults below.
+`config.postgresql.json`, section `postgresql`:
 
 ```json
 {
-  "Databases": {
+  "databases": {
     "Default": {
-      "Enabled": true,
-      "Host": "localhost",
-      "Port": 5432,
-      "Database": "mydb",
-      "Username": "postgres",
-      "Password": "",
-      "ConnectionTimeout": 30,
-      "CommandTimeout": 30,
-      "MinPoolSize": 5,
-      "MaxPoolSize": 100,
-      "MaxIdleTime": 60,
-      "SslMode": "Prefer",
-      "AllowDestructiveSync": false,
-      "SlowQueryThresholdMs": 1000
+      "enabled": true,
+      "host": "localhost",
+      "port": 5432,
+      "database": "app",
+      "username": "postgres",
+      "password": "",
+      "sslMode": "Prefer",
+      "defaultSchema": "public",
+      "minPoolSize": 1,
+      "maxPoolSize": 100,
+      "syncMode": "production",
+      "slowQueryThresholdMs": 1000
     }
   }
 }
 ```
 
-| Setting | Type | Default | Notes |
-|---------|------|---------|-------|
-| `Enabled` | `bool` | `true` | Per-database switch; disabled databases are skipped at startup. |
-| `Host` / `Port` | `string` / `int` | `localhost` / `5432` | Server endpoint. |
-| `Database` / `Username` / `Password` | `string` | `""` | Connection credentials. |
-| `ConnectionTimeout` | `int` | `30` | Seconds to wait when opening a connection. |
-| `CommandTimeout` | `int` | `30` | Seconds before a command times out. |
-| `MinPoolSize` / `MaxPoolSize` | `int` | `5` / `100` | Connection-pool bounds. |
-| `MaxIdleTime` | `int` | `60` | Seconds an idle pooled connection is kept before being closed. |
-| `SslMode` | `string` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, or `VerifyFull`. |
-| `AllowDestructiveSync` | `bool` | `false` | Dev-only; allows DROP operations during schema sync. See [Schema & Sync](schema.md). |
-| `SlowQueryThresholdMs` | `int` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Per-database switch; disabled databases are skipped at startup. |
+| `host` / `port` | `localhost` / `5432` | Server endpoint. |
+| `database` / `username` / `password` | `""` | Connection credentials. |
+| `sslMode` | `Prefer` | `Disable`, `Allow`, `Prefer`, `Require`, `VerifyCA`, `VerifyFull`. |
+| `sslCertificatePath` / `sslKeyPath` / `sslRootCertificatePath` | `null` | Client certificate, its key, and the CA bundle for `VerifyCA` / `VerifyFull`. |
+| `defaultSchema` | `public` | The schema unqualified entities live in, and the connection's `search_path`. A `[Table]` without a `Schema` is created in — and every statement for it qualified with — this schema; `[Table(Schema = "…")]` still wins. The schema is created (`CREATE SCHEMA IF NOT EXISTS`) on first sync if missing. **Changing it moves where your tables are read and written** — see the migration note in the changelog. |
+| `applicationName` | `null` | Reported to the server; visible in `pg_stat_activity`. |
+| `minPoolSize` / `maxPoolSize` | `1` / `100` | Connection-pool bounds. |
+| `connectionLifetime` | `300` | Seconds a pooled connection may sit idle before being closed. |
+| `connectionTimeout` / `commandTimeout` | `30` / `30` | Seconds to wait opening a connection / running a command. |
+| `syncMode` | `production` | See [Schema & Migrations](schema-migrations.md). |
+| `queryTimeoutMs` | `30000` | Command timeout applied to every command the library creates, rounded up to whole seconds. `0` = no timeout. Matches Npgsql's own 30-second default. |
+| `maxBatchInsertSize` | `500` | Rows per batched insert / upsert, capped further by PostgreSQL's 65535-parameter limit. |
+| `maxInClauseValues` | `1000` | Warn (at most once per query build, naming the entity and the count) when a generated `IN` list is wider than this. The list is still emitted whole — nothing is chunked and nothing throws. |
+| `slowQueryThresholdMs` | `1000` | Queries at or above this duration raise a `SlowQueryEvent`. |
+| `captureExplainOnSlowQuery` | `false` | Run `EXPLAIN (FORMAT JSON)` for a slow query and attach the plan to `SlowQueryEvent.ExplainJson`. Best-effort: fetched off the query path, never inside the caller's transaction, and a failure leaves the payload null. |
+| `n1DetectorThreshold` | `0` | Publish `N1QueryDetectedEvent` when one normalized query template runs this many times on the connection inside a one-second window. `0` disables the detector. |
+| `transientRetryCount` / `transientRetryBaseDelayMs` | `3` / `50` | Retry policy for SQLSTATE `40001`, `40P01` and `55P03`. |
+| `defaultStringSize` | `255` | `varchar` length used for a string column with no explicit `[Column(Size = …)]`. |
+| `cacheEnabledOverride` | `null` | Per-database override of `postgresql.cache.enabled`. `null` inherits the global switch. |
+| `backupDirectory` | `null` | Where schema backups for this connection are written. `null` keeps `DataDirectory/backups`. |
+| `preparedStatementCacheSize` | `256` | **Obsolete** — statement caching is Npgsql's, configured on the connection string (`Max Auto Prepare`, `Auto Prepare Min Usages`). Not read. |
 
-## Health check
+### TLS
 
-```csharp
-HealthStatus status = await pg.HealthCheckAsync();
-// status.Status : Healthy | Degraded | Unhealthy
+`Prefer`, the default, encrypts when the server offers it but **does not verify the
+certificate**, so it does not protect against an active attacker. Production deployments
+should use `VerifyFull`, which checks both the chain and the hostname:
+
+```json
+{ "sslMode": "VerifyFull", "sslRootCertificatePath": "/etc/ssl/certs/rds-ca.pem" }
 ```
 
-`HealthCheckAsync` tests every configured connection and aggregates the result; when no databases are enabled it reports *disabled* rather than failing.
+## Dialect notes
 
-## Events
+Points where PostgreSQL behaves differently from the MySQL and SQL Server libraries:
 
-All events implement `IEvent` (namespace `CL.PostgreSQL.Events`) and publish to the CodeLogic event bus.
+- **Upserts need a conflict target.** `ON CONFLICT` arbitrates on one named unique key, not
+  "whichever unique key collides". `UpsertAsync` infers it when the entity has exactly one
+  candidate key and throws — naming the candidates — when it has several. Pass
+  `conflictTarget` to choose:
 
-| Event | Published when |
-|-------|----------------|
-| `DatabaseConnectedEvent` | A database connection is established. |
-| `DatabaseDisconnectedEvent` | A connection is closed or lost. |
-| `TableSyncedEvent` | A table is reconciled by schema sync. |
-| `SlowQueryEvent` | A query exceeds `SlowQueryThresholdMs`. |
-| `HealthChangedEvent` | The health status transitions. |
+  ```csharp
+  await repo.UpsertAsync(user, conflictTarget: [nameof(User.Email)]);
+  ```
 
-## See also
+- **Identifiers are case-sensitive.** Everything is emitted double-quoted, so
+  `[Column(Name = "userId")]` is a different column from `userid`. Prefer `snake_case`.
+- **Schemas are namespaces inside a database.** The connection picks the database and, via
+  `defaultSchema`, the schema for entities that do not name one; `[Table(Schema = "…")]`
+  overrides it per entity. Every generated statement is schema-qualified, and resolution is
+  per connection — two named connections may map the same entity types into different
+  schemas.
+- **`DateTime` maps to `timestamptz`.** Values with `DateTimeKind.Unspecified` are treated
+  as UTC on the way in, since that is what the rest of the stack produces.
+- **`OnUpdateCurrentTimestamp` becomes a trigger.** PostgreSQL has no such column clause,
+  so schema sync creates a `BEFORE UPDATE` row trigger named `trg_{table}_{column}_touch`.
+- **Retention batches by `ctid`.** `DELETE … LIMIT` is not valid PostgreSQL, so the worker
+  selects a batch by row pointer with `FOR UPDATE SKIP LOCKED`.
 
-- [Getting Started](../../getting-started.md) — load, configure, and use any `CL.*` library.
-- [API Reference](../../api/index.md) — generated type/member documentation.
-- [Package on NuGet](https://www.nuget.org/packages/CodeLogic.PostgreSQL)
+## Health & events
+
+```csharp
+var health = await pg.HealthCheckAsync();
+```
+
+Returns `Healthy` when every configured connection responds, `Degraded` when some do, and
+`Unhealthy` when none do; the payload carries connection counts.
+
+Events published on the framework bus (`CL.PostgreSQL.Events`):
+
+| Event | Raised when |
+|---|---|
+| `DatabaseConnectedEvent` / `DatabaseDisconnectedEvent` | A connection opens or closes. |
+| `TableSyncedEvent` | A table is created or altered; carries the schema, table and statements. |
+| `QueryExecutedEvent` | After every query — SQL, elapsed ms, row count, cache-hit flag. |
+| `SlowQueryEvent` | A query crosses `slowQueryThresholdMs`. `ExplainJson` carries the plan when `captureExplainOnSlowQuery` is on and the capture succeeded, else null. |
+| `CacheHitEvent` / `CacheMissEvent` | A cached read is served or falls through. |
+| `N1QueryDetectedEvent` | One query template repeats `n1DetectorThreshold` times on a connection within a second. Fires once per window per template; never when the threshold is `0` (the default). |
+| `HealthChangedEvent` | Health state transitions. |

@@ -49,6 +49,7 @@ internal sealed class SchemaAnalyzer
                 IsAutoIncrement    = colAttr.IsAutoIncrement,
                 IsNotNull          = colAttr.IsNotNull || colAttr.IsPrimaryKey,
                 IsUnique           = colAttr.IsUnique,
+                Size               = colAttr.Size,
                 DefaultValue       = colAttr.DefaultValue,
                 ForeignKey         = fkAttr,
                 PropertyType       = prop.PropertyType
@@ -60,6 +61,12 @@ internal sealed class SchemaAnalyzer
     /// <summary>
     /// Generates a <c>CREATE TABLE IF NOT EXISTS</c> statement for the given table name and column definitions.
     /// </summary>
+    /// <remarks>
+    /// A single primary key column is declared inline (and keeps <c>PRIMARY KEY AUTOINCREMENT</c>,
+    /// which SQLite only accepts inline on an INTEGER key). Two or more key columns are declared
+    /// as one table-level <c>PRIMARY KEY (k1, k2)</c> constraint, because SQLite rejects a table
+    /// carrying more than one inline primary key.
+    /// </remarks>
     /// <param name="tableName">The target table name.</param>
     /// <param name="columns">The column definitions to include in the table.</param>
     /// <returns>A complete SQL CREATE TABLE statement string.</returns>
@@ -69,21 +76,26 @@ internal sealed class SchemaAnalyzer
         sb.AppendLine($"CREATE TABLE IF NOT EXISTS \"{tableName}\" (");
 
         var defs = new List<string>();
+        var keyColumns = columns.Where(c => c.IsPrimaryKey).ToList();
+        var compositeKey = keyColumns.Count > 1;
 
         foreach (var col in columns)
         {
-            var typeName = MapDataType(col.DataType);
+            var typeName = DeclaredType(col);
             var sb2 = new StringBuilder($"  \"{col.ColumnName}\" {typeName}");
 
-            if (col.IsPrimaryKey && col.IsAutoIncrement)
+            // Only a single-column key can be declared inline.
+            var inlineKey = col.IsPrimaryKey && !compositeKey;
+
+            if (inlineKey && col.IsAutoIncrement)
                 sb2.Append(" PRIMARY KEY AUTOINCREMENT");
-            else if (col.IsPrimaryKey)
+            else if (inlineKey)
                 sb2.Append(" PRIMARY KEY");
 
-            if (col.IsNotNull && !col.IsPrimaryKey)
+            if (col.IsNotNull && !inlineKey)
                 sb2.Append(" NOT NULL");
 
-            if (col.IsUnique && !col.IsPrimaryKey)
+            if (col.IsUnique && !inlineKey)
                 sb2.Append(" UNIQUE");
 
             if (col.DefaultValue is not null)
@@ -91,6 +103,10 @@ internal sealed class SchemaAnalyzer
 
             defs.Add(sb2.ToString());
         }
+
+        // Composite primary key as a single table-level constraint.
+        if (compositeKey)
+            defs.Add($"  PRIMARY KEY ({string.Join(", ", keyColumns.Select(c => $"\"{c.ColumnName}\""))})");
 
         // Foreign key constraints
         foreach (var col in columns.Where(c => c.ForeignKey is not null))
@@ -162,6 +178,21 @@ internal sealed class SchemaAnalyzer
     };
 
     /// <summary>
+    /// Returns the declared type for a column: the storage class from <see cref="MapDataType"/>,
+    /// with the <see cref="SQLiteColumnAttribute.Size"/> appended as a length modifier
+    /// (<c>TEXT(64)</c>) when one was given. SQLite records the declared type but does not
+    /// enforce the length — only the type affinity derived from it, which the modifier
+    /// does not change.
+    /// </summary>
+    /// <param name="col">The column definition to render a declared type for.</param>
+    /// <returns>The declared type string to emit in DDL.</returns>
+    public string DeclaredType(ModelColumnDefinition col)
+    {
+        var typeName = MapDataType(col.DataType);
+        return col.Size > 0 ? $"{typeName}({col.Size})" : typeName;
+    }
+
+    /// <summary>
     /// Returns the SQLite table name for the given entity type, using <see cref="SQLiteTableAttribute"/> when present,
     /// or the type's simple name as a fallback.
     /// </summary>
@@ -211,6 +242,12 @@ internal sealed class SchemaAnalyzer
 
         /// <summary>Gets or sets a value indicating whether the column has a UNIQUE constraint.</summary>
         public bool IsUnique { get; set; }
+
+        /// <summary>
+        /// Gets or sets the declared length emitted after the type name (<c>TEXT(64)</c>),
+        /// or <c>0</c> for none. Recorded by SQLite, never enforced by it.
+        /// </summary>
+        public int Size { get; set; }
 
         /// <summary>Gets or sets the SQL literal used as the column's DEFAULT value, or <c>null</c> for no default.</summary>
         public string? DefaultValue { get; set; }

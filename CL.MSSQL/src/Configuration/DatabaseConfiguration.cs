@@ -69,17 +69,118 @@ public sealed class SqlServerDatabaseConfig
         SyncMode.Developer or SyncMode.Migration => SchemaSyncLevel.Full,
         _ => AllowDestructiveSync ? SchemaSyncLevel.Full : SchemaSyncLevel
     };
+    /// <summary>
+    /// Directory schema backups are written to. <c>null</c> keeps the default
+    /// <c>&lt;DataDirectory&gt;/backups</c>. A relative path is resolved against the data
+    /// directory; an absolute path is used as given.
+    /// </summary>
+    [ConfigField(Label = "Backup Directory",
+        Description = "Where schema backups are written. Empty uses <DataDirectory>/backups.",
+        Group = "Schema")]
     public string? BackupDirectory { get; set; }
+
+    /// <summary>Elapsed milliseconds at or above which a query raises <c>SlowQueryEvent</c>.</summary>
+    [ConfigField(Label = "Slow Query Threshold (ms)", Min = 0,
+        Description = "Queries at or above this elapsed time raise SlowQueryEvent.",
+        Group = "Observability")]
     public int SlowQueryThresholdMs { get; set; } = 1000;
+
+    /// <summary>
+    /// Per-database override of the global <c>mssql.cache.Enabled</c> switch. <c>null</c>
+    /// means "no override" and the global switch decides; <c>true</c>/<c>false</c> wins over it
+    /// for queries running on this connection id.
+    /// </summary>
+    [ConfigField(Label = "Cache Enabled Override",
+        Description = "Overrides the global cache switch for this database. Empty = no override.",
+        Group = "Cache")]
     public bool? CacheEnabledOverride { get; set; }
+
+    /// <summary>
+    /// Command timeout applied to the query commands this library issues on this connection
+    /// (repositories, the query builder, projections, joins and grouped queries), in
+    /// milliseconds. It overrides the connection string's <c>Command Timeout</c> for those
+    /// commands; the default of 30 s matches the provider default. 0 disables the override.
+    /// </summary>
+    [ConfigField(Label = "Query Timeout (ms)", Min = 0,
+        Description = "Command timeout for library-issued query commands. 0 leaves the connection-string value in place.",
+        Group = "Performance")]
     public int QueryTimeoutMs { get; set; } = 30_000;
+
+    /// <summary>
+    /// Largest number of rows the repository sends per multi-row INSERT/UPSERT statement.
+    /// Also capped dynamically so a batch stays under SQL Server's 2,100-parameter limit.
+    /// </summary>
+    [ConfigField(Label = "Max Batch Insert Size", Min = 1,
+        Description = "Rows per multi-row INSERT/UPSERT. Capped further by the 2,100-parameter limit.",
+        Group = "Performance")]
     public int MaxBatchInsertSize { get; set; } = 500;
+
+    /// <summary>
+    /// Advisory ceiling on the length of a generated <c>IN (...)</c> list. Exceeding it does
+    /// not fail or chunk the query — it logs one warning per query build naming the entity and
+    /// the value count, so an unbounded <c>Contains</c> shows up before the server rejects it.
+    /// </summary>
+    [ConfigField(Label = "Max IN Clause Values", Min = 1,
+        Description = "Advisory cap for generated IN (...) lists. Exceeding it logs one warning per query build; nothing is chunked or rejected.",
+        Group = "Performance")]
     public int MaxInClauseValues { get; set; } = 1_000;
+
+    /// <summary>
+    /// Not used by this library. Statement caching is the provider's concern: set
+    /// <c>Max Pool Size</c> / <c>Enlist</c> and related options on the connection string, and
+    /// note that <c>Microsoft.Data.SqlClient</c> has no client-side prepared-statement cache
+    /// to size — server-side plan caching is automatic.
+    /// </summary>
+    [Obsolete("Not applied. Statement caching is handled by SQL Server's plan cache and by " +
+              "Microsoft.Data.SqlClient itself; there is no client-side statement cache to size. " +
+              "Configure pooling on the connection string instead.")]
+    [ConfigField(Label = "Prepared Statement Cache Size", Min = 0,
+        Description = "Obsolete. Not applied — Microsoft.Data.SqlClient has no client-side statement cache to size.",
+        Group = "Performance", Collapsed = true)]
     public int PreparedStatementCacheSize { get; set; } = 256;
+
+    /// <summary>Deadlock / lock-timeout / Azure transient retries. 0 disables retrying.</summary>
+    [ConfigField(Label = "Transient Retry Count", Min = 0, Max = 255,
+        Description = "Retries for deadlock, lock timeout and Azure transient errors. 0 disables.",
+        Group = "Resilience")]
     public int TransientRetryCount { get; set; } = 3;
+
+    /// <summary>Base backoff for a transient retry; grows exponentially with jitter.</summary>
+    [ConfigField(Label = "Transient Retry Base Delay (ms)", Min = 0,
+        Description = "Base backoff between transient retries; exponential with jitter.",
+        Group = "Resilience")]
     public int TransientRetryBaseDelayMs { get; set; } = 50;
+
+    /// <summary>
+    /// Executions of one normalized statement, on this connection, within a one-second window
+    /// that raise <c>N1QueryDetectedEvent</c>. 0 (the default) disables the detector entirely —
+    /// nothing is counted and nothing is allocated on the query path.
+    /// </summary>
+    [ConfigField(Label = "N+1 Detector Threshold", Min = 0,
+        Description = "Repeats of one statement within a second that raise N1QueryDetectedEvent. 0 disables the detector.",
+        Group = "Observability")]
     public int N1DetectorThreshold { get; set; }
+
+    /// <summary>
+    /// When a query crosses <see cref="SlowQueryThresholdMs"/>, attach the estimated ShowPlan
+    /// XML from SQL Server's plan cache to <c>SlowQueryEvent.ExplainJson</c>. Strictly
+    /// best-effort and run on its own connection, never inside the caller's transaction: if the
+    /// plan is not in cache, or the lookup fails, the event still publishes with a null payload.
+    /// </summary>
+    [ConfigField(Label = "Capture Explain On Slow Query",
+        Description = "Attach best-effort estimated ShowPlan XML to SlowQueryEvent. Never fails the query.",
+        Group = "Observability")]
     public bool CaptureExplainOnSlowQuery { get; set; } = true;
+
+    /// <summary>
+    /// Size used for a string column that has no explicit <c>[Column(Size = ...)]</c> when
+    /// schema sync infers its type — an unsized <c>string</c> becomes <c>nvarchar(n)</c>.
+    /// Changing it alters the generated DDL and therefore the schema CRC, so existing tables
+    /// are reconciled on the next sync.
+    /// </summary>
+    [ConfigField(Label = "Default String Size", Min = 1, Max = 4000,
+        Description = "nvarchar length inferred for a string column with no explicit Size.",
+        Group = "Schema")]
     public int DefaultStringSize { get; set; } = 255;
 
     public string BuildConnectionString()
@@ -127,6 +228,10 @@ public sealed class SqlServerDatabaseConfig
         if (TransientRetryCount is < 0 or > 255) errors.Add("TransientRetryCount must be between 0 and 255");
         if (TransientRetryBaseDelayMs < 0) errors.Add("TransientRetryBaseDelayMs cannot be negative");
         if (MaxBatchInsertSize < 1) errors.Add("MaxBatchInsertSize must be positive");
+        if (MaxInClauseValues < 1) errors.Add("MaxInClauseValues must be positive");
+        if (QueryTimeoutMs < 0) errors.Add("QueryTimeoutMs cannot be negative");
+        if (N1DetectorThreshold < 0) errors.Add("N1DetectorThreshold cannot be negative");
+        if (DefaultStringSize is < 1 or > 4000) errors.Add("DefaultStringSize must be between 1 and 4000");
         if (string.IsNullOrWhiteSpace(DefaultSchema)) errors.Add("DefaultSchema is required");
         return errors.Count == 0 ? ConfigValidationResult.Valid() : ConfigValidationResult.Invalid(errors);
     }
