@@ -97,6 +97,11 @@ unchanged model matches its stored CRC and the whole diff is skipped — no cata
 DDL. The hash is computed over normalised, sorted DDL lines, so reflection ordering cannot
 change it.
 
+The trade-off is that the gate keys on the **model**, not the database: while the CRC still
+matches, schema drift introduced outside the library (someone dropping a column by hand) is
+not noticed. Change the model, or delete the table's row from `__schema_state`, to force a
+full diff.
+
 ### Concurrency
 
 The pass runs under a `pg_advisory_lock` keyed by a stable hash of the lock name. Several

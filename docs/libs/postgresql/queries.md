@@ -121,10 +121,14 @@ var perDay = await pg.Query<Order>()
 
 Scalar terminals: `CountAsync`, `SumAsync`, `MinAsync`, `MaxAsync`, `AverageAsync`, `AnyAsync`.
 
-`SqlFn` exposes server-side functions usable inside a key or projection. They translate to
-PostgreSQL, not MySQL: `Year`/`Month`/`Day`/`Hour`/`Minute`/`DayOfWeek` become
-`EXTRACT(… FROM x)::int`, `Date(x)` becomes `x::date`, `IfNull(a, b)` becomes `COALESCE(a, b)`,
-and `BucketUtc(x, n)` becomes `to_timestamp(floor(extract(epoch from x) / n) * n)`.
+`SqlFn` exposes server-side functions for use inside a **grouped** query's key or projection.
+They are not translated in an ungrouped `Select`, which supports plain column access only —
+that throws `NotSupportedException` when the query is built.
+
+The translations target PostgreSQL, not MySQL: `Year`/`Month`/`Day`/`Hour`/`Minute`/`DayOfWeek`
+become `EXTRACT(… FROM x)::int`, `Date(x)` becomes `x::date`, `IfNull(a, b)` becomes
+`COALESCE(a, b)`, and `BucketUtc(x, n)` becomes
+`to_timestamp(floor(extract(epoch from x) / n) * n)`.
 
 `DayOfWeek` needs no adjustment here: PostgreSQL's `DOW` is already 0–6 from Sunday, matching
 .NET's `DayOfWeek`, where MySQL's `DAYOFWEEK` is 1–7 and the MySQL library subtracts one.

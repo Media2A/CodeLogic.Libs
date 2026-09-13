@@ -6,6 +6,12 @@ NuGet package version of `CodeLogic.MySQL2`.
 
 ## 2026-09-13
 
+### Added
+
+- `GetRepository<T>(TransactionScope)` and `Query<T>(TransactionScope)`.
+  `BeginTransactionAsync` returned a scope that neither accessor took, so callers had to
+  construct `Repository<T>` by hand to do any work inside a transaction.
+
 ### Security
 
 - Added `MySqlDialect` with `Quote`, `QuoteMultipart` and `EscapeLike`, and routed all 113

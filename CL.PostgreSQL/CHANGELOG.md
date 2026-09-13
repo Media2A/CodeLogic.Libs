@@ -80,6 +80,25 @@ All notable changes to **CodeLogic.PostgreSQL** are documented here. Versions fo
   be written by `RegisterConfiguration` while another thread read it.
 - `ExecuteWithConnectionAsync` disposed the connection twice.
 
+### Verified against a live server
+
+Every integration test now runs against PostgreSQL 18.4 (115 tests, none skipped). Two
+defects that only execution could surface were fixed in the process:
+
+- `SchemaSyncLock` issued `SET lock_timeout = @ms`. `SET` is parsed before parameters are
+  bound, so the server saw `SET lock_timeout = $1` and raised `42601`. The advisory lock is
+  taken at the start of every sync, so this broke schema synchronisation outright. Now uses
+  `set_config()`, which takes the value as a bound argument.
+- The catalog readers in `SchemaAnalyzer` and `BackupManager` read `a.attidentity` as a
+  string. It is the internal `"char"` type, which Npgsql will not return as one, and this
+  broke every `ALTER` path. Both now cast to `text` in SQL.
+
+### Added (API)
+
+- `GetRepository<T>(TransactionScope)` and `Query<T>(TransactionScope)`.
+  `BeginTransactionAsync` returned a scope that neither accessor took, so callers had to
+  construct `Repository<T>` by hand to do any work inside a transaction.
+
 ### Migration notes
 
 This release is **not source-compatible**. Renames and behaviour changes:
