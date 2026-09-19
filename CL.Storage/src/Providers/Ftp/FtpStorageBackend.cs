@@ -22,7 +22,7 @@ public sealed class FtpStorageBackend : IStorageBackend
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads);
 
-    private readonly Func<AsyncFtpClient> _clientFactory;
+    private readonly ProviderClientPool<AsyncFtpClient> _clients;
     private readonly RemotePathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
 
@@ -41,7 +41,11 @@ public sealed class FtpStorageBackend : IStorageBackend
         ArgumentNullException.ThrowIfNull(clientFactory);
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
-        _clientFactory = clientFactory;
+        _clients = new ProviderClientPool<AsyncFtpClient>(
+            clientFactory,
+            static (client, token) => client.Connect(token),
+            static client => client.IsConnected,
+            DestroyClientAsync);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
@@ -104,27 +108,42 @@ public sealed class FtpStorageBackend : IStorageBackend
         if (validation.IsFailure) return Result<StoragePage>.Failure(validation.Error!);
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure) return Result<StoragePage>.Failure(resolved.Error!);
-        AsyncFtpClient? client = null;
+        var target = resolved.Value!;
         try
         {
-            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            if (!await client.DirectoryExists(resolved.Value!.RemotePath, cancellationToken).ConfigureAwait(false))
-                return Result<StoragePage>.Failure(StorageErrors.NotFound($"FTP directory '{resolved.Value.StoragePath}' was not found."));
-            var listing = options.Recursive
-                ? await client.GetListing(resolved.Value.RemotePath, FtpListOption.Auto | FtpListOption.Recursive, cancellationToken).ConfigureAwait(false)
-                : await client.GetListing(resolved.Value.RemotePath, FtpListOption.Auto, cancellationToken).ConfigureAwait(false);
-            var items = listing.Select(item =>
+            // GetListing returns the whole listing in one call, so it runs once per pass and every
+            // later page is served from the cached snapshot instead of re-listing the directory.
+            return await ProviderPaging.CreateAsync(
+                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                options,
+                async token =>
                 {
-                    var relative = _paths.FromRemotePath(item.FullName);
-                    return relative is null || relative.Length == 0 ? null : ToItem(relative, item);
-                })
-                .Where(item => item is not null)
-                .Cast<StorageItem>();
-            return ProviderPaging.Create(items, options);
+                    AsyncFtpClient? listClient = null;
+                    try
+                    {
+                        listClient = await OpenClientAsync(token).ConfigureAwait(false);
+                        if (!await listClient.DirectoryExists(target.RemotePath, token).ConfigureAwait(false))
+                            return Result<IEnumerable<StorageItem>>.Failure(
+                                StorageErrors.NotFound($"FTP directory '{target.StoragePath}' was not found."));
+                        var listing = options.Recursive
+                            ? await listClient.GetListing(target.RemotePath, FtpListOption.Auto | FtpListOption.Recursive, token).ConfigureAwait(false)
+                            : await listClient.GetListing(target.RemotePath, FtpListOption.Auto, token).ConfigureAwait(false);
+                        var items = listing.Select(item =>
+                            {
+                                var relative = _paths.FromRemotePath(item.FullName);
+                                return relative is null || relative.Length == 0 ? null : ToItem(relative, item);
+                            })
+                            .Where(item => item is not null)
+                            .Cast<StorageItem>()
+                            .ToArray();
+                        return Result<IEnumerable<StorageItem>>.Success(items);
+                    }
+                    finally { if (listClient is not null) await ReleaseClientAsync(listClient).ConfigureAwait(false); }
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List FTP directory")); }
-        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -445,7 +464,7 @@ public sealed class FtpStorageBackend : IStorageBackend
             client = null;
             return Result<NativeConnectionLease<TClient>>.Success(new NativeConnectionLease<TClient>(
                 typed,
-                value => ReleaseClientAsync((AsyncFtpClient)(object)value)));
+                value => _clients.DiscardAsync((AsyncFtpClient)(object)value)));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<NativeConnectionLease<TClient>>.Failure(Map(error, "Open native FTP connection")); }
@@ -453,7 +472,7 @@ public sealed class FtpStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public ValueTask DisposeAsync() => _clients.DisposeAsync();
 
     private static async Task<Result> CommitPathAsync(
         AsyncFtpClient client,
@@ -651,22 +670,13 @@ public sealed class FtpStorageBackend : IStorageBackend
         }
     }
 
-    private async Task<AsyncFtpClient> OpenClientAsync(CancellationToken cancellationToken)
-    {
-        var client = _clientFactory() ?? throw new InvalidOperationException("The FTP client factory returned null.");
-        try
-        {
-            await client.Connect(cancellationToken).ConfigureAwait(false);
-            return client;
-        }
-        catch
-        {
-            client.Dispose();
-            throw;
-        }
-    }
+    private Task<AsyncFtpClient> OpenClientAsync(CancellationToken cancellationToken) =>
+        _clients.RentAsync(cancellationToken);
 
-    private static async ValueTask ReleaseClientAsync(AsyncFtpClient client)
+    /// <summary>Returns a client to the pool so the next operation reuses its control connection.</summary>
+    private ValueTask ReleaseClientAsync(AsyncFtpClient client) => _clients.ReturnAsync(client);
+
+    private static async ValueTask DestroyClientAsync(AsyncFtpClient client)
     {
         try
         {

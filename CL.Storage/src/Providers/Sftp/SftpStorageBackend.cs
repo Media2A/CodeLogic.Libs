@@ -22,7 +22,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads);
 
-    private readonly Func<SftpClient> _clientFactory;
+    private readonly ProviderClientPool<SftpClient> _clients;
     private readonly RemotePathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
 
@@ -41,7 +41,11 @@ public sealed class SftpStorageBackend : IStorageBackend
         ArgumentNullException.ThrowIfNull(clientFactory);
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
-        _clientFactory = clientFactory;
+        _clients = new ProviderClientPool<SftpClient>(
+            clientFactory,
+            static (client, token) => client.ConnectAsync(token),
+            static client => client.IsConnected,
+            DestroyClientAsync);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
@@ -74,7 +78,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get SFTP item info")); }
-        finally { client?.Dispose(); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -90,7 +94,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<bool>.Failure(Map(error, "Check SFTP item existence")); }
-        finally { client?.Dispose(); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -101,21 +105,36 @@ public sealed class SftpStorageBackend : IStorageBackend
         if (validation.IsFailure) return Result<StoragePage>.Failure(validation.Error!);
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure) return Result<StoragePage>.Failure(resolved.Error!);
-        SftpClient? client = null;
+        var target = resolved.Value!;
         try
         {
-            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            if (!await client.ExistsAsync(resolved.Value!.RemotePath, cancellationToken).ConfigureAwait(false))
-                return Result<StoragePage>.Failure(StorageErrors.NotFound($"SFTP directory '{resolved.Value.StoragePath}' was not found."));
-            var rootAttributes = await client.GetAttributesAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
-            if (!rootAttributes.IsDirectory)
-                return Result<StoragePage>.Failure(StorageErrors.Conflict("The SFTP listing path is not a directory."));
-            var items = await CollectListingAsync(client, resolved.Value.RemotePath, options.Recursive, cancellationToken).ConfigureAwait(false);
-            return ProviderPaging.Create(items, options);
+            // The walk runs only when no snapshot is cached for this listing pass, so pages after
+            // the first cost neither an SSH handshake nor a directory traversal.
+            return await ProviderPaging.CreateAsync(
+                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                options,
+                async token =>
+                {
+                    SftpClient? client = null;
+                    try
+                    {
+                        client = await OpenClientAsync(token).ConfigureAwait(false);
+                        if (!await client.ExistsAsync(target.RemotePath, token).ConfigureAwait(false))
+                            return Result<IEnumerable<StorageItem>>.Failure(
+                                StorageErrors.NotFound($"SFTP directory '{target.StoragePath}' was not found."));
+                        var rootAttributes = await client.GetAttributesAsync(target.RemotePath, token).ConfigureAwait(false);
+                        if (!rootAttributes.IsDirectory)
+                            return Result<IEnumerable<StorageItem>>.Failure(
+                                StorageErrors.Conflict("The SFTP listing path is not a directory."));
+                        var items = await CollectListingAsync(client, target.RemotePath, options.Recursive, token).ConfigureAwait(false);
+                        return Result<IEnumerable<StorageItem>>.Success(items);
+                    }
+                    finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List SFTP directory")); }
-        finally { client?.Dispose(); }
     }
 
     /// <inheritdoc />
@@ -133,7 +152,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Create SFTP directory")); }
-        finally { client?.Dispose(); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -192,7 +211,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         {
             if (client is not null && stagingPath is not null)
                 await TryDeletePathAsync(client, stagingPath).ConfigureAwait(false);
-            client?.Dispose();
+            if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false);
         }
     }
 
@@ -237,7 +256,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<Stream>.Failure(Map(error, "Download SFTP file")); }
-        finally { if (client is not null && !ownershipTransferred) client.Dispose(); }
+        finally { if (client is not null && !ownershipTransferred) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -288,7 +307,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Delete SFTP item")); }
-        finally { client?.Dispose(); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -368,7 +387,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Move SFTP item")); }
-        finally { client?.Dispose(); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -384,7 +403,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Check SFTP health")); }
-        finally { client?.Dispose(); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
@@ -407,32 +426,23 @@ public sealed class SftpStorageBackend : IStorageBackend
             client = null;
             return Result<NativeConnectionLease<TClient>>.Success(new NativeConnectionLease<TClient>(
                 typed,
-                value => ReleaseClientAsync((SftpClient)(object)value)));
+                value => _clients.DiscardAsync((SftpClient)(object)value)));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<NativeConnectionLease<TClient>>.Failure(Map(error, "Open native SFTP connection")); }
-        finally { client?.Dispose(); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public ValueTask DisposeAsync() => _clients.DisposeAsync();
 
-    private async Task<SftpClient> OpenClientAsync(CancellationToken cancellationToken)
-    {
-        var client = _clientFactory() ?? throw new InvalidOperationException("The SFTP client factory returned null.");
-        try
-        {
-            await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
-            return client;
-        }
-        catch
-        {
-            client.Dispose();
-            throw;
-        }
-    }
+    private Task<SftpClient> OpenClientAsync(CancellationToken cancellationToken) =>
+        _clients.RentAsync(cancellationToken);
 
-    private static ValueTask ReleaseClientAsync(SftpClient client)
+    /// <summary>Returns a client to the pool so the next operation reuses its SSH session.</summary>
+    private ValueTask ReleaseClientAsync(SftpClient client) => _clients.ReturnAsync(client);
+
+    private static ValueTask DestroyClientAsync(SftpClient client)
     {
         try { if (client.IsConnected) client.Disconnect(); }
         catch { }

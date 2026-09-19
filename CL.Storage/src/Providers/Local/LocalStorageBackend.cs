@@ -103,41 +103,35 @@ public sealed class LocalStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
-    public Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         options ??= new StorageListOptions();
         var validation = options.Validate();
         if (validation.IsFailure)
-            return Task.FromResult(Result<StoragePage>.Failure(validation.Error!));
+            return Result<StoragePage>.Failure(validation.Error!);
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure)
-            return Task.FromResult(Result<StoragePage>.Failure(resolved.Error!));
+            return Result<StoragePage>.Failure(resolved.Error!);
 
         try
         {
             if (!Directory.Exists(resolved.Value!.FullPath))
-                return Task.FromResult(Result<StoragePage>.Failure(StorageErrors.NotFound($"Directory '{resolved.Value.StoragePath}' was not found.")));
+                return Result<StoragePage>.Failure(StorageErrors.NotFound($"Directory '{resolved.Value.StoragePath}' was not found."));
 
-            var items = EnumerateItems(resolved.Value, options.Recursive, cancellationToken)
-                .OrderBy(item => item.Path, StringComparer.Ordinal)
-                .ToArray();
-            var offsetResult = DecodeContinuationToken(options.ContinuationToken);
-            if (offsetResult.IsFailure)
-                return Task.FromResult(Result<StoragePage>.Failure(offsetResult.Error!));
-            var offset = offsetResult.Value;
-            if (offset > items.Length)
-                return Task.FromResult(Result<StoragePage>.Failure(StorageErrors.InvalidPath("The continuation token is outside the listing.")));
-
-            var pageItems = items.Skip(offset).Take(options.PageSize).ToArray();
-            var nextOffset = offset + pageItems.Length;
-            var token = nextOffset < items.Length ? EncodeContinuationToken(nextOffset) : null;
-            return Task.FromResult(Result<StoragePage>.Success(new StoragePage(pageItems, token)));
+            // Directory enumeration runs once per listing pass instead of once per page.
+            var target = resolved.Value!;
+            return await ProviderPaging.CreateAsync(
+                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                options,
+                token => Task.FromResult(Result<IEnumerable<StorageItem>>.Success(
+                    EnumerateItems(target, options.Recursive, token).ToArray().AsEnumerable())),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception error)
         {
-            return Task.FromResult(Result<StoragePage>.Failure(StorageErrors.FromException(error, "List directory")));
+            return Result<StoragePage>.Failure(StorageErrors.FromException(error, "List directory"));
         }
     }
 
@@ -640,26 +634,6 @@ public sealed class LocalStorageBackend : IStorageBackend
             return;
         try { File.Delete(path); }
         catch { }
-    }
-
-    private static string EncodeContinuationToken(int offset) =>
-        Convert.ToBase64String(Encoding.UTF8.GetBytes(offset.ToString(CultureInfo.InvariantCulture)));
-
-    private static Result<int> DecodeContinuationToken(string? token)
-    {
-        if (token is null)
-            return Result<int>.Success(0);
-        try
-        {
-            var text = Encoding.UTF8.GetString(Convert.FromBase64String(token));
-            return int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var offset) && offset >= 0
-                ? Result<int>.Success(offset)
-                : Result<int>.Failure(StorageErrors.InvalidPath("The continuation token is invalid."));
-        }
-        catch (FormatException)
-        {
-            return Result<int>.Failure(StorageErrors.InvalidPath("The continuation token is invalid."));
-        }
     }
 
     private static string GetContentType(string extension) => extension.ToLowerInvariant() switch

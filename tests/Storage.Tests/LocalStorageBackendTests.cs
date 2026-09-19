@@ -297,6 +297,51 @@ public sealed class LocalStorageBackendTests : IDisposable
         try { Directory.Delete(_root, recursive: true); } catch { }
     }
 
+    [Fact]
+    public async Task Paging_a_large_recursive_listing_yields_each_entry_once_in_stable_order()
+    {
+        // End-to-end guard for the shared listing cursor: a small page size over a folder with many
+        // entries must not drop, duplicate, or reorder anything.
+        await using var backend = CreateBackend();
+        IStorageService storage = backend;
+        var expected = new List<string>();
+        for (var directory = 0; directory < 20; directory++)
+        {
+            var name = $"dir-{directory:D3}";
+            Directory.CreateDirectory(Path.Combine(_root, name));
+            expected.Add(name);
+            for (var file = 0; file < 25; file++)
+            {
+                var relative = $"{name}/file-{file:D3}.txt";
+                await File.WriteAllTextAsync(Path.Combine(_root, name, $"file-{file:D3}.txt"), "x");
+                expected.Add(relative);
+            }
+        }
+
+        var delivered = new List<string>();
+        var tokens = new List<string>();
+        string? token = null;
+        do
+        {
+            var page = await storage.ListAsync(string.Empty, new StorageListOptions
+            {
+                Recursive = true,
+                PageSize = 40,
+                ContinuationToken = token
+            });
+
+            Assert.True(page.IsSuccess, page.Error?.Message);
+            delivered.AddRange(page.Value!.Items.Select(item => item.Path));
+            token = page.Value.ContinuationToken;
+            if (token is not null) tokens.Add(token);
+        }
+        while (token is not null);
+
+        expected.Sort(StringComparer.Ordinal);
+        Assert.Equal(expected, delivered);
+        Assert.Equal(tokens.Count, tokens.Distinct(StringComparer.Ordinal).Count());
+    }
+
     private LocalStorageBackend CreateBackend(bool followLinks = false, long maxBufferedBytes = 67_108_864) =>
         new("LocalTest", new LocalConnectionConfig
         {
