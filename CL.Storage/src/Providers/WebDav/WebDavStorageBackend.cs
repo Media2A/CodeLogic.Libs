@@ -106,8 +106,15 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (resolved.IsFailure) return Result<StoragePage>.Failure(resolved.Error!);
         try
         {
-            var items = await CollectListingAsync(resolved.Value!, options.Recursive, cancellationToken).ConfigureAwait(false);
-            return ProviderPaging.Create(items, options);
+            // The subtree walk runs once per listing pass; later pages resume from the cached
+            // snapshot rather than re-issuing a PROPFIND per directory.
+            var target = resolved.Value!;
+            return await ProviderPaging.CreateAsync(
+                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                options,
+                async token => Result<IEnumerable<StorageItem>>.Success(
+                    await CollectListingAsync(target, options.Recursive, token).ConfigureAwait(false)),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (WebDAVException error) when (IsNotFound(error))

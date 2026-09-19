@@ -58,6 +58,19 @@
 
 ### Changed
 
+- FTP, SFTP, WebDAV, and local listings now page from a single cached, ordinally sorted snapshot per
+  listing pass instead of re-materialising and re-sorting the whole listing on every page. Paging a
+  recursive listing of N entries at page size P cost `ceil(N/P)` complete directory walks and is now
+  one walk; ordering and item content are unchanged. Continuation tokens remain opaque and are still
+  rejected when malformed, but their internal format changed, so a token minted by an earlier version
+  is not accepted by this one. A token is only meaningful within the listing that minted it;
+  presenting one to a different listing resumes that listing from the path the token carries rather
+  than failing, because an evicted snapshot cannot be told apart from a foreign one.
+- FTP and SFTP reuse pooled, already-authenticated sessions across operations rather than opening and
+  tearing down a connection per call. Idle sessions are health-checked before reuse, bounded in count
+  and idle lifetime, and closed when the backend is disposed. Sessions handed out through
+  `OpenNativeConnectionAsync` are retired rather than pooled, since caller code may leave them in an
+  unexpected state.
 - Recursive service copy/move now always uses the safe coordinator; same-provider file staging remains
   server-side when the backend advertises a safe native copy.
 - Object-provider listing distinguishes an exact file path from a virtual directory and treats root
