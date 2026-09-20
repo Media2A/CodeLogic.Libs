@@ -212,7 +212,7 @@ jobs:
 
       - name: Create GitHub release
         if: steps.changes.outputs.has_changes == 'True'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name == 'prerelease' && format('libs-preview-v{0}', github.run_number) || format('libs-v{0}', github.run_number) }}
           name: ${{ github.ref_name == 'prerelease' && format('CodeLogic.Libs preview {0}', github.run_number) || format('CodeLogic.Libs release {0}', github.run_number) }}
