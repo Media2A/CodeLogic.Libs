@@ -53,7 +53,8 @@ public sealed class FtpStorageBackend : IStorageBackend
         long maxBufferedDownloadBytes,
         StorageSessionConfig? session,
         StorageRetryConfig? retry,
-        IStorageConnectionObserver? observer)
+        IStorageConnectionObserver? observer,
+        Func<AsyncFtpClient, CancellationToken, Task>? afterConnect = null)
     {
         if (string.IsNullOrWhiteSpace(connectionId)) throw new ArgumentException("Connection ID is required.", nameof(connectionId));
         ArgumentNullException.ThrowIfNull(clientFactory);
@@ -62,7 +63,13 @@ public sealed class FtpStorageBackend : IStorageBackend
         _observer = observer;
         _clients = new ProviderClientPool<AsyncFtpClient>(
             clientFactory,
-            static (client, token) => client.Connect(token),
+            afterConnect is null
+                ? static (client, token) => client.Connect(token)
+                : async (client, token) =>
+                {
+                    await client.Connect(token).ConfigureAwait(false);
+                    await afterConnect(client, token).ConfigureAwait(false);
+                },
             static client => client.IsConnected,
             DestroyClientAsync,
             ProviderPoolOptions.From(session),
@@ -316,7 +323,7 @@ public sealed class FtpStorageBackend : IStorageBackend
                 return Result<Stream>.Failure(StorageErrors.InvalidPath("The range offset exceeds the FTP file length."));
             Stream stream = await client.OpenRead(
                 resolved.Value.RemotePath,
-                FtpDataType.Binary,
+                client.Config.DownloadDataType,
                 options.Offset,
                 checkIfFileExists: true,
                 cancellationToken).ConfigureAwait(false);

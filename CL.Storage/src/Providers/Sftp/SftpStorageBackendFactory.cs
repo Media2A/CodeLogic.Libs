@@ -46,7 +46,7 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
                 [.. AuthenticationMethods(value)])
             {
                 Timeout = timeout,
-                Encoding = Encoding.GetEncoding(value.Encoding)
+                Encoding = StorageEncodings.Get(value.Encoding)
             };
             ApplyAlgorithms(connection, value);
             var client = new SftpClient(connection) { OperationTimeout = timeout };

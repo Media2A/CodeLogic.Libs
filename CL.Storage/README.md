@@ -116,6 +116,39 @@ certificate pins; there is no accept-any switch.
 - `JumpHost` tunnels through an SSH bastion. The target's key is still verified against the target's
   settings, and a configured `Proxy` applies to the bastion connection.
 
+### FTP and FTPS options
+
+```json
+{
+  "Host": "ftp.partner.example",
+  "EncryptionMode": "Explicit",
+  "TrustedPublicKeySha256": ["SHA256:..."],
+  "TlsProtocols": ["Tls12", "Tls13"],
+  "EncryptDataChannel": true,
+  "DataConnectionMode": "AutoPassive",
+  "ActivePortMin": 50000,
+  "ActivePortMax": 50100,
+  "ActiveExternalIp": "203.0.113.7",
+  "Encoding": "windows-1252",
+  "TransferType": "Binary",
+  "ListingParser": "Auto",
+  "ServerTimeZone": "Europe/Copenhagen",
+  "ReadTimeoutSeconds": 60,
+  "SocketKeepAlive": true,
+  "LoginCommands": ["SITE UMASK 022"]
+}
+```
+
+- `TrustedCertificateSha256` pins the whole certificate; `TrustedPublicKeySha256` pins only its
+  public key, so it keeps working across renewals that keep the key. Pinned self-signed certificates
+  are accepted unless `RequireValidCertificateChain` is set. Without pins, normal validation applies.
+  TLS problems report `storage.tls_failure`.
+- Legacy encodings such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for
+  file names on older servers.
+- `ServerTimeZone` converts listing times from servers that report local time.
+- `LoginCommands` run after every login; a command the server rejects fails the connection so
+  misconfiguration surfaces immediately.
+
 ### Proxies
 
 Every remote provider can tunnel through an HTTP (`CONNECT`), SOCKS5, or SOCKS4 proxy:

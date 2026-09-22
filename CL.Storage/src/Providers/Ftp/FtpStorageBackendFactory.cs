@@ -1,6 +1,5 @@
 using System.Net;
-using System.Net.Security;
-using System.Security.Cryptography;
+using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
@@ -25,7 +24,8 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             maxBufferedDownloadBytes,
             value.Session,
             value.Retry,
-            observer);
+            observer,
+            AfterConnect(value));
     }
 
     private static AsyncFtpClient CreateClient(FtpConnectionConfig value)
@@ -47,11 +47,41 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
                 StorageFtpDataConnectionMode.Port => FtpDataConnectionType.PORT,
                 _ => FtpDataConnectionType.AutoPassive
             },
-            ConnectTimeout = checked(value.TimeoutSeconds * 1000),
-            ReadTimeout = checked(value.TimeoutSeconds * 1000),
-            DataConnectionConnectTimeout = checked(value.TimeoutSeconds * 1000),
-            DataConnectionReadTimeout = checked(value.TimeoutSeconds * 1000)
+            ConnectTimeout = Milliseconds(value.ConnectTimeoutSeconds ?? value.TimeoutSeconds),
+            ReadTimeout = Milliseconds(value.ReadTimeoutSeconds ?? value.TimeoutSeconds),
+            DataConnectionConnectTimeout = Milliseconds(value.DataConnectionTimeoutSeconds ?? value.TimeoutSeconds),
+            DataConnectionReadTimeout = Milliseconds(value.DataConnectionTimeoutSeconds ?? value.TimeoutSeconds),
+            DataConnectionEncryption = value.EncryptDataChannel,
+            ValidateCertificateRevocation = value.CheckCertificateRevocation,
+            SocketKeepAlive = value.SocketKeepAlive,
+            UploadDataType = DataType(value.TransferType),
+            DownloadDataType = DataType(value.TransferType),
+            ListingParser = value.ListingParser switch
+            {
+                StorageFtpListingParser.Machine => FtpParser.Machine,
+                StorageFtpListingParser.Unix => FtpParser.Unix,
+                StorageFtpListingParser.UnixAlternative => FtpParser.UnixAlt,
+                StorageFtpListingParser.Windows => FtpParser.Windows,
+                StorageFtpListingParser.Vms => FtpParser.VMS,
+                StorageFtpListingParser.IbmZos => FtpParser.IBMzOS,
+                StorageFtpListingParser.NonStop => FtpParser.NonStop,
+                _ => FtpParser.Auto
+            }
         };
+        if (value.TlsProtocols is { Count: > 0 } protocols)
+            config.SslProtocols = protocols.Aggregate(SslProtocols.None, (all, protocol) => all | protocol);
+        if (value.ActivePortMin is { } min && value.ActivePortMax is { } max)
+            config.ActivePorts = Enumerable.Range(min, max - min + 1);
+        if (!string.IsNullOrWhiteSpace(value.ActiveExternalIp))
+        {
+            var externalIp = value.ActiveExternalIp;
+            config.AddressResolver = () => externalIp;
+        }
+        if (!string.IsNullOrWhiteSpace(value.ServerTimeZone))
+        {
+            config.ServerTimeZone = TimeZoneInfo.FindSystemTimeZoneById(value.ServerTimeZone);
+            config.TimeConversion = FtpDate.ServerTime;
+        }
         if (value.Session is { KeepAliveSeconds: > 0 } session)
         {
             config.Noop = true;
@@ -66,20 +96,33 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
         }
 
         var client = CreateProxiedClient(value, config);
+        client.Encoding = StorageEncodings.Get(value.Encoding);
 
-        var pins = value.TrustedCertificateSha256
-            .Select(fingerprint => CertificateFingerprint.TryNormalizeSha256(fingerprint, out var normalized) ? normalized : null)
-            .Where(fingerprint => fingerprint is not null)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var pins = new TlsPins(value.TrustedCertificateSha256, value.TrustedPublicKeySha256);
         client.ValidateCertificate += (_, eventArgs) =>
-        {
-            var hash = eventArgs.Certificate is null
-                ? null
-                : Convert.ToHexString(SHA256.HashData(eventArgs.Certificate.GetRawCertData()));
-            eventArgs.Accept = (hash is not null && pins.Contains(hash)) ||
-                (pins.Count == 0 && eventArgs.PolicyErrors == SslPolicyErrors.None);
-        };
+            eventArgs.Accept = pins.Accepts(eventArgs.Certificate, eventArgs.PolicyErrors, value.RequireValidCertificateChain);
         return client;
+    }
+
+    private static int Milliseconds(int seconds) => checked(seconds * 1000);
+
+    private static FtpDataType DataType(StorageFtpTransferType type) =>
+        type == StorageFtpTransferType.Ascii ? FtpDataType.ASCII : FtpDataType.Binary;
+
+    /// <summary>Sends the configured post-login commands; a rejected command fails the connection.</summary>
+    internal static Func<AsyncFtpClient, CancellationToken, Task>? AfterConnect(FtpConnectionConfig value)
+    {
+        if (value.LoginCommands is not { Count: > 0 } commands)
+            return null;
+        return async (client, token) =>
+        {
+            foreach (var command in commands)
+            {
+                var reply = await client.Execute(command, token).ConfigureAwait(false);
+                if (!reply.Success)
+                    throw new FluentFTP.Exceptions.FtpCommandException(reply);
+            }
+        };
     }
 
     private static AsyncFtpClient CreateProxiedClient(FtpConnectionConfig value, FtpConfig config)

@@ -157,7 +157,7 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
             yield return error;
         foreach (var error in SshAlgorithmNames.GetValidationErrors(KeyExchangeAlgorithms, Ciphers, MacAlgorithms, HostKeyAlgorithms))
             yield return error;
-        if (!IsKnownEncoding(Encoding))
+        if (!Providers.StorageEncodings.IsKnown(Encoding))
             yield return $"Encoding '{Encoding}' is not a supported character encoding";
         if (BufferSize is < 1024 or > 4 * 1024 * 1024)
             yield return "BufferSize must be between 1024 and 4194304 bytes";
@@ -168,12 +168,6 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
         }
     }
 
-    private static bool IsKnownEncoding(string? name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return false;
-        try { _ = System.Text.Encoding.GetEncoding(name); return true; }
-        catch (ArgumentException) { return false; }
-    }
 }
 
 /// <summary>Defines an SSH bastion ("jump host") an SFTP connection is tunnelled through.</summary>

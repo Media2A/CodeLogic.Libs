@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Legacy code-page encodings (windows-1252, iso-8859-x, ibm437, shift_jis) were unavailable because
+  .NET does not register them by default.
 - A Google Cloud object whose timestamp had fewer than three fractional digits failed the whole
   operation with `storage.provider_error`; timestamps are now parsed leniently.
 - Unclassified provider failures now carry the exception type (never its message) in `Details`.
@@ -53,6 +55,10 @@
 
 ### Added
 
+- FTP/FTPS: public-key (SPKI) pins, `RequireValidCertificateChain`, revocation checks, TLS version
+  selection, `EncryptDataChannel`, active-mode port range and external IP, file-name `Encoding`
+  (including legacy code pages), ASCII `TransferType`, `ListingParser`, `ServerTimeZone`, separate
+  connect/read/data timeouts, `SocketKeepAlive`, and `LoginCommands` run after each login.
 - SFTP: `KeyboardInteractive` and `Auto` authentication (keys, password, keyboard-interactive, and
   multi-method servers), inline private keys (`PrivateKeyContent`), several keys, OpenSSH
   `known_hosts` verification (hashed, wildcard, `[host]:port`, and `@revoked` entries), algorithm

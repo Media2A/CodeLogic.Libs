@@ -172,6 +172,10 @@ jobs:
       CL_STORAGE_TEST_SWIFT_USER: test:tester
       CL_STORAGE_TEST_SWIFT_KEY: testing
       CL_STORAGE_TEST_PROXY_HOST: 127.0.0.1
+      CL_STORAGE_TEST_FTPS_HOST: 127.0.0.1
+      CL_STORAGE_TEST_FTPS_PORT: '2024'
+      CL_STORAGE_TEST_FTPS_USER: cltest
+      CL_STORAGE_TEST_FTPS_PASS: cltest-pw
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -185,8 +189,8 @@ jobs:
         shell: bash
         run: |
           docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d --build
-          for port in 2021 2022 2023 8080 9010 10000 4443 8082 3128 1080; do
-            for i in {1..60}; do
+          for port in 2021 2022 2023 2024 8080 9010 10000 4443 8082 3128 1080; do
+            for i in {1..120}; do
               if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi
               sleep 1
             done
