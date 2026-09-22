@@ -163,7 +163,7 @@ public sealed class AzureBlobStorageBackend :
                     cancellationToken).AsPages(options.ContinuationToken, options.PageSize).ConfigureAwait(false))
                 {
                     var items = page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>().ToArray();
-                    return Result<StoragePage>.Success(new StoragePage(items, page.ContinuationToken));
+                    return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.ContinuationToken));
                 }
             }
             else
@@ -176,7 +176,7 @@ public sealed class AzureBlobStorageBackend :
                     cancellationToken).AsPages(options.ContinuationToken, options.PageSize).ConfigureAwait(false))
                 {
                     var items = page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>().ToArray();
-                    return Result<StoragePage>.Success(new StoragePage(items, page.ContinuationToken));
+                    return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.ContinuationToken));
                 }
             }
             return Result<StoragePage>.Success(new StoragePage([], null));

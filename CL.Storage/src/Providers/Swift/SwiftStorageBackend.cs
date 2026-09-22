@@ -187,7 +187,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                             ETag = item.Hash
                         };
             }).Where(item => item is not null).Cast<StorageItem>().ToArray();
-            return Result<StoragePage>.Success(new StoragePage(items, page.Value.NextMarker));
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.Value.NextMarker));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Swift objects")); }

@@ -14,6 +14,19 @@ public sealed record StorageListOptions
     public int PageSize { get; init; } = 1000;
     /// <summary>Gets the opaque continuation token returned by a previous page.</summary>
     public string? ContinuationToken { get; init; }
+    /// <summary>
+    /// Gets whether the library's own staging and backup items (<c>.cl-storage-*</c>, <c>.clstorage-*</c>)
+    /// are listed. They exist only while a transfer runs, or after one was interrupted.
+    /// </summary>
+    public bool IncludeInternal { get; init; }
+    /// <summary>Gets whether hidden items (dot-files, or items marked hidden) are listed.</summary>
+    public bool IncludeHidden { get; init; } = true;
+    /// <summary>
+    /// Gets an optional case-insensitive name filter with <c>*</c> and <c>?</c> wildcards, such as <c>*.csv</c>.
+    /// It applies to item names, so in a recursive listing directories that do not match are omitted but
+    /// matching files inside them are still returned.
+    /// </summary>
+    public string? NamePattern { get; init; }
 
     /// <summary>Validates the requested page size.</summary>
     /// <returns>A provider-neutral validation result.</returns>

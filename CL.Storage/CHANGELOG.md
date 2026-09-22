@@ -38,6 +38,9 @@
 
 ### Changed (breaking)
 
+- Listings no longer show the library's own staging and backup items (`.cl-storage-*`,
+  `.clstorage-*`); set `IncludeInternal` to see them, for example to clean up after a crash.
+
 - `ComputeChecksumAsync` and `VerifyChecksumAsync` gained a `mode` parameter before
   `cancellationToken`; positional callers passing a token must name it.
 
@@ -69,6 +72,7 @@
 
 ### Added
 
+- `StorageListOptions.IncludeInternal`, `IncludeHidden`, and `NamePattern` (`*`/`?` wildcards).
 - `StorageTransferOptions.LinkHandling` (`Reject`, `Skip`, `Follow`, `Recreate`) for relayed
   transfers that meet symbolic links.
 - Deleting a local link removes the link itself, even when `FollowLinks` is off, and never its target.

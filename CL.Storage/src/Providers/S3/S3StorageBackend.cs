@@ -203,7 +203,7 @@ public sealed class S3StorageBackend :
             }
             var unique = items.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
                 .OrderBy(item => item.Path, StringComparer.Ordinal).ToArray();
-            return Result<StoragePage>.Success(new StoragePage(unique, response.NextContinuationToken));
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(unique, options), response.NextContinuationToken));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List S3 objects")); }
