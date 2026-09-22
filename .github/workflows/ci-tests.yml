@@ -197,6 +197,14 @@ jobs:
               sleep 1
             done
           done
+          # A published port accepts connections even when the server behind it has died, so wait
+          # for the FTP greeting too (the FTP containers restart themselves if vsftpd dies at startup).
+          for port in 2021 2024; do
+            for i in {1..60}; do
+              if timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port && head -c 3 <&3" 2>/dev/null | grep -q 220; then break; fi
+              sleep 1
+            done
+          done
 
       # The windows job above runs the unit suite too; running it here covers Linux-only paths such
       # as Unix permission bits and local symbolic links, which Windows cannot create without admin.
