@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Swift items never carried an `ETag`, because Swift sends it unquoted and the typed header parser
+  rejects that, so every conditional delete against Swift failed as a conflict.
 - FTP listing times were shifted by the client machine's UTC offset: the FTP client now converts to
   UTC, and unspecified times are no longer reinterpreted as local time.
 - WebDAV uploads, moves, and copies each stranded a pooled HTTP connection until garbage collection,
@@ -35,6 +37,9 @@
 - FTP server replies wrapped in FluentFTP's generic `FtpException` are now unwrapped and classified.
 
 ### Changed (breaking)
+
+- `ComputeChecksumAsync` and `VerifyChecksumAsync` gained a `mode` parameter before
+  `cancellationToken`; positional callers passing a token must name it.
 
 - FTP, SFTP, and WebDAV now declare `AtomicMove`, so renaming a folder through the library uses a
   single server-side rename (RNFR/RNTO, SFTP rename, WebDAV MOVE) instead of copying the whole tree
@@ -64,6 +69,9 @@
 
 ### Added
 
+- `IStorageChecksumService.GetServerChecksumAsync` for S3, Azure Blob, Google Cloud Storage, Swift, and
+  FTP. `ComputeChecksumAsync`/`VerifyChecksumAsync` use the server digest when available (new
+  `StorageChecksumMode` parameter) and report it in `StorageChecksum.Source`.
 - `IStorageAttributeService` with permissions (including recursive file/directory modes), numeric
   ownership, timestamps, and symbolic links, plus `StorageItem.UnixMode`, `Permissions`, `Owner`,
   `Group`, `OwnerId`, `GroupId`, `LinkTarget`, `Created`, `LastAccessed`, and `IsHidden`, and

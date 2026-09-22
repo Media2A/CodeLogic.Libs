@@ -22,7 +22,8 @@ public sealed class GoogleCloudStorageBackend :
     IStorageBackend,
     IStorageMetadataService,
     IStorageSignedUrlService,
-    IStorageVersionService
+    IStorageVersionService,
+    IStorageChecksumService
 {
     private static readonly StorageCapabilities GcsCapabilities = new(
         StorageFeature.VirtualDirectories |
@@ -33,6 +34,7 @@ public sealed class GoogleCloudStorageBackend :
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.ConditionalCreate |
@@ -121,6 +123,23 @@ public sealed class GoogleCloudStorageBackend :
             return await GetDirectoryInfoAsync(normalized.Value, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Google Cloud object info")); }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Google Cloud Storage computes an MD5 for every non-composite object.</remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm != StorageChecksumAlgorithm.Md5)
+            return ProviderChecksums.Unavailable(algorithm, "Google Cloud Storage stores only MD5 and CRC32C checksums.");
+        try
+        {
+            var item = await _client.GetObjectAsync(_bucket, ToKey(normalized.Value!), cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ProviderChecksums.FromBase64(algorithm, item.Md5Hash);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get Google Cloud checksum")); }
     }
 
     /// <inheritdoc />

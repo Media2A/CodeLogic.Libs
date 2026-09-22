@@ -392,6 +392,22 @@ Check `Capabilities` for `Permissions`, `Ownership`, `SetTimestamps`, `CreateLin
 `ReadLinks`; unsupported calls return `storage.unsupported`. Link targets must stay inside the
 mounted root. On Windows, creating local links needs Developer Mode or the symbolic-link privilege.
 
+## Server-side checksums
+
+`ComputeChecksumAsync` and `VerifyChecksumAsync` ask the server for a stored digest first and only
+download the content when there is none; `StorageChecksum.Source` says which happened.
+`GetServerChecksumAsync` returns only the server's value, and `StorageChecksumMode.ComputeOnly`
+forces a download.
+
+| Provider | Server digest |
+|---|---|
+| S3 | MD5 from single-part, non-KMS ETags; SHA-256 when stored with the object |
+| Azure Blob | MD5 (`Content-MD5`) |
+| Google Cloud Storage | MD5 of non-composite objects |
+| Swift | MD5 ETag, except segmented large objects |
+| FTP | `HASH`/`XMD5`/`XSHA256`/`XSHA512` when the server offers them |
+| SFTP, WebDAV, Local | none (always computed) |
+
 ## Runtime connections, health, and native clients
 
 ```csharp

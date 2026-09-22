@@ -13,7 +13,8 @@ internal sealed class StorageServiceProxy :
     IStorageTagService,
     IStorageSignedUrlService,
     IStorageVersionService,
-    IStorageAttributeService
+    IStorageAttributeService,
+    IStorageChecksumService
 {
     private readonly StorageLibrary _library;
     private readonly string _connectionId;
@@ -250,6 +251,11 @@ internal sealed class StorageServiceProxy :
             ? attributes.CreateLinkAsync(normalized, target.Value!, cancellationToken)
             : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support creating links."))));
     }
+
+    public Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default) =>
+        InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageChecksumService checksums
+            ? checksums.GetServerChecksumAsync(normalized, algorithm, cancellationToken)
+            : Task.FromResult(Result<StorageChecksum>.Failure(StorageErrors.Unsupported("This storage connection does not report server checksums."))));
 
     public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default) =>
         InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes

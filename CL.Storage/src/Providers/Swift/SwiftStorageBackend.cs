@@ -14,7 +14,7 @@ using CodeLogic.Core.Results;
 namespace CL.Storage.Providers.Swift;
 
 /// <summary>Root-scoped storage over the OpenStack Swift HTTP API.</summary>
-public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataService
+public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataService, IStorageChecksumService
 {
     private static readonly StorageCapabilities SwiftCapabilities = new(
         StorageFeature.VirtualDirectories |
@@ -25,6 +25,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.ConditionalCreate |
@@ -107,6 +108,29 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Swift object info")); }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>A Swift ETag is the content MD5, except for segmented large objects, which are not reported.</remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm != StorageChecksumAlgorithm.Md5)
+            return ProviderChecksums.Unavailable(algorithm, "Swift stores only MD5 checksums.");
+        try
+        {
+            using var response = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Head, ObjectUri(ToKey(normalized.Value!))),
+                cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return Result<StorageChecksum>.Failure(FromStatus(response, "Get Swift checksum"));
+            if (response.Headers.Contains("X-Object-Manifest") || response.Headers.Contains("X-Static-Large-Object"))
+                return ProviderChecksums.Unavailable(algorithm, "A segmented Swift object's ETag is not its MD5.");
+            return ProviderChecksums.FromHex(algorithm, RawETag(response));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get Swift checksum")); }
     }
 
     /// <inheritdoc />
@@ -808,11 +832,20 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             Size = path.EndsWith('/') ? null : response.Content.Headers.ContentLength,
             LastModified = response.Content.Headers.LastModified,
             ContentType = contentTypes?.FirstOrDefault(),
-            ETag = response.Headers.ETag?.Tag.Trim('"'),
+            ETag = RawETag(response),
             VersionId = versionIds?.FirstOrDefault(),
             Metadata = metadata
         };
     }
+
+    /// <summary>
+    /// Swift sends its ETag unquoted, which the typed <c>ETag</c> header parser rejects as invalid,
+    /// so the header is read raw. Quotes are stripped when a proxy or middleware adds them.
+    /// </summary>
+    internal static string? RawETag(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("ETag", out var values) && values.FirstOrDefault() is { Length: > 0 } raw
+            ? raw.Trim().Trim('"')
+            : null;
 
     private static string QuoteETag(string etag) =>
         etag.StartsWith('"') && etag.EndsWith('"') ? etag : $"\"{etag}\"";

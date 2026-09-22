@@ -18,7 +18,8 @@ public sealed class AzureBlobStorageBackend :
     IStorageMetadataService,
     IStorageTagService,
     IStorageSignedUrlService,
-    IStorageVersionService
+    IStorageVersionService,
+    IStorageChecksumService
 {
     private static readonly StorageCapabilities AzureCapabilities = new(
         StorageFeature.VirtualDirectories |
@@ -29,6 +30,7 @@ public sealed class AzureBlobStorageBackend :
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.Tags |
@@ -105,6 +107,23 @@ public sealed class AzureBlobStorageBackend :
             return await GetDirectoryInfoAsync(normalized.Value, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Azure blob info")); }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Azure stores the MD5 (<c>Content-MD5</c>) of blobs uploaded in a single request.</remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm != StorageChecksumAlgorithm.Md5)
+            return ProviderChecksums.Unavailable(algorithm, $"Azure Blob stores only MD5 checksums.");
+        try
+        {
+            var properties = await Blob(normalized.Value!).GetPropertiesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ProviderChecksums.FromBytes(algorithm, properties.Value.ContentHash);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get Azure blob checksum")); }
     }
 
     /// <inheritdoc />

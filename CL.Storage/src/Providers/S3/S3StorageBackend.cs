@@ -21,7 +21,8 @@ public sealed class S3StorageBackend :
     IStorageMetadataService,
     IStorageTagService,
     IStorageSignedUrlService,
-    IStorageVersionService
+    IStorageVersionService,
+    IStorageChecksumService
 {
     private static readonly StorageCapabilities S3Capabilities = new(
         StorageFeature.VirtualDirectories |
@@ -32,6 +33,7 @@ public sealed class S3StorageBackend :
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.Tags |
@@ -1049,6 +1051,36 @@ public sealed class S3StorageBackend :
         LastModified = item.LastModified.HasValue ? new DateTimeOffset(item.LastModified.Value) : null,
         ETag = item.ETag?.Trim('"')
     };
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// SHA-256 comes from a stored <c>x-amz-checksum-sha256</c>. MD5 comes from the ETag, which equals
+    /// the content MD5 only for single-part uploads without SSE-KMS, so other ETags are not reported.
+    /// </remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm is not (StorageChecksumAlgorithm.Md5 or StorageChecksumAlgorithm.Sha256))
+            return ProviderChecksums.Unavailable(algorithm, $"S3 does not store {algorithm} checksums.");
+        try
+        {
+            var response = await _client.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            {
+                BucketName = _bucket,
+                Key = ToKey(normalized.Value!),
+                ChecksumMode = ChecksumMode.ENABLED
+            }, cancellationToken).ConfigureAwait(false);
+            if (algorithm == StorageChecksumAlgorithm.Sha256)
+                return ProviderChecksums.FromBase64(algorithm, response.ChecksumSHA256);
+            var encryption = response.ServerSideEncryptionMethod?.Value ?? string.Empty;
+            return encryption.StartsWith("aws:kms", StringComparison.Ordinal)
+                ? ProviderChecksums.Unavailable(algorithm, "An SSE-KMS object's ETag is not its MD5.")
+                : ProviderChecksums.FromHex(algorithm, response.ETag);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get S3 checksum")); }
+    }
 
     private static bool IsNotFound(AmazonS3Exception error) => error.StatusCode == HttpStatusCode.NotFound ||
         error.ErrorCode is "NoSuchKey" or "NoSuchBucket" or "NotFound";

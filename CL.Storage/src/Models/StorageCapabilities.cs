@@ -44,7 +44,7 @@ public enum StorageFeature : ulong
     ConditionalDelete = 1UL << 17,
     /// <summary>The provider returns opaque continuation tokens instead of preloading all results.</summary>
     ServerPagination = 1UL << 18,
-    /// <summary>The provider exposes native checksum information or verification.</summary>
+    /// <summary>The provider can report stored checksums through <see cref="Abstractions.IStorageChecksumService"/>.</summary>
     Checksums = 1UL << 19,
     /// <summary>Large uploads are split into bounded provider multipart requests.</summary>
     MultipartUpload = 1UL << 20,

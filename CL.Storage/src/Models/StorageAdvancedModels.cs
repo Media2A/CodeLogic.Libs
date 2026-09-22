@@ -156,10 +156,32 @@ public enum StorageChecksumAlgorithm
 /// <param name="Algorithm">Digest algorithm used.</param>
 /// <param name="HexValue">Lowercase hexadecimal digest.</param>
 /// <param name="BytesProcessed">Number of content bytes included in the digest.</param>
+/// <param name="Source">Whether the digest was reported by the server or computed from downloaded content.</param>
 public sealed record StorageChecksum(
     StorageChecksumAlgorithm Algorithm,
     string HexValue,
-    long BytesProcessed);
+    long BytesProcessed,
+    StorageChecksumSource Source = StorageChecksumSource.Computed);
+
+/// <summary>Where a checksum came from.</summary>
+public enum StorageChecksumSource
+{
+    /// <summary>Computed by streaming the content through the client.</summary>
+    Computed,
+    /// <summary>Reported by the server without downloading the content; <see cref="StorageChecksum.BytesProcessed"/> is zero.</summary>
+    Server
+}
+
+/// <summary>Chooses between a server-reported checksum and computing one from the content.</summary>
+public enum StorageChecksumMode
+{
+    /// <summary>Uses the server's checksum when available and falls back to computing it.</summary>
+    PreferServer,
+    /// <summary>Uses only the server's checksum; fails with <c>storage.unsupported</c> when there is none.</summary>
+    ServerOnly,
+    /// <summary>Always downloads and computes the checksum.</summary>
+    ComputeOnly
+}
 
 /// <summary>The actual digest and constant-time comparison outcome for an expected digest.</summary>
 /// <param name="Actual">Digest calculated from storage content.</param>

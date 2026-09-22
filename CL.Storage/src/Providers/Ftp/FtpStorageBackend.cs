@@ -11,7 +11,7 @@ using FluentFTP.Exceptions;
 namespace CL.Storage.Providers.Ftp;
 
 /// <summary>Root-scoped storage over FTP, explicit FTPS, or implicit FTPS.</summary>
-public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService
+public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageChecksumService
 {
     private static readonly StorageCapabilities FtpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -24,6 +24,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         // so folder moves no longer fall back to copy-then-delete through the client.
         StorageFeature.AtomicMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.Links |
         StorageFeature.Permissions |
         StorageFeature.SetTimestamps |
@@ -589,6 +590,44 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             catch (Exception error) { return Result<StorageLinkInfo>.Failure(Fail(client, error, "Read FTP link")); }
             finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
         }, cancellationToken);
+
+    /// <inheritdoc />
+    /// <remarks>Uses <c>HASH</c> or the <c>XMD5</c>/<c>XSHA256</c>/<c>XSHA512</c> commands when the server advertises them.</remarks>
+    public Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var ftpAlgorithm = algorithm switch
+        {
+            StorageChecksumAlgorithm.Md5 => FtpHashAlgorithm.MD5,
+            StorageChecksumAlgorithm.Sha256 => FtpHashAlgorithm.SHA256,
+            StorageChecksumAlgorithm.Sha512 => FtpHashAlgorithm.SHA512,
+            _ => FtpHashAlgorithm.NONE
+        };
+        if (ftpAlgorithm == FtpHashAlgorithm.NONE)
+            return Task.FromResult(ProviderChecksums.Unavailable(algorithm, $"FTP has no command for {algorithm} checksums."));
+        return _retry.ExecuteAsync("Get FTP checksum", RetryKind.Idempotent, async (_, token) =>
+        {
+            var resolved = _paths.Resolve(path, requireNonRoot: true);
+            if (resolved.IsFailure) return Result<StorageChecksum>.Failure(resolved.Error!);
+            AsyncFtpClient? client = null;
+            try
+            {
+                client = await OpenClientAsync(token).ConfigureAwait(false);
+                if ((client.HashAlgorithms & ftpAlgorithm) == 0)
+                    return ProviderChecksums.Unavailable(algorithm, $"The FTP server does not offer {algorithm} checksums.");
+                var hash = await client.GetChecksum(resolved.Value!.RemotePath, ftpAlgorithm, token).ConfigureAwait(false);
+                return hash.IsValid && hash.Algorithm == ftpAlgorithm
+                    ? ProviderChecksums.FromHex(algorithm, hash.Value)
+                    : ProviderChecksums.Unavailable(algorithm);
+            }
+            catch (FtpHashUnsupportedException)
+            {
+                return ProviderChecksums.Unavailable(algorithm, $"The FTP server does not offer {algorithm} checksums.");
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) { return Result<StorageChecksum>.Failure(Fail(client, error, "Get FTP checksum")); }
+            finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+        }, cancellationToken);
+    }
 
     private StorageLinkInfo LinkInfo(string rawTarget, string linkParent)
     {

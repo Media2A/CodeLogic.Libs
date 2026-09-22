@@ -273,3 +273,22 @@ public sealed class SwiftEmulatorTests
         await StorageContract.WrongCredentialsAreAuthenticationFailuresAsync(storage);
     }
 }
+
+public sealed class SwiftEtagTests
+{
+    [SwiftFact]
+    public async Task Swift_items_carry_their_etag_so_conditional_deletes_work()
+    {
+        await using var storage = await CloudEmulators.CreateAsync(CloudEmulators.Swift());
+        var path = $"etag-{Guid.NewGuid():N}.txt";
+        await storage.UploadBytesAsync(path, [1, 2, 3]);
+
+        var info = await storage.GetInfoAsync(path);
+        Assert.False(string.IsNullOrEmpty(info.Value!.ETag));
+
+        var stale = await storage.DeleteAsync(path, new CL.Storage.Models.StorageDeleteOptions { Condition = new CL.Storage.Models.StorageMutationCondition { ExpectedETag = "0123" } });
+        Assert.Equal(StorageErrors.ConflictCode, stale.Error?.Code);
+        var current = await storage.DeleteAsync(path, new CL.Storage.Models.StorageDeleteOptions { Condition = new CL.Storage.Models.StorageMutationCondition { ExpectedETag = info.Value.ETag } });
+        Assert.True(current.IsSuccess, current.Error?.ToString());
+    }
+}

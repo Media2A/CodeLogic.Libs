@@ -277,9 +277,29 @@ public static class StorageServiceExtensions
         }
     }
 
+    /// <summary>Returns the checksum the server holds for a file, without downloading it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">File path relative to the mounted root.</param>
+    /// <param name="algorithm">Requested digest algorithm.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>The server checksum, or <c>storage.unsupported</c> when the server has none for this algorithm.</returns>
+    public static Task<Result<StorageChecksum>> GetServerChecksumAsync(
+        this IStorageService storage,
+        string path,
+        StorageChecksumAlgorithm algorithm = StorageChecksumAlgorithm.Sha256,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageChecksumService checksums
+            ? checksums.GetServerChecksumAsync(path, algorithm, cancellationToken)
+            : Task.FromResult(Result<StorageChecksum>.Failure(StorageErrors.Unsupported("This storage connection does not report server checksums.")));
+    }
+
     /// <summary>
-    /// Streams an item through a client-side digest without buffering its content. MD5 is available
-    /// for interoperability; SHA-256 or stronger should be used for security-sensitive verification.
+    /// Returns an item's digest. By default the server's stored checksum is used when it has one for
+    /// the algorithm, and otherwise the content is streamed through a client-side digest without
+    /// buffering. MD5 is available for interoperability; SHA-256 or stronger should be used for
+    /// security-sensitive verification. Byte ranges are always computed.
     /// </summary>
     public static async Task<Result<StorageChecksum>> ComputeChecksumAsync(
         this IStorageService storage,
@@ -287,6 +307,7 @@ public static class StorageServiceExtensions
         StorageChecksumAlgorithm algorithm = StorageChecksumAlgorithm.Sha256,
         StorageDownloadOptions? options = null,
         IProgress<StorageTransferProgress>? progress = null,
+        StorageChecksumMode mode = StorageChecksumMode.PreferServer,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(storage);
@@ -297,6 +318,19 @@ public static class StorageServiceExtensions
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageChecksum>.Failure(validation.Error!);
+
+        var wholeFile = options.Offset == 0 && options.Length is null && options.VersionId is null;
+        if (mode != StorageChecksumMode.ComputeOnly && wholeFile && storage is IStorageChecksumService checksums)
+        {
+            var server = await checksums.GetServerChecksumAsync(path, algorithm, cancellationToken).ConfigureAwait(false);
+            if (server.IsSuccess || server.Error?.Code != StorageErrors.UnsupportedCode || mode == StorageChecksumMode.ServerOnly)
+                return server;
+        }
+        else if (mode == StorageChecksumMode.ServerOnly)
+        {
+            return Result<StorageChecksum>.Failure(StorageErrors.Unsupported(
+                "A server checksum is only available for whole files on connections that report them."));
+        }
 
         var download = await storage.DownloadAsync(path, options, cancellationToken).ConfigureAwait(false);
         if (download.IsFailure) return Result<StorageChecksum>.Failure(download.Error!);
@@ -344,6 +378,7 @@ public static class StorageServiceExtensions
         StorageChecksumAlgorithm algorithm = StorageChecksumAlgorithm.Sha256,
         StorageDownloadOptions? options = null,
         IProgress<StorageTransferProgress>? progress = null,
+        StorageChecksumMode mode = StorageChecksumMode.PreferServer,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(storage);
@@ -374,6 +409,7 @@ public static class StorageServiceExtensions
             algorithm,
             options,
             progress,
+            mode,
             cancellationToken).ConfigureAwait(false);
         if (actual.IsFailure)
             return Result<StorageChecksumVerification>.Failure(actual.Error!);
