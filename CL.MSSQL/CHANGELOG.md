@@ -188,7 +188,7 @@
   number, composed at pack time; `AssemblyVersion` stays pinned at `Major.Minor.0.0`
   (now `4.8.0.0`) so every patch in the line loads interchangeably.
 
-## Unreleased
+## Initial release
 
 - Initial `CodeLogic.MSSQL` release for SQL Server 2019+, SQL Server 2022/2025, and Azure SQL Database.
 - Added repository, fluent-query, projection, grouping, paging, transaction, raw SQL, cache, health, migration, retention, backup, and named-connection workflows matching `CL.MySQL2`.

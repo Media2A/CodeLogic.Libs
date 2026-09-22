@@ -1,17 +1,6 @@
 # Changelog
 
-## 2026-09-12
-
-### Changed
-
-- Unified the version line with the CodeLogic framework on **4.8.x**. Every official
-  library and the framework now share one `major.minor`, so a given `4.8.<patch>`
-  means the same generation across all packages.
-- `version.txt` moved from `4.6` to `4.8`. The patch component remains the CI run
-  number, composed at pack time; `AssemblyVersion` stays pinned at `Major.Minor.0.0`
-  (now `4.8.0.0`) so every patch in the line loads interchangeably.
-
-## Unreleased
+## 2026-09-22
 
 ### Fixed
 
@@ -217,3 +206,14 @@
 - Google Cloud downloads stream through a bounded pipe and listings use real provider paging.
 - WebDAV metadata-read capability is now callable through `IStorageMetadataService`; property writes
   remain explicitly unsupported by the portable adapter.
+
+## 2026-09-12
+
+### Changed
+
+- Unified the version line with the CodeLogic framework on **4.8.x**. Every official
+  library and the framework now share one `major.minor`, so a given `4.8.<patch>`
+  means the same generation across all packages.
+- `version.txt` moved from `4.6` to `4.8`. The patch component remains the CI run
+  number, composed at pack time; `AssemblyVersion` stays pinned at `Major.Minor.0.0`
+  (now `4.8.0.0`) so every patch in the line loads interchangeably.
