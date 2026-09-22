@@ -589,6 +589,33 @@ if (opened.IsSuccess)
 
 Do not dispose reusable clients returned by `GetNativeClient`; dispose session leases.
 
+### Testing settings and diagnosing connections
+
+`TestConnectionAsync` tries settings without saving them, even before the library is initialized.
+It reports each step (`validate`, `connect`, `list`, `details`). If the server's certificate or host
+key is rejected, `ServerIdentity` still says what was presented, ready to pin:
+
+```csharp
+var report = await storage.TestConnectionAsync(settings);
+if (!report.Succeeded && report.ServerIdentity is { Kind: "ssh-host-key" } key)
+{
+    // Ask the user: "The server presented {key.Fingerprint} ({key.Algorithm}). Trust it?"
+    settings.HostKeyFingerprints = [key.Fingerprint];
+}
+// For TLS, pin key.PublicKeyFingerprint in TrustedPublicKeySha256 (survives certificate renewal).
+```
+
+`GetConnectionDiagnosticsAsync(id)` describes a registered connection: host, port, transport security,
+the presented certificate or host key, what was negotiated (`tls`/`cipher` for FTPS; `kex`, `hostKey`,
+`cipher`, `mac` for SSH), server system and software (FTP `SYST`, SSH version string, HTTP `Server`),
+advertised features (FTP `FEAT`, WebDAV `DAV` and `Allow`), session pool counters, and the last health
+check. `GetConnections()` includes the host, port, security, and last health for every connection.
+Diagnostics never contain credentials.
+
+Health checks publish `StorageConnectionHealthChangedEvent` when a connection's state changes (and on
+its first check). Every failed service operation publishes `StorageOperationFailedEvent` with the
+operation, path, and error code, including expected failures such as `storage.not_found`.
+
 ## Failures and compatibility
 
 Expected failures use stable `storage.*` error codes such as `storage.not_found`,

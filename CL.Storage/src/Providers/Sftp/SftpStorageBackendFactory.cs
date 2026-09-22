@@ -16,21 +16,23 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (SftpConnectionConfig)configuration;
+        var identity = new ServerIdentityRecorder();
         return new SftpStorageBackend(
             connectionId,
-            () => CreateClient(value),
+            () => CreateClient(value, identity),
             value.Root,
             maxBufferedDownloadBytes,
             value.Session,
             value.Retry,
             observer)
         {
-            CommandClientFactory = value.AllowRawCommands ? () => CreateCommandClient(value) : null
+            CommandClientFactory = value.AllowRawCommands ? () => CreateCommandClient(value) : null,
+            Identity = identity
         };
     }
 
-    internal static SftpClient CreateClient(SftpConnectionConfig value) =>
-        CreateClient(value, connection =>
+    internal static SftpClient CreateClient(SftpConnectionConfig value, ServerIdentityRecorder? identity = null) =>
+        CreateClient(value, identity, connection =>
         {
             var client = new SftpClient(connection) { OperationTimeout = connection.Timeout };
             if (value.BufferSize is { } bufferSize)
@@ -40,9 +42,9 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
 
     /// <summary>Creates an SSH shell client with exactly the same authentication, host trust, proxy, and tunnel.</summary>
     internal static SshClient CreateCommandClient(SftpConnectionConfig value) =>
-        CreateClient(value, connection => new SshClient(connection));
+        CreateClient(value, null, connection => new SshClient(connection));
 
-    private static TClient CreateClient<TClient>(SftpConnectionConfig value, Func<ConnectionInfo, TClient> create)
+    private static TClient CreateClient<TClient>(SftpConnectionConfig value, ServerIdentityRecorder? identity, Func<ConnectionInfo, TClient> create)
         where TClient : BaseClient
     {
         var timeout = TimeSpan.FromSeconds(value.TimeoutSeconds);
@@ -74,6 +76,7 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
             client.HostKeyReceived += (_, eventArgs) =>
             {
                 eventArgs.CanTrust = trust.IsTrusted(eventArgs.HostKey, eventArgs.FingerPrintSHA256);
+                identity?.RecordHostKey(eventArgs.HostKeyName, eventArgs.FingerPrintSHA256, eventArgs.CanTrust);
                 if (!eventArgs.CanTrust)
                     SftpHostKeyTracker.MarkRejected(client, $"SHA256:{eventArgs.FingerPrintSHA256}");
             };

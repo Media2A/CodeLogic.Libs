@@ -133,6 +133,13 @@ compares exact codes should switch to the table below or to `StorageErrorInfo.Is
 `connection_lost`, and `server_busy`. Provider codes are available through
 `StorageErrorInfo.TryGetDetail(error, StorageErrorInfo.FtpReplyKey, out var reply)` and similar keys.
 
+### Connection info and diagnostics
+
+`StorageConnectionInfo` gained `Host`, `Port`, `Security`, and `LastHealth` init properties; its
+positional members are unchanged. Use `TestConnectionAsync` to check settings before
+`AddOrUpdateConnectionAsync`, and subscribe to `StorageOperationFailedEvent` or
+`StorageConnectionHealthChangedEvent` for monitoring instead of wrapping every call.
+
 ## Recommended rollout
 
 1. Add `CodeLogic.Storage` beside the legacy package.

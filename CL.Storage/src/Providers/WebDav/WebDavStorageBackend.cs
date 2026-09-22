@@ -13,7 +13,7 @@ using WebDAVClient.Model;
 namespace CL.Storage.Providers.WebDav;
 
 /// <summary>Root-scoped storage over a WebDAV endpoint.</summary>
-public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataService
+public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataService, IStorageDiagnosticsSource
 {
     private static readonly StorageCapabilities WebDavCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -662,6 +662,43 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (response.StatusCode == System.Net.HttpStatusCode.PreconditionFailed && !overwrite)
             return false;
         throw new WebDAVException((int)response.StatusCode, $"WebDAV {method} failed (Status Code: {(int)response.StatusCode}).");
+    }
+
+    /// <summary>Records the certificate each TLS connection is offered; set by the factory.</summary>
+    internal ServerIdentityRecorder? Identity { get; init; }
+
+    StorageServerIdentity? IStorageDiagnosticsSource.PresentedIdentity => Identity?.Last;
+
+    StorageSessionPoolStats? IStorageDiagnosticsSource.PoolStats => null;
+
+    /// <summary>Sends <c>OPTIONS</c> to the mounted root and reports the <c>Server</c>, <c>DAV</c>, and <c>Allow</c> headers.</summary>
+    async Task<Result<StorageServerDetails>> IStorageDiagnosticsSource.GetServerDetailsAsync(CancellationToken cancellationToken)
+    {
+        if (_http is null || _endpoint is null)
+            return Result<StorageServerDetails>.Failure(StorageErrors.Unsupported("This WebDAV backend does not own its HTTP client."));
+        var root = _paths.Resolve(string.Empty);
+        if (root.IsFailure) return Result<StorageServerDetails>.Failure(root.Error!);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Options, ResourceUri(root.Value!.RemotePath, folder: true));
+            foreach (var header in _client is Client concrete && concrete.CustomHeaders is { } custom ? custom : [])
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                throw new WebDAVException((int)response.StatusCode, $"WebDAV OPTIONS failed (Status Code: {(int)response.StatusCode}).");
+            var server = response.Headers.Server.Count > 0 ? response.Headers.Server.ToString() : null;
+            var features = new List<string>();
+            if (response.Headers.TryGetValues("DAV", out var dav))
+                features.AddRange(dav.SelectMany(value => value.Split(',')).Select(value => value.Trim()).Where(value => value.Length > 0).Select(value => $"DAV {value}"));
+            features.AddRange(response.Content.Headers.Allow.Select(method => method.ToUpperInvariant()).Order(StringComparer.Ordinal));
+            var negotiated = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["http"] = response.Version.ToString()
+            };
+            return Result<StorageServerDetails>.Success(new StorageServerDetails(server, server?.Split(' ', 2)[0], features.Distinct(StringComparer.Ordinal).ToArray(), negotiated));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageServerDetails>.Failure(Map(error, "Read WebDAV server details")); }
     }
 
     private Uri ResourceUri(string remotePath, bool folder)

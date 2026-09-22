@@ -43,7 +43,10 @@ internal sealed class TlsPins
             return true;
         if (_publicKeys.Count == 0)
             return false;
-        using var parsed = certificate as X509Certificate2 ?? X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
+        // Only a certificate created here is disposed; the caller's is still used by the TLS stack.
+        if (certificate is X509Certificate2 full)
+            return _publicKeys.Contains(PublicKeyPin(full));
+        using var parsed = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
         return _publicKeys.Contains(PublicKeyPin(parsed));
     }
 

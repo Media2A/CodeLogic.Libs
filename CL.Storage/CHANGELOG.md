@@ -35,6 +35,8 @@
   matched: the HTTP status is read from `WebDAVException.GetHttpCode()` (with a message fallback)
   instead of `ErrorCode`, which the client leaves at zero.
 - FTP server replies wrapped in FluentFTP's generic `FtpException` are now unwrapped and classified.
+- Public-key (SPKI) pin checks disposed the server certificate they were given, so anything reading
+  it later in the TLS callback saw a disposed certificate.
 
 ### Changed (breaking)
 
@@ -53,6 +55,12 @@
   through the client and deleting the original.
 
 - SFTP no longer requires `HostKeyFingerprints` when `KnownHostsPath` is set.
+
+- `StorageConnectionInfo` gained `Host`, `Port`, `Security`, and `LastHealth`. Positional
+  deconstruction is unchanged; code comparing whole records for equality now also compares these.
+
+- WebDAV always installs a certificate validation callback (to record the presented certificate).
+  Without pins it still accepts only certificates with no policy errors.
 
 - `FtpStorageBackend`, `SftpStorageBackend`, and `WebDavStorageBackend` constructors take optional
   session and retry settings. Retries are on by default (3 attempts); pass
@@ -76,6 +84,14 @@
 
 ### Added
 
+- `TestConnectionAsync` checks connection settings that have not been saved: it validates them,
+  connects, lists the root, and reads server details, reporting each step. When a certificate or host key
+  is rejected, the report still carries what the server presented so a setup screen can offer to pin it.
+- `GetConnectionDiagnosticsAsync` describes a live connection: address, transport security, the
+  presented certificate or host key, negotiated TLS/SSH algorithms, server system and software, FTP
+  `FEAT` or WebDAV `DAV`/`Allow` features, session pool counters, and the last health check.
+- `StorageConnectionHealthChangedEvent` when a health check finds a connection in a new state, and
+  `StorageOperationFailedEvent` for every failed service operation (with operation, path, and code).
 - `WatchAsync` change streams: native notifications for local connections (`ChangeNotifications`),
   polling with snapshot diffs for every other provider.
 - `IStorageCommandService.ExecuteCommandAsync` for raw FTP and SSH commands (opt-in with

@@ -4,6 +4,7 @@ using CL.Storage.Events;
 using CL.Storage.Models;
 using CodeLogic.Core.Events;
 using CodeLogic.Core.Results;
+using System.Runtime.CompilerServices;
 
 namespace CL.Storage.Registry;
 
@@ -66,15 +67,16 @@ internal sealed class StorageServiceProxy :
         StorageUploadOptions? options,
         long? sourceLength,
         CancellationToken cancellationToken,
-        Func<IStorageBackend, string, StorageUploadOptions?, Task<Result<StorageItem>>> upload)
+        Func<IStorageBackend, string, StorageUploadOptions?, Task<Result<StorageItem>>> upload,
+        [CallerMemberName] string caller = "")
     {
         var validation = options?.Validate() ?? Result.Success();
         if (options?.ConflictPolicy == StorageConflictPolicy.Resume && validation.IsSuccess)
             return await UploadPathWithEventAsync(path, validation, cancellationToken,
-                (backend, normalized) => upload(backend, normalized, options)).ConfigureAwait(false);
+                (backend, normalized) => upload(backend, normalized, options), caller).ConfigureAwait(false);
         if (validation.IsFailure || options?.ConflictPolicy is null)
             return await UploadPathWithEventAsync(path, validation, cancellationToken,
-                (backend, normalized) => upload(backend, normalized, options)).ConfigureAwait(false);
+                (backend, normalized) => upload(backend, normalized, options), caller).ConfigureAwait(false);
 
         var normalizedPath = StoragePath.Normalize(path);
         if (normalizedPath.IsFailure)
@@ -93,7 +95,7 @@ internal sealed class StorageServiceProxy :
             return Result<StorageItem>.Success(decision.Value.Existing!);
         var resolved = options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null };
         return await UploadPathWithEventAsync(decision.Value.Path, Result.Success(), cancellationToken,
-            (backend, normalized) => upload(backend, normalized, resolved)).ConfigureAwait(false);
+            (backend, normalized) => upload(backend, normalized, resolved), caller).ConfigureAwait(false);
     }
 
     public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
@@ -248,7 +250,8 @@ internal sealed class StorageServiceProxy :
         return InvokeAsync(backend => backend is IStorageVersionService versions
             ? versions.DeleteVersionAsync(normalized.Value!, versionId, cancellationToken)
             : Task.FromResult(Result.Failure(
-                StorageErrors.Unsupported("This storage connection does not support object versions."))));
+                StorageErrors.Unsupported("This storage connection does not support object versions."))),
+            normalized.Value!);
     }
 
     private T Read<T>(Func<IStorageBackend, T> read)
@@ -257,10 +260,44 @@ internal sealed class StorageServiceProxy :
         return read(lease.Backend);
     }
 
-    private async Task<T> InvokeAsync<T>(Func<IStorageBackend, Task<T>> operation)
+    private async Task<T> InvokeAsync<T>(
+        Func<IStorageBackend, Task<T>> operation,
+        string? path = null,
+        [CallerMemberName] string caller = "")
     {
         using var lease = _library.AcquireOperation(_connectionId);
-        return await operation(lease.Backend).ConfigureAwait(false);
+        var result = await operation(lease.Backend).ConfigureAwait(false);
+        ReportFailure(lease.Backend, caller, path, OperationFailure<T>.Of(result));
+        return result;
+    }
+
+    /// <summary>Publishes <see cref="StorageOperationFailedEvent"/> for a failed backend call.</summary>
+    private void ReportFailure(IStorageBackend backend, string caller, string? path, Error? error)
+    {
+        if (error is not null)
+            _library.ConnectionObserver.OperationFailed(backend.ConnectionId, backend.Provider, OperationName(caller), path, error);
+    }
+
+    private static string OperationName(string caller) =>
+        caller.EndsWith("Async", StringComparison.Ordinal) ? caller[..^"Async".Length] : caller;
+
+    /// <summary>Reads the error from a <see cref="Result"/> or <see cref="Result{T}"/> without knowing which.</summary>
+    private static class OperationFailure<T>
+    {
+        public static readonly Func<T, Error?> Of = Build();
+
+        private static Func<T, Error?> Build()
+        {
+            if (typeof(T) == typeof(Result))
+                return value => value is Result { IsFailure: true } result ? result.Error : null;
+            if (typeof(T).IsGenericType && typeof(T).GetGenericTypeDefinition() == typeof(Result<>))
+            {
+                var isFailure = typeof(T).GetProperty(nameof(Result.IsFailure))!;
+                var error = typeof(T).GetProperty(nameof(Result.Error))!;
+                return value => value is not null && (bool)isFailure.GetValue(value)! ? (Error?)error.GetValue(value) : null;
+            }
+            return _ => null;
+        }
     }
 
     public Task<Result> SetPermissionsAsync(string path, int unixMode, CancellationToken cancellationToken = default) =>
@@ -322,14 +359,16 @@ internal sealed class StorageServiceProxy :
     private Task<Result<T>> InvokePathAsync<T>(
         string path,
         CancellationToken cancellationToken,
-        Func<IStorageBackend, string, Task<Result<T>>> operation) =>
-        InvokePathAsync(path, cancellationToken, Result.Success(), operation);
+        Func<IStorageBackend, string, Task<Result<T>>> operation,
+        [CallerMemberName] string caller = "") =>
+        InvokePathAsync(path, cancellationToken, Result.Success(), operation, caller);
 
     private Task<Result<T>> InvokePathAsync<T>(
         string path,
         CancellationToken cancellationToken,
         Result validation,
-        Func<IStorageBackend, string, Task<Result<T>>> operation)
+        Func<IStorageBackend, string, Task<Result<T>>> operation,
+        [CallerMemberName] string caller = "")
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (validation.IsFailure)
@@ -337,19 +376,20 @@ internal sealed class StorageServiceProxy :
         var normalized = StoragePath.Normalize(path);
         return normalized.IsFailure
             ? Task.FromResult(Result<T>.Failure(normalized.Error!))
-            : InvokeAsync(backend => operation(backend, normalized.Value!));
+            : InvokeAsync(backend => operation(backend, normalized.Value!), normalized.Value!, caller);
     }
 
     private Task<Result> InvokePathAsync(
         string path,
         CancellationToken cancellationToken,
-        Func<IStorageBackend, string, Task<Result>> operation)
+        Func<IStorageBackend, string, Task<Result>> operation,
+        [CallerMemberName] string caller = "")
     {
         cancellationToken.ThrowIfCancellationRequested();
         var normalized = StoragePath.Normalize(path);
         return normalized.IsFailure
             ? Task.FromResult(Result.Failure(normalized.Error!))
-            : InvokeAsync(backend => operation(backend, normalized.Value!));
+            : InvokeAsync(backend => operation(backend, normalized.Value!), normalized.Value!, caller);
     }
 
     private async Task<Result<Stream>> DownloadWithLeaseAsync(
@@ -371,6 +411,7 @@ internal sealed class StorageServiceProxy :
             var result = await lease.Backend.DownloadAsync(normalized.Value!, options, cancellationToken).ConfigureAwait(false);
             if (result.IsFailure)
             {
+                ReportFailure(lease.Backend, nameof(DownloadAsync), normalized.Value!, result.Error);
                 lease.Dispose();
                 return Result<Stream>.Failure(result.Error!);
             }
@@ -387,7 +428,8 @@ internal sealed class StorageServiceProxy :
         string path,
         Result validation,
         CancellationToken cancellationToken,
-        Func<IStorageBackend, string, Task<Result<StorageItem>>> operation)
+        Func<IStorageBackend, string, Task<Result<StorageItem>>> operation,
+        [CallerMemberName] string caller = "")
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (validation.IsFailure)
@@ -395,12 +437,13 @@ internal sealed class StorageServiceProxy :
         var normalized = StoragePath.Normalize(path);
         return normalized.IsFailure
             ? Task.FromResult(Result<StorageItem>.Failure(normalized.Error!))
-            : UploadWithEventAsync(normalized.Value!, backend => operation(backend, normalized.Value!));
+            : UploadWithEventAsync(normalized.Value!, backend => operation(backend, normalized.Value!), caller);
     }
 
     private async Task<Result<StorageItem>> UploadWithEventAsync(
         string requestedPath,
-        Func<IStorageBackend, Task<Result<StorageItem>>> operation)
+        Func<IStorageBackend, Task<Result<StorageItem>>> operation,
+        string caller)
     {
         var lease = _library.AcquireOperation(_connectionId);
         Result<StorageItem> result;
@@ -409,6 +452,7 @@ internal sealed class StorageServiceProxy :
         try
         {
             result = await operation(lease.Backend).ConfigureAwait(false);
+            ReportFailure(lease.Backend, caller, requestedPath, result.Error);
             if (result.IsSuccess)
             {
                 var eventPath = requestedPath;
@@ -440,7 +484,8 @@ internal sealed class StorageServiceProxy :
         Result validation,
         CancellationToken cancellationToken,
         Func<IStorageBackend, string, Task<Result>> operation,
-        Func<string, StorageProvider, string, TEvent> createEvent)
+        Func<string, StorageProvider, string, TEvent> createEvent,
+        [CallerMemberName] string caller = "")
         where TEvent : IEvent
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -451,12 +496,16 @@ internal sealed class StorageServiceProxy :
             ? Task.FromResult(Result.Failure(normalized.Error!))
             : MutateWithEventAsync(
                 backend => operation(backend, normalized.Value!),
-                (connectionId, provider) => createEvent(connectionId, provider, normalized.Value!));
+                (connectionId, provider) => createEvent(connectionId, provider, normalized.Value!),
+                normalized.Value!,
+                caller);
     }
 
     private async Task<Result> MutateWithEventAsync<TEvent>(
         Func<IStorageBackend, Task<Result>> operation,
-        Func<string, StorageProvider, TEvent> createEvent)
+        Func<string, StorageProvider, TEvent> createEvent,
+        string path,
+        string caller)
         where TEvent : IEvent
     {
         var lease = _library.AcquireOperation(_connectionId);
@@ -466,6 +515,7 @@ internal sealed class StorageServiceProxy :
         try
         {
             result = await operation(lease.Backend).ConfigureAwait(false);
+            ReportFailure(lease.Backend, caller, path, result.Error);
             if (result.IsSuccess)
             {
                 @event = createEvent(lease.Backend.ConnectionId, lease.Backend.Provider);

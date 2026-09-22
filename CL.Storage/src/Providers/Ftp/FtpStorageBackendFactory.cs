@@ -17,9 +17,10 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (FtpConnectionConfig)configuration;
+        var identity = new ServerIdentityRecorder();
         return new FtpStorageBackend(
             connectionId,
-            () => CreateClient(value),
+            () => CreateClient(value, identity),
             value.Root,
             maxBufferedDownloadBytes,
             value.Session,
@@ -27,11 +28,12 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             observer,
             AfterConnect(value))
         {
-            AllowRawCommands = value.AllowRawCommands
+            AllowRawCommands = value.AllowRawCommands,
+            Identity = identity
         };
     }
 
-    private static AsyncFtpClient CreateClient(FtpConnectionConfig value)
+    private static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null)
     {
         var config = new FtpConfig
         {
@@ -105,7 +107,10 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
 
         var pins = new TlsPins(value.TrustedCertificateSha256, value.TrustedPublicKeySha256);
         client.ValidateCertificate += (_, eventArgs) =>
+        {
             eventArgs.Accept = pins.Accepts(eventArgs.Certificate, eventArgs.PolicyErrors, value.RequireValidCertificateChain);
+            identity?.RecordCertificate(eventArgs.Certificate, eventArgs.Accept);
+        };
         return client;
     }
 

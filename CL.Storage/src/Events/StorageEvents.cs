@@ -215,3 +215,39 @@ public sealed record StorageTransferFailedEvent(
     int Attempts,
     string ErrorCode,
     DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a health check finds a connection in a different state than the previous check did.</summary>
+/// <param name="ConnectionId">Connection that was checked.</param>
+/// <param name="Provider">Provider used by the connection.</param>
+/// <param name="PreviouslyHealthy">Result of the previous check, or <see langword="null"/> for the first check.</param>
+/// <param name="Healthy">Result of this check.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> code when the check failed.</param>
+/// <param name="Latency">How long the check took.</param>
+/// <param name="Timestamp">UTC time the check finished.</param>
+public sealed record StorageConnectionHealthChangedEvent(
+    string ConnectionId,
+    StorageProvider Provider,
+    bool? PreviouslyHealthy,
+    bool Healthy,
+    string? ErrorCode,
+    TimeSpan Latency,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>
+/// Published when an operation on a connection's storage service returns a failure, including expected
+/// ones such as <c>storage.not_found</c>; filter on <paramref name="ErrorCode"/> as needed. Input that is
+/// rejected before reaching the provider (invalid paths or options) is not reported.
+/// </summary>
+/// <param name="ConnectionId">Connection that ran the operation.</param>
+/// <param name="Provider">Provider used by the connection.</param>
+/// <param name="Operation">Service method, such as <c>Upload</c> or <c>GetInfo</c>.</param>
+/// <param name="Path">Normalized path the operation targeted, when it has one.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> error code.</param>
+/// <param name="Timestamp">UTC time the failure was returned.</param>
+public sealed record StorageOperationFailedEvent(
+    string ConnectionId,
+    StorageProvider Provider,
+    string Operation,
+    string? Path,
+    string ErrorCode,
+    DateTimeOffset Timestamp) : IEvent;

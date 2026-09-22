@@ -17,7 +17,8 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
     {
         var value = (WebDavConnectionConfig)configuration;
         var endpoint = new Uri(value.Endpoint, UriKind.Absolute);
-        var http = CreateHttpClient(value, endpoint);
+        var identity = new ServerIdentityRecorder();
+        var http = CreateHttpClient(value, endpoint, identity);
         var client = new Client(http)
         {
             Server = endpoint.GetLeftPart(UriPartial.Authority) + "/",
@@ -35,14 +36,17 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             value.Retry,
             observer,
             http,
-            new Uri(endpoint.GetLeftPart(UriPartial.Authority)));
+            new Uri(endpoint.GetLeftPart(UriPartial.Authority)))
+        {
+            Identity = identity
+        };
     }
 
     /// <summary>
     /// Builds the HTTP stack directly so TLS pinning, client certificates, proxies, connection limits,
     /// and Digest/NTLM/Negotiate all apply; the WebDAV client's own constructors expose none of them.
     /// </summary>
-    internal static HttpClient CreateHttpClient(WebDavConnectionConfig value, Uri endpoint)
+    internal static HttpClient CreateHttpClient(WebDavConnectionConfig value, Uri endpoint, ServerIdentityRecorder? identity = null)
     {
         var handler = new SocketsHttpHandler
         {
@@ -62,9 +66,14 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
         }
 
         var pins = new TlsPins(value.TrustedCertificateSha256, value.TrustedPublicKeySha256);
-        if (pins.Any)
-            handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
-                pins.Accepts(certificate, errors, value.RequireValidCertificateChain);
+        // Installed even without pins (where it keeps the default rule of no policy errors) so the
+        // presented certificate is recorded for diagnostics.
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+        {
+            var accepted = pins.Accepts(certificate, errors, value.RequireValidCertificateChain);
+            identity?.RecordCertificate(certificate, accepted);
+            return accepted;
+        };
         if (!string.IsNullOrWhiteSpace(value.ClientCertificatePath))
         {
             handler.SslOptions.ClientCertificates =

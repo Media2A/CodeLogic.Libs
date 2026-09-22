@@ -12,7 +12,7 @@ using FluentFTP.Exceptions;
 namespace CL.Storage.Providers.Ftp;
 
 /// <summary>Root-scoped storage over FTP, explicit FTPS, or implicit FTPS.</summary>
-public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageChecksumService, IStorageAppendService, IStorageCommandService, IStorageSpaceService
+public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageChecksumService, IStorageAppendService, IStorageCommandService, IStorageSpaceService, IStorageDiagnosticsSource
 {
     private static readonly StorageCapabilities FtpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -93,6 +93,42 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     }
 
     internal ProviderPoolStats PoolStats => _clients.Stats;
+
+    /// <summary>Records the certificate each session is offered; set by the factory.</summary>
+    internal ServerIdentityRecorder? Identity { get; init; }
+
+    StorageServerIdentity? IStorageDiagnosticsSource.PresentedIdentity => Identity?.Last;
+
+    StorageSessionPoolStats? IStorageDiagnosticsSource.PoolStats => StorageEndpoints.ToPublic(_clients.Stats);
+
+    async Task<Result<StorageServerDetails>> IStorageDiagnosticsSource.GetServerDetailsAsync(CancellationToken cancellationToken)
+    {
+        AsyncFtpClient? client = null;
+        try
+        {
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            var negotiated = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (client.IsEncrypted)
+            {
+                negotiated["tls"] = client.SslProtocol.ToString();
+                if (client.SslCipherSuite is { } cipher)
+                    negotiated["cipher"] = cipher.ToString();
+            }
+            var features = client.Capabilities
+                .Where(capability => capability != FtpCapability.NONE)
+                .Select(capability => capability.ToString())
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            return Result<StorageServerDetails>.Success(new StorageServerDetails(
+                string.IsNullOrWhiteSpace(client.SystemType) ? null : client.SystemType,
+                client.ServerType == FtpServer.Unknown ? null : client.ServerType.ToString(),
+                features,
+                negotiated));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageServerDetails>.Failure(Fail(client, error, "Read FTP server details")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+    }
 
     /// <inheritdoc />
     public string ConnectionId { get; }

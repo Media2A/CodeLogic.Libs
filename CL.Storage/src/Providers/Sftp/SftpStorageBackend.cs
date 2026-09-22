@@ -14,7 +14,7 @@ using Renci.SshNet.Sftp;
 namespace CL.Storage.Providers.Sftp;
 
 /// <summary>Root-scoped storage over SSH File Transfer Protocol.</summary>
-public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageCommandService, IStorageSpaceService
+public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageCommandService, IStorageSpaceService, IStorageDiagnosticsSource
 {
     private static readonly StorageCapabilities SftpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -88,6 +88,52 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
     }
 
     internal ProviderPoolStats PoolStats => _clients.Stats;
+
+    /// <summary>Records the host key each session is offered; set by the factory.</summary>
+    internal ServerIdentityRecorder? Identity { get; init; }
+
+    StorageServerIdentity? IStorageDiagnosticsSource.PresentedIdentity => Identity?.Last;
+
+    StorageSessionPoolStats? IStorageDiagnosticsSource.PoolStats => StorageEndpoints.ToPublic(_clients.Stats);
+
+    async Task<Result<StorageServerDetails>> IStorageDiagnosticsSource.GetServerDetailsAsync(CancellationToken cancellationToken)
+    {
+        SftpClient? client = null;
+        try
+        {
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            var info = client.ConnectionInfo;
+            var negotiated = new Dictionary<string, string>(StringComparer.Ordinal);
+            void Add(string key, string? value)
+            {
+                if (!string.IsNullOrWhiteSpace(value)) negotiated[key] = value;
+            }
+            Add("kex", info.CurrentKeyExchangeAlgorithm);
+            Add("hostKey", info.CurrentHostKeyAlgorithm);
+            Add("cipher", info.CurrentServerEncryption);
+            Add("mac", info.CurrentServerHmacAlgorithm);
+            Add("compression", info.CurrentServerCompressionAlgorithm);
+            Add("sftp", client.ProtocolVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return Result<StorageServerDetails>.Success(new StorageServerDetails(
+                string.IsNullOrWhiteSpace(info.ServerVersion) ? null : info.ServerVersion,
+                SoftwareOf(info.ServerVersion),
+                [],
+                negotiated));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageServerDetails>.Failure(Fail(client, error, "Read SFTP server details")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+    }
+
+    /// <summary>Reads the software part of an SSH version string, such as <c>OpenSSH_9.6</c> from <c>SSH-2.0-OpenSSH_9.6 Ubuntu</c>.</summary>
+    internal static string? SoftwareOf(string? serverVersion)
+    {
+        if (string.IsNullOrWhiteSpace(serverVersion)) return null;
+        var parts = serverVersion.Split('-', 3);
+        if (parts.Length < 3) return null;
+        var software = parts[2].Split(' ', 2)[0];
+        return software.Length == 0 ? null : software;
+    }
 
     /// <inheritdoc />
     public string ConnectionId { get; }
