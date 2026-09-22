@@ -1,4 +1,5 @@
 using CL.Storage.Models;
+using CL.Storage.Queue;
 using CodeLogic.Core.Events;
 
 namespace CL.Storage.Events;
@@ -167,5 +168,50 @@ public sealed record StorageConnectionRetryEvent(
     string Operation,
     int Attempt,
     TimeSpan Delay,
+    string ErrorCode,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a queued transfer job starts an attempt.</summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job does.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="Timestamp">UTC start time.</param>
+public sealed record StorageTransferStartedEvent(
+    Guid JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a queued transfer job completes.</summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job did.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="Attempts">Attempts it took, including automatic retries.</param>
+/// <param name="Timestamp">UTC completion time.</param>
+public sealed record StorageTransferCompletedEvent(
+    Guid JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
+    int Attempts,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a queued transfer job fails for good (after any automatic retries).</summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job did.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="Attempts">Attempts made.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> code of the last failure.</param>
+/// <param name="Timestamp">UTC failure time.</param>
+public sealed record StorageTransferFailedEvent(
+    Guid JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
+    int Attempts,
     string ErrorCode,
     DateTimeOffset Timestamp) : IEvent;

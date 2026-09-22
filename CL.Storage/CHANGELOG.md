@@ -76,6 +76,9 @@
 
 ### Added
 
+- `StorageLibrary.CreateTransferQueue`: a background queue with global and per-connection concurrency,
+  priorities, pause/resume, cancellation, automatic re-queueing of transient failures, a retryable
+  failed list, progress and state events, and started/completed/failed bus events.
 - `Progress` on upload, download, and transfer options, with speed, remaining time, and the current
   file; relayed directory transfers report one running total.
 - Per-connection `TransferLimits` and library-wide `MaxTotalUploadBytesPerSecond` /

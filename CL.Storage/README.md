@@ -446,6 +446,31 @@ Speed limits are set per connection and shared by all of its concurrent transfer
 `StorageConfig.MaxTotalUploadBytesPerSecond` and `MaxTotalDownloadBytesPerSecond` cap all
 connections together. Limits also apply to relayed transfers between connections.
 
+### Transfer queue
+
+`CreateTransferQueue` runs transfers in the background, like FileZilla's queue:
+
+```csharp
+await using var queue = library.CreateTransferQueue(new StorageTransferQueueOptions
+{
+    MaxConcurrentTransfers = 4,
+    MaxTransfersPerConnection = 2,
+    AutomaticRetries = 2
+});
+queue.ProgressChanged += job => Console.WriteLine($"{job.Destination}: {job.Progress?.BytesTransferred:N0} B");
+queue.EnqueueUploadDirectory(@"C:\exports", "sftp", "incoming");
+var urgent = queue.EnqueueCopy("s3", "reports/q3.pdf", "sftp", "outbox/q3.pdf", priority: StorageTransferPriority.High);
+await queue.WaitForIdleAsync();
+foreach (var failed in queue.FailedJobs) Console.WriteLine($"{failed.Source}: {failed.Error?.Code}");
+queue.RetryFailed();
+```
+
+Jobs cover copies, moves, and file and directory uploads and downloads. The queue respects a global
+and a per-connection limit, starts `High` priority jobs first, supports `Pause`/`Resume`/`Cancel`, and
+re-queues transient failures automatically before moving a job to `FailedJobs`. `JobChanged` and
+`ProgressChanged` suit a UI; `StorageTransferStartedEvent`, `StorageTransferCompletedEvent`, and
+`StorageTransferFailedEvent` go to the event bus. Jobs live in memory only.
+
 ### Links in transfers
 
 Relayed copies and moves (across connections, or directory copies) meet links as provider-specific

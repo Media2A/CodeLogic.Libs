@@ -995,6 +995,21 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return result;
     }
 
+    /// <summary>
+    /// Creates a background transfer queue over this library's connections, with concurrency limits,
+    /// priorities, pause and resume, cancellation, and automatic retries. Dispose it to stop its jobs.
+    /// </summary>
+    /// <param name="options">Queue limits; defaults to two transfers at once, two per connection.</param>
+    /// <returns>A new, empty queue.</returns>
+    public Queue.StorageTransferQueue CreateTransferQueue(Queue.StorageTransferQueueOptions? options = null)
+    {
+        options ??= new Queue.StorageTransferQueueOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure)
+            throw new ArgumentException(validation.Error!.Message, nameof(options));
+        return new Queue.StorageTransferQueue(this, options);
+    }
+
     /// <summary>Returns an immutable snapshot containing sanitized connection information.</summary>
     public IReadOnlyList<StorageConnectionInfo> GetConnections()
     {
