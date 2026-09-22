@@ -22,6 +22,9 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         StorageFeature.DirectoryMove |
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
+        // A rename on the server (RNFR/RNTO, SFTP rename, WebDAV MOVE) moves a whole tree in one step,
+        // so folder moves no longer fall back to copy-then-delete through the client.
+        StorageFeature.AtomicMove |
         StorageFeature.ConditionalCreate |
         StorageFeature.AtomicReplace |
         StorageFeature.MetadataRead);

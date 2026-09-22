@@ -55,6 +55,38 @@ internal static class StorageContract
         Assert.False((await storage.ExistsAsync(dir)).Value);
     }
 
+    /// <summary>Renames a folder tree natively and checks every file arrived and the source is gone.</summary>
+    public static async Task DirectoryMoveAsync(IStorageBackend storage)
+    {
+        Assert.True(storage.Capabilities.Supports(StorageFeature.DirectoryMove | StorageFeature.AtomicMove));
+        var dir = $"cl-move-{Guid.NewGuid():N}";
+        try
+        {
+            foreach (var file in new[] { "a.txt", "sub/b.txt", "sub/deeper/c.txt" })
+                Assert.True((await storage.UploadBytesAsync($"{dir}/src/{file}", Encoding.UTF8.GetBytes(file))).IsSuccess);
+
+            var moved = await storage.MoveAsync($"{dir}/src", $"{dir}/renamed");
+            Assert.True(moved.IsSuccess, moved.Error?.ToString());
+
+            Assert.False((await storage.ExistsAsync($"{dir}/src")).Value);
+            foreach (var file in new[] { "a.txt", "sub/b.txt", "sub/deeper/c.txt" })
+                Assert.Equal(file, Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/renamed/{file}")).Value!));
+
+            Assert.True((await storage.UploadBytesAsync($"{dir}/other/x.txt", [1])).IsSuccess);
+            var blocked = await storage.MoveAsync($"{dir}/renamed", $"{dir}/other", new StorageTransferOptions { Overwrite = false });
+            Assert.Equal(StorageErrors.ConflictCode, blocked.Error?.Code);
+
+            var replaced = await storage.MoveAsync($"{dir}/renamed", $"{dir}/other", new StorageTransferOptions { Overwrite = true });
+            Assert.True(replaced.IsSuccess, replaced.Error?.ToString());
+            Assert.False((await storage.ExistsAsync($"{dir}/other/x.txt")).Value);
+            Assert.True((await storage.ExistsAsync($"{dir}/other/sub/deeper/c.txt")).Value);
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
     public static async Task MissingItemIsNotFoundAsync(IStorageBackend storage)
     {
         var info = await storage.GetInfoAsync($"missing-{Guid.NewGuid():N}.txt");

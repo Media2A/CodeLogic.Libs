@@ -36,6 +36,10 @@
 
 ### Changed (breaking)
 
+- FTP, SFTP, and WebDAV now declare `AtomicMove`, so renaming a folder through the library uses a
+  single server-side rename (RNFR/RNTO, SFTP rename, WebDAV MOVE) instead of copying the whole tree
+  through the client and deleting the original.
+
 - SFTP no longer requires `HostKeyFingerprints` when `KnownHostsPath` is set.
 
 - `FtpStorageBackend`, `SftpStorageBackend`, and `WebDavStorageBackend` constructors take optional

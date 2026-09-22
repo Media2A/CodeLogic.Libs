@@ -180,3 +180,19 @@ public sealed class AttributeTests
     private static LocalStorageBackend Local(string root, bool followLinks = false) =>
         new("local", new LocalConnectionConfig { RootPath = root, FollowLinks = followLinks });
 }
+
+public sealed class NativeFolderMoveTests
+{
+    [Fact]
+    public async Task Session_and_webdav_backends_advertise_native_folder_moves()
+    {
+        const StorageFeature nativeFolderMove = StorageFeature.DirectoryMove | StorageFeature.ServerSideMove | StorageFeature.AtomicMove;
+        await using var ftp = new FtpStorageBackend("ftp", () => new FluentFTP.AsyncFtpClient("localhost"));
+        await using var sftp = new CL.Storage.Providers.Sftp.SftpStorageBackend("sftp", () => new Renci.SshNet.SftpClient("localhost", "u", "p"));
+        await using var webDav = new CL.Storage.Providers.WebDav.WebDavStorageBackend("dav", new WebDAVClient.Client(new HttpClient()));
+
+        Assert.True(ftp.Capabilities.Supports(nativeFolderMove));
+        Assert.True(sftp.Capabilities.Supports(nativeFolderMove));
+        Assert.True(webDav.Capabilities.Supports(nativeFolderMove));
+    }
+}
