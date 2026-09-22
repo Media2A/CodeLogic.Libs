@@ -13,6 +13,29 @@
 
 ## Unreleased
 
+### Changed (breaking)
+
+- Split coarse failures into precise error codes: `storage.authentication_failed`,
+  `storage.permission_denied`, `storage.tls_failure`, `storage.host_key_rejected`,
+  `storage.connection_failed`, `storage.connection_lost`, `storage.server_busy`, and
+  `storage.quota_exceeded`. Code that compared against `storage.unauthorized` or
+  `storage.unavailable` for provider failures must also accept the new codes; see `MIGRATION.md`.
+- FTP errors are now classified from the server reply code (421, 425/426, 450/550, 452/552,
+  530, 553, ...) instead of collapsing to `storage.provider_error`. TLS failures are no longer
+  reported as credential failures.
+- SFTP reports an untrusted host key as `storage.host_key_rejected` with the presented fingerprint
+  in `Details`, and distinguishes refused connections, dropped sessions, and too-many-sessions.
+- WebDAV, S3, Azure Blob, Google Cloud Storage, and Swift share one HTTP status mapping: 401 vs 403
+  are distinguished, 429/503 become `storage.server_busy` (carrying `retryAfterMs` when the server
+  sent `Retry-After`), and 507 becomes `storage.quota_exceeded`.
+- A full local disk now returns `storage.quota_exceeded`, and local access denial returns
+  `storage.permission_denied`.
+
+### Added
+
+- `StorageErrorInfo` with `IsTransient`, `IsConnectionFault`, `TryGetRetryAfter`, and `TryGetDetail`
+  for retry decisions and provider diagnostics (`ftpReply`, `sftpStatus`, `httpStatus`).
+
 ### Added
 
 - Added mounted local/UNC, S3-compatible, FTP/FTPS, SFTP, WebDAV, Azure Blob, Google Cloud

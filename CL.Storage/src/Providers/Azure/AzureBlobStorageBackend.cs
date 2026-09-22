@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -785,17 +786,21 @@ public sealed class AzureBlobStorageBackend :
     {
         if (exception is RequestFailedException azure)
         {
-            return azure.Status switch
+            if (azure.Status == 403 && azure.ErrorCode is "AuthenticationFailed" or "InvalidAuthenticationInfo")
+                return StorageErrors.AuthenticationFailed(
+                    $"{operation}: Azure Blob rejected the credentials.",
+                    ProviderErrorMapper.Details(StorageErrorInfo.HttpStatusKey, "403", azure.ErrorCode));
+            if (azure.Status > 0)
             {
-                401 or 403 => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                404 => StorageErrors.NotFound($"{operation}: item was not found."),
-                408 or 504 => StorageErrors.Timeout($"{operation}: operation timed out."),
-                409 or 412 => StorageErrors.Conflict($"{operation}: Azure Blob conflict."),
-                429 or >= 500 => StorageErrors.Unavailable($"{operation}: Azure Blob service is unavailable."),
-                _ => StorageErrors.ProviderError($"{operation}: Azure Blob request failed.", azure.ErrorCode ?? string.Empty)
-            };
+                TimeSpan? retryAfter = null;
+                var response = azure.GetRawResponse();
+                if (response is not null && response.Headers.TryGetValue("Retry-After", out var header) &&
+                    int.TryParse(header, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds))
+                    retryAfter = TimeSpan.FromSeconds(seconds);
+                return ProviderErrorMapper.FromHttpStatus(azure.Status, operation, "Azure Blob", retryAfter, azure.ErrorCode);
+            }
         }
-        if (exception is TimeoutException or TaskCanceledException) return StorageErrors.Timeout($"{operation}: operation timed out.");
-        return StorageErrors.ProviderError($"{operation}: Azure Blob provider failed.");
+        return ProviderErrorMapper.FromTransport(exception, operation, "Azure Blob")
+            ?? StorageErrors.ProviderError($"{operation}: Azure Blob provider failed.");
     }
 }

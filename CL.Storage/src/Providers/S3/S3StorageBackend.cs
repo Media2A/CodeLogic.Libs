@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -1058,21 +1059,25 @@ public sealed class S3StorageBackend :
             return StorageErrors.TooLarge($"{operation}: the multipart upload exceeds 10,000 parts.");
         if (exception is AmazonS3Exception s3)
         {
-            if (IsNotFound(s3)) return StorageErrors.NotFound($"{operation}: item was not found.");
-            if (s3.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden ||
-                s3.ErrorCode is "AccessDenied" or "InvalidAccessKeyId" or "SignatureDoesNotMatch")
-                return StorageErrors.Unauthorized($"{operation}: access was denied.");
-            if (s3.StatusCode is HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed)
-                return StorageErrors.Conflict($"{operation}: provider conflict.");
-            if ((int)s3.StatusCode >= 500 || s3.StatusCode == (HttpStatusCode)429)
-                return StorageErrors.Unavailable($"{operation}: S3 service is unavailable.");
-            return StorageErrors.ProviderError($"{operation}: S3 request failed.", s3.ErrorCode ?? string.Empty);
+            var details = ProviderErrorMapper.Details(
+                StorageErrorInfo.HttpStatusKey, ((int)s3.StatusCode).ToString(CultureInfo.InvariantCulture), s3.ErrorCode);
+            if (IsNotFound(s3)) return StorageErrors.NotFound($"{operation}: item was not found.", details);
+            if (s3.ErrorCode is "InvalidAccessKeyId" or "SignatureDoesNotMatch" or "ExpiredToken" or "InvalidToken")
+                return StorageErrors.AuthenticationFailed($"{operation}: S3 rejected the credentials.", details);
+            if (s3.ErrorCode is "AccessDenied" or "AllAccessDisabled")
+                return StorageErrors.PermissionDenied($"{operation}: access was denied.", details);
+            if (s3.ErrorCode is "SlowDown" or "RequestLimitExceeded" or "ServiceUnavailable")
+                return StorageErrors.ServerBusy($"{operation}: S3 is throttling requests.", details);
+            if (s3.ErrorCode is "QuotaExceeded")
+                return StorageErrors.QuotaExceeded($"{operation}: the S3 storage quota was exceeded.", details);
+            if (s3.ErrorCode is "EntityTooLarge")
+                return StorageErrors.TooLarge($"{operation}: S3 rejected the object size.", details);
+            if ((int)s3.StatusCode > 0)
+                return ProviderErrorMapper.FromHttpStatus((int)s3.StatusCode, operation, "S3", providerCode: s3.ErrorCode);
+            return StorageErrors.ProviderError($"{operation}: S3 request failed.", details);
         }
-        if (exception is TimeoutException or TaskCanceledException)
-            return StorageErrors.Timeout($"{operation}: operation timed out.");
-        if (exception is HttpRequestException)
-            return StorageErrors.Unavailable($"{operation}: S3 service is unavailable.");
-        return StorageErrors.ProviderError($"{operation}: S3 provider failed.");
+        return ProviderErrorMapper.FromTransport(exception, operation, "S3")
+            ?? StorageErrors.ProviderError($"{operation}: S3 provider failed.");
     }
 
     private static string EncodeVersionContinuation(S3VersionContinuation continuation) =>

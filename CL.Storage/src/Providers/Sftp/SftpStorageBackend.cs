@@ -6,6 +6,7 @@ using CL.Storage.Providers.Local;
 using CodeLogic.Core.Results;
 using Renci.SshNet;
 using Renci.SshNet.Common;
+using Renci.SshNet.Messages.Transport;
 using Renci.SshNet.Sftp;
 
 namespace CL.Storage.Providers.Sftp;
@@ -43,7 +44,7 @@ public sealed class SftpStorageBackend : IStorageBackend
         ConnectionId = connectionId;
         _clients = new ProviderClientPool<SftpClient>(
             clientFactory,
-            static (client, token) => client.ConnectAsync(token),
+            SftpHostKeyTracker.ConnectAsync,
             static client => client.IsConnected,
             DestroyClientAsync);
         _paths = new RemotePathResolver(root);
@@ -684,12 +685,73 @@ public sealed class SftpStorageBackend : IStorageBackend
 
     private static string NameOf(string path) => path.Split('/')[^1];
 
-    private static Error Map(Exception exception, string operation) => exception switch
+    internal static Error Map(Exception exception, string operation)
     {
-        SftpPathNotFoundException => StorageErrors.NotFound($"{operation}: item was not found."),
-        SftpPermissionDeniedException or SshAuthenticationException => StorageErrors.Unauthorized($"{operation}: access was denied."),
-        SshOperationTimeoutException or TimeoutException or TaskCanceledException => StorageErrors.Timeout($"{operation}: operation timed out."),
-        SshConnectionException => StorageErrors.Unavailable($"{operation}: SFTP service is unavailable."),
-        _ => StorageErrors.ProviderError($"{operation}: SFTP provider failed.")
-    };
+        switch (exception)
+        {
+            case SftpHostKeyRejectedException rejected:
+                return StorageErrors.HostKeyRejected(
+                    $"{operation}: the SSH host key was not trusted.",
+                    $"presentedFingerprint={rejected.Fingerprint}");
+            case SftpPathNotFoundException:
+                return StorageErrors.NotFound($"{operation}: item was not found.");
+            case SftpPermissionDeniedException:
+                return StorageErrors.PermissionDenied($"{operation}: access was denied.");
+            case SshAuthenticationException:
+                return StorageErrors.AuthenticationFailed($"{operation}: the SSH server rejected the credentials.");
+            case SshOperationTimeoutException:
+                return StorageErrors.Timeout($"{operation}: operation timed out.");
+            case ProxyException:
+                return StorageErrors.ConnectionFailed($"{operation}: could not connect through the proxy.");
+            case SftpException sftp:
+                return MapStatus(sftp, operation);
+            case SshConnectionException connection:
+                return MapDisconnect(connection, operation);
+        }
+        if (ProviderErrorMapper.FromTransport(exception, operation, "SFTP") is { } transport)
+            return transport;
+        if (exception is SshException && IsQuotaMessage(exception.Message))
+            return StorageErrors.QuotaExceeded($"{operation}: the SFTP server has insufficient storage.");
+        if (exception is ObjectDisposedException)
+            return StorageErrors.ConnectionLost($"{operation}: the SFTP connection was lost.");
+        return StorageErrors.ProviderError($"{operation}: SFTP provider failed.");
+    }
+
+    private static Error MapStatus(SftpException sftp, string operation)
+    {
+        var details = $"{StorageErrorInfo.SftpStatusKey}={sftp.StatusCode}";
+        return sftp.StatusCode switch
+        {
+            StatusCode.NoSuchFile => StorageErrors.NotFound($"{operation}: item was not found.", details),
+            StatusCode.PermissionDenied => StorageErrors.PermissionDenied($"{operation}: access was denied.", details),
+            StatusCode.NoConnection or StatusCode.ConnectionLost => StorageErrors.ConnectionLost($"{operation}: the SFTP connection was lost.", details),
+            StatusCode.OperationUnsupported => StorageErrors.Unsupported($"{operation}: the SFTP server does not support this operation.", details),
+            StatusCode.Failure when IsQuotaMessage(sftp.Message) => StorageErrors.QuotaExceeded($"{operation}: the SFTP server has insufficient storage.", details),
+            _ => StorageErrors.ProviderError($"{operation}: SFTP request failed.", details)
+        };
+    }
+
+    private static Error MapDisconnect(SshConnectionException connection, string operation)
+    {
+        var details = $"disconnectReason={connection.DisconnectReason}";
+        return connection.DisconnectReason switch
+        {
+            DisconnectReason.HostKeyNotVerifiable => StorageErrors.HostKeyRejected($"{operation}: the SSH host key was not trusted.", details),
+            DisconnectReason.TooManyConnections => StorageErrors.ServerBusy($"{operation}: the SSH server has too many sessions.", details),
+            DisconnectReason.NoMoreAuthenticationMethodsAvailable or DisconnectReason.IllegalUserName or DisconnectReason.AuthenticationCanceledByUser
+                => StorageErrors.AuthenticationFailed($"{operation}: the SSH server rejected the credentials.", details),
+            DisconnectReason.HostNotAllowedToConnect or DisconnectReason.ProtocolVersionNotSupported
+                => StorageErrors.ConnectionFailed($"{operation}: the SSH server refused the connection.", details),
+            DisconnectReason.KeyExchangeFailed
+                => StorageErrors.ConnectionFailed($"{operation}: SSH key exchange failed; check host key and algorithm settings.", details),
+            DisconnectReason.ServiceNotAvailable => StorageErrors.Unavailable($"{operation}: the SFTP subsystem is unavailable.", details),
+            _ => StorageErrors.ConnectionLost($"{operation}: the SFTP connection was lost.", details)
+        };
+    }
+
+    private static bool IsQuotaMessage(string? message) =>
+        message is not null &&
+        (message.Contains("quota", StringComparison.OrdinalIgnoreCase) ||
+         message.Contains("no space", StringComparison.OrdinalIgnoreCase) ||
+         message.Contains("disk full", StringComparison.OrdinalIgnoreCase));
 }

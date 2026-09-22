@@ -46,6 +46,8 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
             eventArgs.CanTrust = value.AutoAcceptHostKey ||
                 (CertificateFingerprint.TryNormalizeSha256(eventArgs.FingerPrintSHA256, out var normalized) &&
                  fingerprints.Contains(normalized));
+            if (!eventArgs.CanTrust)
+                SftpHostKeyTracker.MarkRejected(client, $"SHA256:{eventArgs.FingerPrintSHA256}");
         };
         return client;
     }

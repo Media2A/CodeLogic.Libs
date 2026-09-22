@@ -883,20 +883,10 @@ public sealed class GoogleCloudStorageBackend :
 
     private static Error Map(Exception exception, string operation)
     {
-        if (exception is GoogleApiException google)
-        {
-            return google.HttpStatusCode switch
-            {
-                HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                HttpStatusCode.NotFound => StorageErrors.NotFound($"{operation}: item was not found."),
-                HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout => StorageErrors.Timeout($"{operation}: operation timed out."),
-                HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed => StorageErrors.Conflict($"{operation}: Google Cloud Storage conflict."),
-                HttpStatusCode.TooManyRequests or >= HttpStatusCode.InternalServerError => StorageErrors.Unavailable($"{operation}: Google Cloud Storage is unavailable."),
-                _ => StorageErrors.ProviderError($"{operation}: Google Cloud request failed.", google.HttpStatusCode.ToString())
-            };
-        }
-        if (exception is TimeoutException or TaskCanceledException) return StorageErrors.Timeout($"{operation}: operation timed out.");
-        return StorageErrors.ProviderError($"{operation}: Google Cloud Storage provider failed.");
+        if (exception is GoogleApiException google && (int)google.HttpStatusCode > 0)
+            return ProviderErrorMapper.FromHttpStatus((int)google.HttpStatusCode, operation, "Google Cloud Storage");
+        return ProviderErrorMapper.FromTransport(exception, operation, "Google Cloud Storage")
+            ?? StorageErrors.ProviderError($"{operation}: Google Cloud Storage provider failed.");
     }
 
     private sealed record GcsContinuationToken(string? ProviderPageToken, int Skip);

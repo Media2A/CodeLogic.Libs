@@ -563,24 +563,11 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     private static string NameOf(string path) => path.Split('/')[^1];
     private static bool IsNotFound(WebDAVException error) => error.ErrorCode == 404;
 
-    private static Error Map(Exception exception, string operation)
+    internal static Error Map(Exception exception, string operation)
     {
-        if (exception is WebDAVException webDav)
-        {
-            return webDav.ErrorCode switch
-            {
-                401 or 403 => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                404 => StorageErrors.NotFound($"{operation}: item was not found."),
-                408 or 504 => StorageErrors.Timeout($"{operation}: operation timed out."),
-                409 or 412 or 423 => StorageErrors.Conflict($"{operation}: WebDAV conflict."),
-                >= 500 => StorageErrors.Unavailable($"{operation}: WebDAV service is unavailable."),
-                _ => StorageErrors.ProviderError($"{operation}: WebDAV request failed.", $"status={webDav.ErrorCode}")
-            };
-        }
-        if (exception is TimeoutException or TaskCanceledException)
-            return StorageErrors.Timeout($"{operation}: operation timed out.");
-        if (exception is HttpRequestException)
-            return StorageErrors.Unavailable($"{operation}: WebDAV service is unavailable.");
-        return StorageErrors.ProviderError($"{operation}: WebDAV provider failed.");
+        if (exception is WebDAVException webDav && webDav.ErrorCode > 0)
+            return ProviderErrorMapper.FromHttpStatus(webDav.ErrorCode, operation, "WebDAV");
+        return ProviderErrorMapper.FromTransport(exception, operation, "WebDAV")
+            ?? StorageErrors.ProviderError($"{operation}: WebDAV provider failed.");
     }
 }

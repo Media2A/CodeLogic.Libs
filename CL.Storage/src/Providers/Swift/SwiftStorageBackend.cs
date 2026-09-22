@@ -799,29 +799,19 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
 
     private static string NameOf(string path) => path.Split('/')[^1];
 
-    private static Error FromStatus(HttpResponseMessage response, string operation) => response.StatusCode switch
-    {
-        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => StorageErrors.Unauthorized($"{operation}: access was denied."),
-        HttpStatusCode.NotFound => StorageErrors.NotFound($"{operation}: item was not found."),
-        HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout => StorageErrors.Timeout($"{operation}: operation timed out."),
-        HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed => StorageErrors.Conflict($"{operation}: Swift conflict."),
-        HttpStatusCode.TooManyRequests or >= HttpStatusCode.InternalServerError => StorageErrors.Unavailable($"{operation}: Swift service is unavailable."),
-        _ => StorageErrors.ProviderError($"{operation}: Swift request failed with HTTP {(int)response.StatusCode}.")
-    };
+    private static Error FromStatus(HttpResponseMessage response, string operation) =>
+        ProviderErrorMapper.FromHttpStatus(
+            (int)response.StatusCode,
+            operation,
+            "Swift",
+            ProviderErrorMapper.RetryAfter(response.Headers.RetryAfter));
 
     private static Error Map(Exception exception, string operation)
     {
-        if (exception is HttpRequestException request && request.StatusCode.HasValue)
-            return request.StatusCode.Value switch
-            {
-                HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                HttpStatusCode.NotFound => StorageErrors.NotFound($"{operation}: item was not found."),
-                HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout => StorageErrors.Timeout($"{operation}: operation timed out."),
-                _ => StorageErrors.Unavailable($"{operation}: Swift service is unavailable.")
-            };
-        if (exception is TimeoutException or TaskCanceledException) return StorageErrors.Timeout($"{operation}: operation timed out.");
-        if (exception is HttpRequestException) return StorageErrors.Unavailable($"{operation}: Swift service is unavailable.");
-        return StorageErrors.ProviderError($"{operation}: Swift provider failed.");
+        if (exception is HttpRequestException { StatusCode: { } status })
+            return ProviderErrorMapper.FromHttpStatus((int)status, operation, "Swift");
+        return ProviderErrorMapper.FromTransport(exception, operation, "Swift")
+            ?? StorageErrors.ProviderError($"{operation}: Swift provider failed.");
     }
 
     private sealed record SwiftPage(IReadOnlyList<SwiftListItem> Items, string? NextMarker);
