@@ -580,7 +580,11 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
 
     private string? FromHref(string href)
     {
-        var value = Uri.TryCreate(href, UriKind.Absolute, out var absolute) ? absolute.AbsolutePath : href;
+        // Only http(s) hrefs are absolute: on Unix, Uri also parses "/dir/a%20b" as a file path and keeps
+        // "%20" literal, so names needing escapes would never match.
+        var value = Uri.TryCreate(href, UriKind.Absolute, out var absolute) && (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps)
+            ? absolute.AbsolutePath
+            : href;
         value = Uri.UnescapeDataString(value).Replace('\\', '/');
         if (!value.StartsWith('/')) value = "/" + value;
         if (_basePath != "/" && value.StartsWith(_basePath, StringComparison.OrdinalIgnoreCase))

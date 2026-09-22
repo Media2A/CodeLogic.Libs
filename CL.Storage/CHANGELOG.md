@@ -24,6 +24,8 @@
   matched: the HTTP status is read from `WebDAVException.GetHttpCode()` (with a message fallback)
   instead of `ErrorCode`, which the client leaves at zero.
 - FTP server replies wrapped in FluentFTP's generic `FtpException` are now unwrapped and classified.
+- On Linux and macOS, WebDAV items whose names need URL escaping (spaces, for example) were reported
+  as missing right after being written: server-relative hrefs were parsed as file paths.
 - Public-key (SPKI) pin checks disposed the server certificate they were given, so anything reading
   it later in the TLS callback saw a disposed certificate.
 

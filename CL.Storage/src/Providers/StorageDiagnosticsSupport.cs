@@ -88,7 +88,7 @@ internal static class StorageEndpoints
 
     private static (string?, int?, StorageTransportSecurity) FromUrl(string? url)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             return (null, null, StorageTransportSecurity.Unknown);
         var security = uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
             ? StorageTransportSecurity.Tls
