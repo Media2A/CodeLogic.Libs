@@ -10,6 +10,13 @@ namespace Storage.Integration.Tests;
 public sealed class SftpLiveTests
 {
     [SftpFact]
+    public async Task Append_and_resume_continue_a_partial_file()
+    {
+        await using var storage = LiveServers.Create(LiveServers.Sftp());
+        await StorageContract.AppendAndResumeAsync(storage);
+    }
+
+    [SftpFact]
     public async Task Conflict_policies_apply()
     {
         await using var storage = LiveServers.Create(LiveServers.Sftp());
@@ -112,6 +119,13 @@ public sealed class SftpLiveTests
 
 public sealed class FtpLiveTests
 {
+    [FtpFact]
+    public async Task Append_and_resume_continue_a_partial_file()
+    {
+        await using var storage = LiveServers.Create(LiveServers.Ftp());
+        await StorageContract.AppendAndResumeAsync(storage);
+    }
+
     [FtpFact]
     public async Task Conflict_policies_apply()
     {

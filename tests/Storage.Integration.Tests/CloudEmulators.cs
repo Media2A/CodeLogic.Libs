@@ -193,6 +193,18 @@ public sealed class S3EmulatorTests
     }
 
     [S3Fact]
+    public async Task Resume_is_unsupported_without_append()
+    {
+        await using var storage = await CloudEmulators.CreateAsync(CloudEmulators.S3());
+        var path = $"resume-{Guid.NewGuid():N}.bin";
+        await storage.UploadBytesAsync(path, [1, 2]);
+        var resumed = await storage.UploadAsync(path, new MemoryStream([1, 2, 3, 4]),
+            new CL.Storage.Models.StorageUploadOptions { ConflictPolicy = CL.Storage.Models.StorageConflictPolicy.Resume });
+        Assert.Equal(StorageErrors.UnsupportedCode, resumed.Error?.Code);
+        await storage.DeleteAsync(path);
+    }
+
+    [S3Fact]
     public async Task Missing_items_are_not_found()
     {
         await using var storage = await CloudEmulators.CreateAsync(CloudEmulators.S3());

@@ -122,6 +122,12 @@ public static class StorageServiceExtensions
         try
         {
             var destination = Path.GetFullPath(destinationFilePath);
+            if (conflictPolicy == StorageConflictPolicy.Resume && File.Exists(destination) && options is null or { Offset: 0, Length: null })
+            {
+                var resumed = await ResumeDownloadAsync(storage, sourcePath, destination, options, cancellationToken).ConfigureAwait(false);
+                if (resumed is not null) return resumed.Value;
+                conflictPolicy = StorageConflictPolicy.Overwrite;
+            }
             if (conflictPolicy is not null)
             {
                 var decision = await DecideLocalConflictAsync(storage, sourcePath, destination, conflictPolicy.Value, options, cancellationToken).ConfigureAwait(false);
@@ -179,6 +185,34 @@ public static class StorageServiceExtensions
         }
     }
 
+    /// <summary>
+    /// Continues a partial local download by appending the missing range. Returns null when the local
+    /// file is larger than the remote one, so the caller downloads it again from the start.
+    /// </summary>
+    private static async Task<Result<FileInfo>?> ResumeDownloadAsync(
+        IStorageService storage,
+        string sourcePath,
+        string destination,
+        StorageDownloadOptions? options,
+        CancellationToken cancellationToken)
+    {
+        var remote = await storage.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        if (remote.IsFailure) return Result<FileInfo>.Failure(remote.Error!);
+        var present = new FileInfo(destination).Length;
+        if (remote.Value!.Size is not { } total || present > total) return null;
+        if (present == total) return Result<FileInfo>.Success(new FileInfo(destination));
+
+        var rest = await storage.DownloadAsync(sourcePath, (options ?? new StorageDownloadOptions()) with { Offset = present }, cancellationToken).ConfigureAwait(false);
+        if (rest.IsFailure) return Result<FileInfo>.Failure(rest.Error!);
+        await using (var source = rest.Value!)
+        await using (var target = new FileStream(destination, FileMode.Append, FileAccess.Write, FileShare.None, 65_536, FileOptions.Asynchronous))
+        {
+            await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+            await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        return Result<FileInfo>.Success(new FileInfo(destination));
+    }
+
     /// <summary>Applies a conflict policy to a local download destination.</summary>
     private static async Task<Result<(bool Skip, string Path, bool Overwrite)>> DecideLocalConflictAsync(
         IStorageService storage,
@@ -188,7 +222,7 @@ public static class StorageServiceExtensions
         StorageDownloadOptions? options,
         CancellationToken cancellationToken)
     {
-        if (policy is StorageConflictPolicy.Fail or StorageConflictPolicy.Overwrite || !File.Exists(destination))
+        if (policy is StorageConflictPolicy.Fail or StorageConflictPolicy.Overwrite or StorageConflictPolicy.Resume || !File.Exists(destination))
             return Result<(bool, string, bool)>.Success((false, destination, policy != StorageConflictPolicy.Fail));
         if (policy == StorageConflictPolicy.Skip)
             return Result<(bool, string, bool)>.Success((true, destination, false));
@@ -531,6 +565,50 @@ public static class StorageServiceExtensions
             ? tagService.SetTagsAsync(path, tags, options, cancellationToken)
             : Task.FromResult(Result<StorageItem>.Failure(
                 StorageErrors.Unsupported("This storage connection does not support object tag updates.")));
+    }
+
+    /// <summary>Appends content to a file when the connection supports it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">File path relative to the mounted root.</param>
+    /// <param name="source">Content to append.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>The updated file, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result<StorageItem>> AppendAsync(this IStorageService storage, string path, Stream source, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageAppendService append
+            ? append.AppendAsync(path, source, cancellationToken)
+            : Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Unsupported("This storage connection cannot append.")));
+    }
+
+    /// <summary>
+    /// Deletes the library's own staging and backup items (<c>.cl-storage-*</c>, <c>.clstorage-*</c>)
+    /// under a directory that are older than <paramref name="olderThan"/>, such as leftovers of a crash.
+    /// </summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Directory to scan recursively.</param>
+    /// <param name="olderThan">Minimum age; keep this well above your longest transfer so running transfers are not disturbed.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider requests.</param>
+    /// <returns>The number of items deleted.</returns>
+    public static async Task<Result<int>> CleanupStaleStagingAsync(this IStorageService storage, string path, TimeSpan olderThan, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        var cutoff = DateTimeOffset.UtcNow - olderThan;
+        var stale = new List<StorageItem>();
+        await foreach (var item in storage.EnumerateItemsAsync(path, new StorageListOptions { Recursive = true, IncludeInternal = true }, cancellationToken).ConfigureAwait(false))
+        {
+            if (item.IsFailure) return Result<int>.Failure(item.Error!);
+            if (Providers.StorageListFilter.IsInternal(item.Value!.Name) && item.Value.LastModified is { } modified && modified < cutoff)
+                stale.Add(item.Value);
+        }
+        var deleted = 0;
+        foreach (var item in stale)
+        {
+            var result = await storage.DeleteAsync(item.Path, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+            if (result.IsFailure) return Result<int>.Failure(result.Error!);
+            deleted++;
+        }
+        return Result<int>.Success(deleted);
     }
 
     /// <summary>Sets Unix permission bits when supported by the connection.</summary>

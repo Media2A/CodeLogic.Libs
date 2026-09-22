@@ -62,6 +62,8 @@ internal static class StorageConflictResolver
             StorageConflictPolicy.OverwriteIfNewerOrSizeDiffers => Decide(path, current,
                 IsNewer(sourceModified, current.LastModified) || SizeDiffers(sourceSize, current.Size)),
             StorageConflictPolicy.Rename => await RenameAsync(destination, path, cancellationToken).ConfigureAwait(false),
+            // Outside uploads (for example relayed transfers) a partial file is replaced as a whole.
+            StorageConflictPolicy.Resume => Decide(path, current, SizeDiffers(sourceSize, current.Size)),
             _ => Result<ConflictDecision>.Failure(StorageErrors.InvalidContent("The conflict policy is invalid."))
         };
     }
@@ -81,6 +83,8 @@ internal static class StorageConflictResolver
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
         var normalized = StoragePath.Normalize(path);
         if (normalized.IsFailure) return Result<StorageItem>.Failure(normalized.Error!);
+        if (options.ConflictPolicy == StorageConflictPolicy.Resume)
+            return await ResumeAsync(destination, normalized.Value!, source, options, cancellationToken).ConfigureAwait(false);
         var decision = await ResolveAsync(
             destination,
             normalized.Value!,
@@ -96,6 +100,42 @@ internal static class StorageConflictResolver
             source,
             options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null },
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Continues an upload: appends only the bytes the destination is missing. The destination prefix is
+    /// trusted to match the source, as in FTP REST/APPE resume; verify with a checksum when that matters.
+    /// </summary>
+    private static async Task<Result<StorageItem>> ResumeAsync(
+        IStorageService destination,
+        string path,
+        Stream source,
+        StorageUploadOptions options,
+        CancellationToken cancellationToken)
+    {
+        var fresh = options with { ConflictPolicy = null, Overwrite = true };
+        var existing = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        if (existing.IsFailure)
+        {
+            return existing.Error!.Code == StorageErrors.NotFoundCode
+                ? await destination.UploadAsync(path, source, fresh, cancellationToken).ConfigureAwait(false)
+                : Result<StorageItem>.Failure(existing.Error);
+        }
+        if (existing.Value!.ItemType != StorageItemType.File)
+            return Result<StorageItem>.Failure(StorageErrors.Conflict($"The destination '{path}' is not a file."));
+        if (!source.CanSeek)
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported("Resuming an upload needs a seekable source stream."));
+        if (destination is not IStorageAppendService append || !destination.Capabilities.Supports(StorageFeature.Append))
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported("This storage connection cannot append, so uploads cannot be resumed."));
+
+        var remaining = source.Length - source.Position;
+        var present = existing.Value.Size ?? 0;
+        if (present == remaining)
+            return Result<StorageItem>.Success(existing.Value);
+        if (present > remaining)
+            return await destination.UploadAsync(path, source, fresh, cancellationToken).ConfigureAwait(false);
+        source.Seek(present, SeekOrigin.Current);
+        return await append.AppendAsync(path, source, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Source is newer when it is later by more than the tolerance; unknown times cannot prove it older.</summary>

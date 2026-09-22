@@ -12,7 +12,7 @@ using FluentFTP.Exceptions;
 namespace CL.Storage.Providers.Ftp;
 
 /// <summary>Root-scoped storage over FTP, explicit FTPS, or implicit FTPS.</summary>
-public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageChecksumService
+public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageChecksumService, IStorageAppendService
 {
     private static readonly StorageCapabilities FtpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -25,6 +25,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         // so folder moves no longer fall back to copy-then-delete through the client.
         StorageFeature.AtomicMove |
         StorageFeature.RangeReads |
+        StorageFeature.Append |
         StorageFeature.Checksums |
         StorageFeature.Links |
         StorageFeature.Permissions |
@@ -630,6 +631,31 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             catch (Exception error) { return Result<StorageChecksum>.Failure(Fail(client, error, "Get FTP checksum")); }
             finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
         }, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Uses <c>APPE</c>. Not retried: a lost reply cannot tell whether the bytes were appended.</remarks>
+    public async Task<Result<StorageItem>> AppendAsync(string path, Stream source, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var resolved = _paths.Resolve(path, requireNonRoot: true);
+        if (resolved.IsFailure) return Result<StorageItem>.Failure(resolved.Error!);
+        AsyncFtpClient? client = null;
+        try
+        {
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            // Forward-only, because FluentFTP rewinds seekable streams and would re-send bytes before a resume offset.
+            var status = await client.UploadStream(new ForwardOnlyStream(source), resolved.Value!.RemotePath, FtpRemoteExists.AddToEnd, createRemoteDir: true, progress: null, cancellationToken).ConfigureAwait(false);
+            if (status != FtpStatus.Success)
+                return Result<StorageItem>.Failure(StorageErrors.ProviderError("The FTP server did not accept the append."));
+            var item = await client.GetObjectInfo(resolved.Value.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            return item is null
+                ? Result<StorageItem>.Failure(StorageErrors.NotFound("The appended FTP file was not found."))
+                : Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, item));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Append FTP file")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     private StorageLinkInfo LinkInfo(string rawTarget, string linkParent)

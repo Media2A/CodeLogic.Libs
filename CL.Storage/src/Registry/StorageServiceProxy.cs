@@ -14,7 +14,8 @@ internal sealed class StorageServiceProxy :
     IStorageSignedUrlService,
     IStorageVersionService,
     IStorageAttributeService,
-    IStorageChecksumService
+    IStorageChecksumService,
+    IStorageAppendService
 {
     private readonly StorageLibrary _library;
     private readonly string _connectionId;
@@ -66,6 +67,9 @@ internal sealed class StorageServiceProxy :
         Func<IStorageBackend, string, StorageUploadOptions?, Task<Result<StorageItem>>> upload)
     {
         var validation = options?.Validate() ?? Result.Success();
+        if (options?.ConflictPolicy == StorageConflictPolicy.Resume && validation.IsSuccess)
+            return await UploadPathWithEventAsync(path, validation, cancellationToken,
+                (backend, normalized) => upload(backend, normalized, options)).ConfigureAwait(false);
         if (validation.IsFailure || options?.ConflictPolicy is null)
             return await UploadPathWithEventAsync(path, validation, cancellationToken,
                 (backend, normalized) => upload(backend, normalized, options)).ConfigureAwait(false);
@@ -292,6 +296,11 @@ internal sealed class StorageServiceProxy :
         InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageChecksumService checksums
             ? checksums.GetServerChecksumAsync(normalized, algorithm, cancellationToken)
             : Task.FromResult(Result<StorageChecksum>.Failure(StorageErrors.Unsupported("This storage connection does not report server checksums."))));
+
+    public Task<Result<StorageItem>> AppendAsync(string path, Stream source, CancellationToken cancellationToken = default) =>
+        UploadPathWithEventAsync(path, Result.Success(), cancellationToken, (backend, normalized) => backend is IStorageAppendService append
+            ? append.AppendAsync(normalized, source, cancellationToken)
+            : Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Unsupported("This storage connection cannot append."))));
 
     public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default) =>
         InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes

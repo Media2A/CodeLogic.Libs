@@ -11,7 +11,7 @@ using CodeLogic.Core.Results;
 namespace CL.Storage.Providers.Local;
 
 /// <summary>Provides storage operations over a local path or mounted UNC root.</summary>
-public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeService
+public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService
 {
     /// <inheritdoc />
     public const long DefaultMaxBufferedDownloadBytes = 67_108_864;
@@ -26,6 +26,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         StorageFeature.AtomicReplace |
         StorageFeature.ConditionalCreate |
         StorageFeature.RangeReads |
+        StorageFeature.Append |
         StorageFeature.Links |
         StorageFeature.SetTimestamps |
         StorageFeature.CreateLinks |
@@ -687,6 +688,30 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         catch (Exception error) when (error is not OperationCanceledException)
         {
             return Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.FromException(error, "Read link")));
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<Result<StorageItem>> AppendAsync(string path, Stream source, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure) return Result<StorageItem>.Failure(resolved.Error!);
+        if (resolved.Value!.StoragePath.Length == 0)
+            return Result<StorageItem>.Failure(StorageErrors.InvalidPath("A file path is required."));
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(resolved.Value.FullPath)!);
+            await using (var target = new FileStream(resolved.Value.FullPath, FileMode.Append, FileAccess.Write, FileShare.None, 65_536, FileOptions.Asynchronous))
+                await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+            return CreateItem(resolved.Value.StoragePath, resolved.Value.FullPath) is { } item
+                ? Result<StorageItem>.Success(item)
+                : Result<StorageItem>.Failure(StorageErrors.NotFound("The appended file disappeared."));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error)
+        {
+            return Result<StorageItem>.Failure(StorageErrors.FromException(error, "Append file"));
         }
     }
 

@@ -243,7 +243,13 @@ public enum StorageConflictPolicy
     /// <summary>Replaces the destination when the source is newer or the sizes differ.</summary>
     OverwriteIfNewerOrSizeDiffers,
     /// <summary>Writes to the first free name <c>name (1).ext</c>, <c>name (2).ext</c>, … instead.</summary>
-    Rename
+    Rename,
+    /// <summary>
+    /// Continues an interrupted upload: when the destination is a shorter prefix, only the missing tail is
+    /// appended. A destination of equal size is left alone and a larger one is overwritten. Needs a seekable
+    /// source and <see cref="StorageFeature.Append"/>; resumed bytes are written in place, not staged.
+    /// </summary>
+    Resume
 }
 
 /// <summary>How relayed transfers treat symbolic links.</summary>

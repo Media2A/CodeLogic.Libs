@@ -416,6 +416,15 @@ Console.WriteLine($"{report.Value!.Files} uploaded, {report.Value.SkippedFiles} 
 - Conditional policies on copy and move are applied by `StorageLibrary` and its connections, not by a
   backend's own `CopyAsync`/`MoveAsync`.
 
+### Resume and append
+
+`ConflictPolicy = Resume` continues an interrupted upload by appending only what the destination is
+missing (FTP `APPE`, SFTP append mode, local files); a complete destination is left alone. The
+source must be seekable, and resumed bytes are written in place rather than staged, so check a
+checksum afterwards when integrity matters. `DownloadToFileAsync(..., conflictPolicy: Resume)`
+continues a partial local file with a ranged download. `AppendAsync` appends to a file directly,
+for example a log, and `CleanupStaleStagingAsync` removes staging leftovers of crashed transfers.
+
 ### Links in transfers
 
 Relayed copies and moves (across connections, or directory copies) meet links as provider-specific

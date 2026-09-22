@@ -74,6 +74,8 @@
 
 ### Added
 
+- `IStorageAppendService.AppendAsync` (Local, FTP, SFTP), `StorageConflictPolicy.Resume` for
+  interrupted uploads and `DownloadToFileAsync`, and `CleanupStaleStagingAsync`.
 - `StorageConflictPolicy` (`Fail`, `Overwrite`, `Skip`, `OverwriteIfNewer`, `OverwriteIfSizeDiffers`,
   `OverwriteIfNewerOrSizeDiffers`, `Rename`) on uploads, transfers, directory uploads/downloads, and
   `DownloadToFileAsync`, with `SkippedFiles` in directory reports and partial moves that keep skipped

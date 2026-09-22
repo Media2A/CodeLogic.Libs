@@ -117,6 +117,28 @@ internal static class StorageContract
         }
     }
 
+    /// <summary>Append and resume continue a partial file on providers that support appending.</summary>
+    public static async Task AppendAndResumeAsync(IStorageBackend storage)
+    {
+        var dir = $"cl-resume-{Guid.NewGuid():N}";
+        var full = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Range(0, 5000).Select(i => (char)('a' + i % 26))));
+        try
+        {
+            Assert.True((await storage.UploadBytesAsync($"{dir}/big.bin", full[..1234])).IsSuccess);
+            var resumed = await storage.UploadAsync($"{dir}/big.bin", new MemoryStream(full), new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume });
+            Assert.True(resumed.IsSuccess, resumed.Error?.ToString());
+            Assert.Equal(full, (await storage.DownloadBytesAsync($"{dir}/big.bin")).Value);
+
+            Assert.True((await storage.AppendAsync($"{dir}/log.txt", new MemoryStream(Encoding.UTF8.GetBytes("one|")))).IsSuccess);
+            Assert.True((await storage.AppendAsync($"{dir}/log.txt", new MemoryStream(Encoding.UTF8.GetBytes("two|")))).IsSuccess);
+            Assert.Equal("one|two|", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/log.txt")).Value!));
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
     public static async Task MissingItemIsNotFoundAsync(IStorageBackend storage)
     {
         var info = await storage.GetInfoAsync($"missing-{Guid.NewGuid():N}.txt");

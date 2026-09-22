@@ -14,7 +14,7 @@ using Renci.SshNet.Sftp;
 namespace CL.Storage.Providers.Sftp;
 
 /// <summary>Root-scoped storage over SSH File Transfer Protocol.</summary>
-public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService
+public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService
 {
     private static readonly StorageCapabilities SftpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -27,6 +27,7 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         // so folder moves no longer fall back to copy-then-delete through the client.
         StorageFeature.AtomicMove |
         StorageFeature.RangeReads |
+        StorageFeature.Append |
         StorageFeature.Links |
         StorageFeature.Permissions |
         StorageFeature.Ownership |
@@ -558,6 +559,27 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
     public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default) =>
         Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.Unsupported(
             "Reading SFTP link targets is not supported by the SSH library.")));
+
+    /// <inheritdoc />
+    /// <remarks>Not retried: a lost reply cannot tell how many bytes were appended.</remarks>
+    public async Task<Result<StorageItem>> AppendAsync(string path, Stream source, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var resolved = _paths.Resolve(path, requireNonRoot: true);
+        if (resolved.IsFailure) return Result<StorageItem>.Failure(resolved.Error!);
+        SftpClient? client = null;
+        try
+        {
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            await using (var target = await client.OpenAsync(resolved.Value!.RemotePath, FileMode.Append, FileAccess.Write, cancellationToken).ConfigureAwait(false))
+                await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+            var attributes = await client.GetAttributesAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
+            return Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, attributes));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Append SFTP file")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+    }
 
     /// <summary>Reads an item's attributes, applies a change, and writes back only what changed.</summary>
     private Task<Result> ChangeAttributesAsync(string path, string operation, Action<SftpFileAttributes> change, CancellationToken cancellationToken) =>
