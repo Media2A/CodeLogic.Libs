@@ -471,6 +471,35 @@ re-queues transient failures automatically before moving a job to `FailedJobs`. 
 `ProgressChanged` suit a UI; `StorageTransferStartedEvent`, `StorageTransferCompletedEvent`, and
 `StorageTransferFailedEvent` go to the event bus. Jobs live in memory only.
 
+### Compare and sync
+
+```csharp
+var diff = await library.CompareAsync("sftp", "site", "s3", "backup/site");
+foreach (var entry in diff.Value!.Entries.Where(e => e.Kind != StorageDiffKind.Same))
+    Console.WriteLine($"{entry.Kind,-18} {entry.Reasons,-12} {entry.RelativePath}");
+
+var report = await library.SyncAsync("sftp", "site", "s3", "backup/site", new StorageSyncOptions
+{
+    Direction = StorageSyncDirection.Mirror,
+    DeleteExtraneous = true,
+    DryRun = true
+});
+```
+
+`CompareAsync` and `SyncAsync` also work between any two `IStorageService` instances, such as a
+`LocalStorageBackend` over a local folder. Comparison uses size and modification time by default
+(two-second tolerance) and can add checksums. Sync directions:
+
+- `Update` copies new and changed files and never deletes; it will not replace a newer destination
+  that has the same size.
+- `Mirror` makes the destination match the source, deleting extra items with `DeleteExtraneous`.
+- `TwoWay` copies each file toward the side where it is missing or older, without deletes.
+
+Copied files keep the source's modification time where the destination supports it. On services
+that cannot (S3, Azure, GCS, Swift) a copy is newer than its source, and "changed" means "source
+newer", so repeated syncs stay no-ops. Per-file failures are collected in `Failed`. `DryRun` returns
+the plan without changing anything.
+
 ### Links in transfers
 
 Relayed copies and moves (across connections, or directory copies) meet links as provider-specific

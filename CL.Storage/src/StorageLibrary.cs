@@ -995,6 +995,40 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return result;
     }
 
+    /// <summary>Compares two directory trees on (possibly different) connections.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory.</param>
+    /// <param name="options">Comparison criteria.</param>
+    /// <param name="cancellationToken">Token used to cancel the comparison.</param>
+    /// <returns>Every path on either side with its relation.</returns>
+    public Task<Result<Sync.StorageDiff>> CompareAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageCompareOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.CompareAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
+
+    /// <summary>Synchronizes two directory trees on (possibly different) connections.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory.</param>
+    /// <param name="options">Direction, deletes, dry run, and comparison settings.</param>
+    /// <param name="cancellationToken">Token used to cancel the sync.</param>
+    /// <returns>The steps taken, or planned for a dry run.</returns>
+    public Task<Result<Sync.StorageSyncReport>> SyncAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageSyncOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.SyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
+
     /// <summary>
     /// Creates a background transfer queue over this library's connections, with concurrency limits,
     /// priorities, pause and resume, cancellation, and automatic retries. Dispose it to stop its jobs.
