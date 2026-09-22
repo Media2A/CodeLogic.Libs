@@ -512,6 +512,18 @@ exit is returned as a result with `Succeeded = false`, not as an error. Servers 
 where the server implements it, and local connections from the volume. WebDAV and object stores
 return `storage.unsupported`.
 
+### Watching for changes
+
+```csharp
+await foreach (var change in storage.WatchAsync("incoming", cancellationToken: stopping))
+    Console.WriteLine($"{change.Kind}: {change.Path}");
+```
+
+Local connections use native file-system notifications (including renames). Every other provider
+is polled: the directory is listed every `PollInterval` (30 s by default) and compared by type, size,
+time, and ETag, so a rename appears as a delete plus a create. A failed poll is retried on the next
+interval rather than reported as deletions. The library's own staging items never appear.
+
 ### Links in transfers
 
 Relayed copies and moves (across connections, or directory copies) meet links as provider-specific

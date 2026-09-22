@@ -167,3 +167,77 @@ public sealed class SyncTests
     private static async Task<string> Read(LocalStorageBackend storage, string path) =>
         Encoding.UTF8.GetString((await storage.DownloadBytesAsync(path)).Value!);
 }
+
+public sealed class WatchTests
+{
+    [Fact]
+    public async Task Native_local_watching_reports_creates_and_renames()
+    {
+        using var directory = new TestDirectory();
+        var storage = new LocalStorageBackend("local", new LocalConnectionConfig { RootPath = directory.Path });
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var seen = new List<StorageChange>();
+        var watching = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var change in storage.WatchAsync("", cancellationToken: stop.Token))
+                {
+                    lock (seen) seen.Add(change);
+                    if (change.Kind == StorageChangeKind.Renamed) break;
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+        await Task.Delay(300);
+
+        await File.WriteAllTextAsync(Path.Combine(directory.Path, "a.txt"), "x");
+        File.Move(Path.Combine(directory.Path, "a.txt"), Path.Combine(directory.Path, "b.txt"));
+        await watching.WaitAsync(TimeSpan.FromSeconds(15));
+
+        lock (seen)
+        {
+            Assert.Contains(seen, change => change.Kind == StorageChangeKind.Created && change.Path == "a.txt");
+            var renamed = Assert.Single(seen, change => change.Kind == StorageChangeKind.Renamed);
+            Assert.Equal("b.txt", renamed.Path);
+            Assert.Equal("a.txt", renamed.OldPath);
+        }
+    }
+
+    [Fact]
+    public async Task Polling_detects_creates_changes_and_deletes()
+    {
+        using var directory = new TestDirectory();
+        var storage = new LocalStorageBackend("local", new LocalConnectionConfig { RootPath = directory.Path });
+        await storage.UploadBytesAsync("existing.txt", [1]);
+        await storage.UploadBytesAsync("doomed.txt", [1]);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var seen = new List<StorageChange>();
+        var options = new StorageWatchOptions { ForcePolling = true, PollInterval = TimeSpan.FromMilliseconds(100) };
+        var watching = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var change in storage.WatchAsync("", options, stop.Token))
+                {
+                    lock (seen) seen.Add(change);
+                    lock (seen) if (seen.Count >= 3) break;
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+        await Task.Delay(300);
+
+        await storage.UploadBytesAsync("new.txt", [1]);
+        await storage.UploadBytesAsync("existing.txt", [1, 2, 3], new StorageUploadOptions { Overwrite = true });
+        await storage.DeleteAsync("doomed.txt");
+        await watching.WaitAsync(TimeSpan.FromSeconds(15));
+
+        lock (seen)
+        {
+            Assert.Contains(seen, change => change is { Kind: StorageChangeKind.Created, Path: "new.txt" });
+            Assert.Contains(seen, change => change is { Kind: StorageChangeKind.Changed, Path: "existing.txt" });
+            Assert.Contains(seen, change => change is { Kind: StorageChangeKind.Deleted, Path: "doomed.txt" });
+        }
+    }
+}

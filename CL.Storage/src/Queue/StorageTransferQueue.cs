@@ -311,11 +311,13 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     private void Pump()
     {
         var started = new List<Entry>();
+        TimeSpan? wakeIn = null;
         lock (_gate)
         {
             if (_paused || _disposed) return;
+            var now = DateTimeOffset.UtcNow;
             foreach (var entry in _jobs.Values
-                .Where(entry => entry.State == StorageTransferState.Queued && entry.NotBefore <= DateTimeOffset.UtcNow)
+                .Where(entry => entry.State == StorageTransferState.Queued && entry.NotBefore <= now)
                 .OrderByDescending(entry => entry.Priority)
                 .ThenBy(entry => entry.Sequence))
             {
@@ -328,7 +330,17 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                 entry.Start();
                 started.Add(entry);
             }
+            // Jobs waiting out a retry delay need a later pass; timers can fire slightly early, so the
+            // wake-up is derived from the earliest due time rather than from a fixed delay.
+            var nextDue = _jobs.Values
+                .Where(entry => entry.State == StorageTransferState.Queued && entry.NotBefore > now)
+                .Select(entry => (DateTimeOffset?)entry.NotBefore)
+                .Min();
+            if (nextDue is { } due)
+                wakeIn = due - now + TimeSpan.FromMilliseconds(5);
         }
+        if (wakeIn is { } delay)
+            _ = RetryLaterAsync(delay);
         foreach (var entry in started)
         {
             Raise(JobChanged, entry);
@@ -355,7 +367,6 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             result = Result.Failure(StorageErrors.FromException(error, "Queued transfer"));
         }
 
-        var retry = false;
         lock (_gate)
         {
             _running--;
@@ -368,7 +379,6 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             else if (StorageErrorInfo.IsTransient(result.Error) && entry.AutomaticRetriesLeft > 0 && !_disposed)
             {
                 entry.ScheduleRetry(result.Error!, DateTimeOffset.UtcNow + _options.RetryDelay);
-                retry = true;
             }
             else
                 Finish(entry, StorageTransferState.Failed, result.Error);
@@ -380,8 +390,6 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         else if (entry.State == StorageTransferState.Failed)
             await PublishAsync(new StorageTransferFailedEvent(entry.Id, entry.Kind, entry.Source, entry.Destination, entry.Attempts, result.Error!.Code, DateTimeOffset.UtcNow)).ConfigureAwait(false);
 
-        if (retry)
-            _ = RetryLaterAsync(_options.RetryDelay);
         UpdateIdle();
         Pump();
     }

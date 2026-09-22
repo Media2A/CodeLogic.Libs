@@ -11,7 +11,7 @@ using CodeLogic.Core.Results;
 namespace CL.Storage.Providers.Local;
 
 /// <summary>Provides storage operations over a local path or mounted UNC root.</summary>
-public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageSpaceService
+public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageSpaceService, Sync.IStorageWatchService
 {
     /// <inheritdoc />
     public const long DefaultMaxBufferedDownloadBytes = 67_108_864;
@@ -26,6 +26,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         StorageFeature.AtomicReplace |
         StorageFeature.ConditionalCreate |
         StorageFeature.RangeReads |
+        StorageFeature.ChangeNotifications |
         StorageFeature.SpaceInfo |
         StorageFeature.Append |
         StorageFeature.Links |
@@ -736,6 +737,17 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         {
             return Task.FromResult(Result<StorageSpaceInfo>.Failure(StorageErrors.FromException(error, "Get free space")));
         }
+    }
+
+    /// <inheritdoc />
+    public IAsyncEnumerable<Sync.StorageChange> WatchNativeAsync(string path, bool recursive, CancellationToken cancellationToken)
+    {
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure)
+            throw new ArgumentException(resolved.Error!.Message, nameof(path));
+        if (!Directory.Exists(resolved.Value!.FullPath))
+            throw new DirectoryNotFoundException($"Directory '{resolved.Value.StoragePath}' was not found.");
+        return Sync.StorageWatch.WatchFileSystemAsync(resolved.Value.FullPath, recursive, _paths.ToStoragePath, cancellationToken);
     }
 
     /// <summary>Finds the mounted volume holding a path: the longest matching mount point on Unix, the drive root on Windows.</summary>

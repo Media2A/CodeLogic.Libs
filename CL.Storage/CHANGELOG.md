@@ -76,6 +76,8 @@
 
 ### Added
 
+- `WatchAsync` change streams: native notifications for local connections (`ChangeNotifications`),
+  polling with snapshot diffs for every other provider.
 - `IStorageCommandService.ExecuteCommandAsync` for raw FTP and SSH commands (opt-in with
   `AllowRawCommands`) and `IStorageSpaceService.GetSpaceAsync` for SFTP, FTP (`AVBL`), and local.
 - Directory `CompareAsync` and `SyncAsync` (`Update`, `Mirror` with optional deletes, `TwoWay`) across
