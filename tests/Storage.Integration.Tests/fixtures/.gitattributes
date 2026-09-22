@@ -1,0 +1,2 @@
+# SSH keys and the compose file are read by Linux containers; keep LF on every platform.
+* text eol=lf
