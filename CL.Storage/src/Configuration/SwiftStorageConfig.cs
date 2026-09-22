@@ -73,11 +73,16 @@ public sealed class SwiftConnectionConfig : StorageConnectionConfigBase
     /// <remarks>Tokens and passwords travel in clear text over HTTP; keep this to trusted networks and test clusters.</remarks>
     public bool AllowInsecureHttp { get; set; }
 
+    /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
+    public StorageProxyConfig Proxy { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Prefix;
 
     internal override IEnumerable<string> GetValidationErrors()
     {
+        foreach (var error in (Proxy ?? new StorageProxyConfig()).GetValidationErrors("Proxy."))
+            yield return error;
         if (string.IsNullOrWhiteSpace(Container))
             yield return "Container is required";
         if (StoragePath.Normalize(Prefix ?? string.Empty).IsFailure)

@@ -6,6 +6,7 @@ using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Models;
 using FluentFTP;
+using FluentFTP.Proxy.AsyncProxy;
 
 namespace CL.Storage.Providers.Ftp;
 
@@ -64,11 +65,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
 #pragma warning restore SYSLIB0057
         }
 
-        var client = new AsyncFtpClient(
-            value.Host,
-            new NetworkCredential(value.Username, value.Password),
-            value.Port,
-            config);
+        var client = CreateProxiedClient(value, config);
 
         var pins = value.TrustedCertificateSha256
             .Select(fingerprint => CertificateFingerprint.TryNormalizeSha256(fingerprint, out var normalized) ? normalized : null)
@@ -82,6 +79,31 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             eventArgs.Accept = (hash is not null && pins.Contains(hash)) ||
                 (pins.Count == 0 && eventArgs.PolicyErrors == SslPolicyErrors.None);
         };
+        return client;
+    }
+
+    private static AsyncFtpClient CreateProxiedClient(FtpConnectionConfig value, FtpConfig config)
+    {
+        var credentials = new NetworkCredential(value.Username, value.Password);
+        var proxy = value.Proxy ?? new StorageProxyConfig();
+        if (!proxy.Enabled)
+            return new AsyncFtpClient(value.Host, credentials, value.Port, config);
+        var profile = new FtpProxyProfile
+        {
+            ProxyHost = proxy.Host,
+            ProxyPort = proxy.Port,
+            ProxyCredentials = string.IsNullOrEmpty(proxy.Username) ? null : new NetworkCredential(proxy.Username, proxy.Password),
+            FtpHost = value.Host,
+            FtpPort = value.Port,
+            FtpCredentials = credentials
+        };
+        AsyncFtpClient client = proxy.Type switch
+        {
+            StorageProxyType.Http => new AsyncFtpClientHttp11Proxy(profile),
+            StorageProxyType.Socks4 => new AsyncFtpClientSocks4Proxy(profile),
+            _ => new AsyncFtpClientSocks5Proxy(profile)
+        };
+        client.Config = config;
         return client;
     }
 }

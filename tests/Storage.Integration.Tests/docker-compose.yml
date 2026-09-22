@@ -56,3 +56,28 @@ services:
     image: openstackswift/saio
     ports:
       - "8082:8080"
+
+  # HTTP (3128), SOCKS5 (1080) and SOCKS4 (1081) proxy. Proxy tests address servers by their
+  # compose service names, which only resolve inside this network, so a passing test proves the
+  # traffic really went through the proxy.
+  proxy:
+    image: gogost/gost
+    command: -L http://:3128 -L socks5://:1080 -L socks4://:1081
+    ports:
+      - "3128:3128"
+      - "1080:1080"
+      - "1081:1081"
+
+  # Copies of FTP and GCS whose advertised addresses are their service names, so passive data
+  # connections and resumable-upload URLs also resolve through the proxy.
+  ftp-internal:
+    image: delfer/alpine-ftp-server
+    environment:
+      USERS: "cltest|cltest-pw|/home/cltest|1001"
+      ADDRESS: "ftp-internal"
+      MIN_PORT: "21000"
+      MAX_PORT: "21010"
+
+  gcs-internal:
+    image: fsouza/fake-gcs-server
+    command: -scheme http -port 4443 -external-url http://gcs-internal:4443 -backend memory

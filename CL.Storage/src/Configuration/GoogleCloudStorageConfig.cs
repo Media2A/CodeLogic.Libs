@@ -52,11 +52,16 @@ public sealed class GoogleCloudConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets the resumable-upload chunk size in bytes.</summary>
     public int UploadChunkSizeBytes { get; set; } = 10 * 1024 * 1024;
 
+    /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
+    public StorageProxyConfig Proxy { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Prefix;
 
     internal override IEnumerable<string> GetValidationErrors()
     {
+        foreach (var error in (Proxy ?? new StorageProxyConfig()).GetValidationErrors("Proxy."))
+            yield return error;
         if (string.IsNullOrWhiteSpace(Bucket))
             yield return "Bucket is required";
         if (StoragePath.Normalize(Prefix ?? string.Empty).IsFailure)

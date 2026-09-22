@@ -21,6 +21,8 @@ internal sealed class S3StorageBackendFactory : IStorageBackendFactory
             Timeout = TimeSpan.FromSeconds(value.TimeoutSeconds),
             MaxErrorRetry = value.MaxRetries
         };
+        if (value.Proxy?.ToWebProxy() is { } proxy)
+            clientConfig.SetWebProxy(proxy);
         if (!string.IsNullOrWhiteSpace(value.ServiceUrl))
         {
             clientConfig.ServiceURL = value.ServiceUrl;

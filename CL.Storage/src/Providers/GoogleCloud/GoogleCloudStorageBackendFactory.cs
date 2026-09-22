@@ -36,13 +36,16 @@ internal sealed class GoogleCloudStorageBackendFactory : IStorageBackendFactory
     private static StorageClient CreateClient(GoogleCloudConnectionConfig value, GoogleCredential? credential)
     {
         var anonymous = value.AuthenticationMode == GoogleCloudAuthenticationMode.Anonymous;
-        if (string.IsNullOrWhiteSpace(value.ServiceUrl) && !anonymous)
+        var proxy = value.Proxy?.ToWebProxy();
+        if (string.IsNullOrWhiteSpace(value.ServiceUrl) && !anonymous && proxy is null)
             return credential is null ? StorageClient.Create() : StorageClient.Create(credential);
         var builder = new StorageClientBuilder
         {
             Credential = credential,
             UnauthenticatedAccess = anonymous
         };
+        if (proxy is not null)
+            builder.HttpClientFactory = Google.Apis.Http.HttpClientFactory.ForProxy(proxy);
         if (!string.IsNullOrWhiteSpace(value.ServiceUrl))
             builder.BaseUri = JsonApiBase(value.ServiceUrl);
         return builder.Build();

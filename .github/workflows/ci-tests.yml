@@ -171,6 +171,7 @@ jobs:
       CL_STORAGE_TEST_SWIFT_AUTH_URL: http://127.0.0.1:8082/auth/v1.0
       CL_STORAGE_TEST_SWIFT_USER: test:tester
       CL_STORAGE_TEST_SWIFT_KEY: testing
+      CL_STORAGE_TEST_PROXY_HOST: 127.0.0.1
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -184,7 +185,7 @@ jobs:
         shell: bash
         run: |
           docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d
-          for port in 2021 2022 8080 9010 10000 4443 8082; do
+          for port in 2021 2022 8080 9010 10000 4443 8082 3128 1080; do
             for i in {1..60}; do
               if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi
               sleep 1

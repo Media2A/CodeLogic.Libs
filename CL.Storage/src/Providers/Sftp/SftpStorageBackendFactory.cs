@@ -35,7 +35,23 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
             _ => new PasswordAuthenticationMethod(value.Username, value.Password ?? string.Empty)
         };
         var timeout = TimeSpan.FromSeconds(value.TimeoutSeconds);
-        var connection = new ConnectionInfo(value.Host, value.Port, value.Username, method)
+        var proxy = value.Proxy ?? new StorageProxyConfig();
+        var connection = new ConnectionInfo(
+            value.Host,
+            value.Port,
+            value.Username,
+            proxy.Type switch
+            {
+                StorageProxyType.Http => ProxyTypes.Http,
+                StorageProxyType.Socks4 => ProxyTypes.Socks4,
+                StorageProxyType.Socks5 => ProxyTypes.Socks5,
+                _ => ProxyTypes.None
+            },
+            proxy.Enabled ? proxy.Host : null,
+            proxy.Enabled ? proxy.Port : 0,
+            proxy.Username,
+            proxy.Password,
+            method)
         {
             Timeout = timeout
         };

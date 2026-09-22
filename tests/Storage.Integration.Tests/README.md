@@ -19,6 +19,7 @@ export CL_STORAGE_TEST_S3_URL=http://127.0.0.1:9010        CL_STORAGE_TEST_S3_AC
 export CL_STORAGE_TEST_AZURE_CONNECTION_STRING='UseDevelopmentStorage=true'
 export CL_STORAGE_TEST_GCS_URL=http://127.0.0.1:4443
 export CL_STORAGE_TEST_SWIFT_AUTH_URL=http://127.0.0.1:8082/auth/v1.0        CL_STORAGE_TEST_SWIFT_USER=test:tester CL_STORAGE_TEST_SWIFT_KEY=testing
+export CL_STORAGE_TEST_PROXY_HOST=127.0.0.1   # HTTP 3128, SOCKS5 1080
 
 dotnet test tests/Storage.Integration.Tests -c Release -p:CodeLogicFromNuGet=true
 ```

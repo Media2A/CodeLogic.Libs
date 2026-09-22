@@ -76,6 +76,19 @@ That option trusts any SSH host key and is best limited to trusted development e
 and WebDAV use normal certificate validation by default and optionally accept configured SHA-256
 certificate pins; there is no accept-any switch.
 
+### Proxies
+
+Every remote provider can tunnel through an HTTP (`CONNECT`), SOCKS5, or SOCKS4 proxy:
+
+```json
+"Proxy": { "Type": "Socks5", "Host": "proxy.corp.local", "Port": 1080, "Username": "me", "Password": "..." }
+```
+
+SOCKS5 and HTTP proxies resolve the destination host name on the proxy side. SOCKS4 cannot, so
+the host must resolve from the client, and SOCKS4 carries no password. FTP data connections are
+tunnelled as well, so use passive mode, and the server's passive address must be reachable
+from the proxy.
+
 ### Sessions, retries, and keep-alive
 
 FTP and SFTP keep authenticated sessions in a per-connection pool, and FTP, SFTP, and WebDAV

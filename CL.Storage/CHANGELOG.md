@@ -48,6 +48,8 @@
 
 ### Added
 
+- HTTP, SOCKS5, and SOCKS4 proxy support (`Proxy`) for FTP (including data connections), SFTP,
+  WebDAV, S3, Azure Blob, Google Cloud Storage, and Swift.
 - Google Cloud Storage `ServiceUrl` and `AllowInsecureHttp` for private endpoints and emulators, plus
   an `Anonymous` authentication mode for public buckets and fake-gcs-server.
 - Swift `TempAuthV1` authentication (`X-Auth-User` / `X-Auth-Key`) and `AllowInsecureHttp`.

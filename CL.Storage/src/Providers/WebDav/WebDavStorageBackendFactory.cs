@@ -18,14 +18,15 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
         var value = (WebDavConnectionConfig)configuration;
         var endpoint = new Uri(value.Endpoint, UriKind.Absolute);
         var timeout = TimeSpan.FromSeconds(value.TimeoutSeconds);
+        var webProxy = value.Proxy?.ToWebProxy();
         var client = value.AuthenticationMode switch
         {
-            WebDavAuthenticationMode.BearerToken => new Client(value.BearerToken!, timeout, proxy: null),
+            WebDavAuthenticationMode.BearerToken => new Client(value.BearerToken!, timeout, proxy: webProxy),
             WebDavAuthenticationMode.Windows => new Client(
-                CredentialCache.DefaultNetworkCredentials, timeout, proxy: null),
+                CredentialCache.DefaultNetworkCredentials, timeout, proxy: webProxy),
             WebDavAuthenticationMode.Basic => new Client(
-                new NetworkCredential(value.Username, value.Password), timeout, proxy: null),
-            _ => new Client(new NetworkCredential(), timeout, proxy: null)
+                new NetworkCredential(value.Username, value.Password), timeout, proxy: webProxy),
+            _ => new Client(new NetworkCredential(), timeout, proxy: webProxy)
         };
         client.Server = endpoint.GetLeftPart(UriPartial.Authority) + "/";
         client.BasePath = NormalizeBasePath(endpoint.AbsolutePath);

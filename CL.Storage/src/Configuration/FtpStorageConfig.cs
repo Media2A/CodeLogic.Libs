@@ -83,11 +83,16 @@ public sealed class FtpConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets automatic retry of transient failures.</summary>
     public StorageRetryConfig Retry { get; set; } = new();
 
+    /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
+    public StorageProxyConfig Proxy { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Root;
 
     internal override IEnumerable<string> GetValidationErrors()
     {
+        foreach (var error in (Proxy ?? new StorageProxyConfig()).GetValidationErrors("Proxy."))
+            yield return error;
         if (string.IsNullOrWhiteSpace(Host))
             yield return "Host is required";
         if (Port is < 1 or > 65535)

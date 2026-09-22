@@ -60,11 +60,16 @@ public sealed class WebDavConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets automatic retry of transient failures.</summary>
     public StorageRetryConfig Retry { get; set; } = new();
 
+    /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
+    public StorageProxyConfig Proxy { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Root;
 
     internal override IEnumerable<string> GetValidationErrors()
     {
+        foreach (var error in (Proxy ?? new StorageProxyConfig()).GetValidationErrors("Proxy."))
+            yield return error;
         if (!Uri.TryCreate(Endpoint, UriKind.Absolute, out var endpoint) ||
             (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps))
             yield return "Endpoint must be an absolute HTTP(S) URL";
