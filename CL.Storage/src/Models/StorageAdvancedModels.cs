@@ -194,10 +194,12 @@ public sealed record StorageChecksumVerification(
 /// <param name="Files">Number of transferred files.</param>
 /// <param name="Directories">Number of transferred directories.</param>
 /// <param name="Bytes">Total file-content bytes transferred.</param>
+/// <param name="SkippedFiles">Files left untouched by the conflict policy.</param>
 public sealed record StorageDirectoryTransferReport(
     long Files,
     long Directories,
-    long Bytes);
+    long Bytes,
+    long SkippedFiles = 0);
 
 /// <summary>Controls whether a tag update merges with or replaces existing tags.</summary>
 public enum StorageTagUpdateMode

@@ -79,13 +79,17 @@ public static class StorageServiceExtensions
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
+            var fullPath = Path.GetFullPath(sourceFilePath);
             await using var source = new FileStream(
-                Path.GetFullPath(sourceFilePath),
+                fullPath,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
                 65_536,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
+            // Newer-only conflict policies compare against the local file's modification time.
+            if (options?.ConflictPolicy is not null && options.SourceLastModified is null)
+                options = options with { SourceLastModified = new DateTimeOffset(File.GetLastWriteTimeUtc(fullPath)) };
             return await storage.UploadAsync(destinationPath, source, options, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -106,6 +110,7 @@ public static class StorageServiceExtensions
         StorageDownloadOptions? options = null,
         bool overwrite = true,
         bool createParents = true,
+        StorageConflictPolicy? conflictPolicy = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(storage);
@@ -117,6 +122,14 @@ public static class StorageServiceExtensions
         try
         {
             var destination = Path.GetFullPath(destinationFilePath);
+            if (conflictPolicy is not null)
+            {
+                var decision = await DecideLocalConflictAsync(storage, sourcePath, destination, conflictPolicy.Value, options, cancellationToken).ConfigureAwait(false);
+                if (decision.IsFailure) return Result<FileInfo>.Failure(decision.Error!);
+                if (decision.Value.Skip) return Result<FileInfo>.Success(new FileInfo(destination));
+                destination = decision.Value.Path;
+                overwrite = decision.Value.Overwrite;
+            }
             var parent = Path.GetDirectoryName(destination);
             if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(Path.GetFileName(destination)))
                 return Result<FileInfo>.Failure(StorageErrors.InvalidPath("The destination must identify a file."));
@@ -164,6 +177,45 @@ public static class StorageServiceExtensions
                 catch { }
             }
         }
+    }
+
+    /// <summary>Applies a conflict policy to a local download destination.</summary>
+    private static async Task<Result<(bool Skip, string Path, bool Overwrite)>> DecideLocalConflictAsync(
+        IStorageService storage,
+        string sourcePath,
+        string destination,
+        StorageConflictPolicy policy,
+        StorageDownloadOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (policy is StorageConflictPolicy.Fail or StorageConflictPolicy.Overwrite || !File.Exists(destination))
+            return Result<(bool, string, bool)>.Success((false, destination, policy != StorageConflictPolicy.Fail));
+        if (policy == StorageConflictPolicy.Skip)
+            return Result<(bool, string, bool)>.Success((true, destination, false));
+        if (policy == StorageConflictPolicy.Rename)
+        {
+            for (var attempt = 1; attempt <= 1_000; attempt++)
+            {
+                var candidate = Registry.StorageConflictResolver.Candidate(destination.Replace('\\', '/'), attempt).Replace('/', Path.DirectorySeparatorChar);
+                if (!File.Exists(candidate) && !Directory.Exists(candidate))
+                    return Result<(bool, string, bool)>.Success((false, candidate, false));
+            }
+            return Result<(bool, string, bool)>.Failure(StorageErrors.Conflict("No free local file name was found."));
+        }
+
+        var remote = await storage.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        if (remote.IsFailure) return Result<(bool, string, bool)>.Failure(remote.Error!);
+        var local = new FileInfo(destination);
+        var remoteSize = options is { Offset: 0, Length: null } or null ? remote.Value!.Size : null;
+        var newer = Registry.StorageConflictResolver.IsNewer(remote.Value!.LastModified, new DateTimeOffset(local.LastWriteTimeUtc));
+        var sizeDiffers = Registry.StorageConflictResolver.SizeDiffers(remoteSize, local.Length);
+        var replace = policy switch
+        {
+            StorageConflictPolicy.OverwriteIfNewer => newer,
+            StorageConflictPolicy.OverwriteIfSizeDiffers => sizeDiffers,
+            _ => newer || sizeDiffers
+        };
+        return Result<(bool, string, bool)>.Success((!replace, destination, replace));
     }
 
     /// <summary>Downloads bounded text content.</summary>

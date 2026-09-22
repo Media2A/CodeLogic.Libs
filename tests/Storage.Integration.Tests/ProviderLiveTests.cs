@@ -10,6 +10,13 @@ namespace Storage.Integration.Tests;
 public sealed class SftpLiveTests
 {
     [SftpFact]
+    public async Task Conflict_policies_apply()
+    {
+        await using var storage = LiveServers.Create(LiveServers.Sftp());
+        await StorageContract.ConflictPoliciesAsync(storage);
+    }
+
+    [SftpFact]
     public async Task Folder_rename_moves_the_whole_tree_natively()
     {
         await using var storage = LiveServers.Create(LiveServers.Sftp());
@@ -106,6 +113,13 @@ public sealed class SftpLiveTests
 public sealed class FtpLiveTests
 {
     [FtpFact]
+    public async Task Conflict_policies_apply()
+    {
+        await using var storage = LiveServers.Create(LiveServers.Ftp());
+        await StorageContract.ConflictPoliciesAsync(storage);
+    }
+
+    [FtpFact]
     public async Task Folder_rename_moves_the_whole_tree_natively()
     {
         await using var storage = LiveServers.Create(LiveServers.Ftp());
@@ -184,6 +198,13 @@ public sealed class FtpLiveTests
 
 public sealed class WebDavLiveTests
 {
+    [WebDavFact]
+    public async Task Conflict_policies_apply()
+    {
+        await using var storage = LiveServers.Create(LiveServers.WebDav());
+        await StorageContract.ConflictPoliciesAsync(storage);
+    }
+
     [WebDavFact]
     public async Task Folder_rename_moves_the_whole_tree_natively()
     {

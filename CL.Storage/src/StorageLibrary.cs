@@ -538,7 +538,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             report = new StorageDirectoryTransferReport(
                 copied.Value!.Files,
                 copied.Value.Directories,
-                copied.Value.Bytes);
+                copied.Value.Bytes,
+                copied.Value.SkippedFiles);
             publisher = CaptureEventPublisher();
         }
         finally
@@ -642,7 +643,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             report = new StorageDirectoryTransferReport(
                 copied.Value!.Files,
                 copied.Value.Directories,
-                copied.Value.Bytes);
+                copied.Value.Bytes,
+                copied.Value.SkippedFiles);
             publisher = CaptureEventPublisher();
         }
         finally
@@ -705,6 +707,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         if (normalizedDestination.IsFailure)
             return Result.Failure(normalizedDestination.Error!);
 
+        var destinationTarget = normalizedDestination.Value!;
         BackendEntry.BackendOperationLease? sourceLease = null;
         BackendEntry.BackendOperationLease? destinationLease = null;
         StorageEventPublisher? publisher = null;
@@ -727,12 +730,43 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             sourceProvider = sourceBackend.Provider;
             destinationProvider = destinationBackend.Provider;
             var usedNativeOperation = false;
+            var perFileDecisions = false;
 
-            if (sameBackend)
+            // Conditional conflict policies decide per file. A single file is decided here, so the
+            // native operation can still run; a directory must relay so every file is decided on its own.
+            if (StorageConflictResolver.IsConditional(options.ConflictPolicy))
+            {
+                var info = await sourceBackend.GetInfoAsync(normalizedSource.Value!, cancellationToken).ConfigureAwait(false);
+                if (info.IsFailure)
+                    return Result.Failure(info.Error!);
+                if (info.Value!.ItemType == StorageItemType.File)
+                {
+                    var decision = await StorageConflictResolver.ResolveAsync(
+                        destinationBackend,
+                        destinationTarget,
+                        options.ConflictPolicy,
+                        options.Overwrite,
+                        info.Value.Size,
+                        info.Value.LastModified,
+                        cancellationToken).ConfigureAwait(false);
+                    if (decision.IsFailure)
+                        return Result.Failure(decision.Error!);
+                    if (decision.Value.Skip)
+                        return Result.Success();
+                    destinationTarget = decision.Value.Path;
+                    options = options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null };
+                }
+                else
+                {
+                    perFileDecisions = true;
+                }
+            }
+
+            if (sameBackend && !perFileDecisions)
             {
                 var relationship = StorageTransferPath.ValidateDistinct(
                     normalizedSource.Value!,
-                    normalizedDestination.Value!);
+                    destinationTarget);
                 if (relationship.IsFailure)
                     return relationship;
 
@@ -745,7 +779,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 {
                     relationship = StorageTransferPath.ValidateDirectoryDestination(
                         normalizedSource.Value!,
-                        normalizedDestination.Value!);
+                        destinationTarget);
                     if (relationship.IsFailure)
                         return relationship;
                 }
@@ -769,12 +803,12 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     result = move
                         ? await sourceBackend.MoveAsync(
                             normalizedSource.Value!,
-                            normalizedDestination.Value!,
+                            destinationTarget,
                             options,
                             cancellationToken).ConfigureAwait(false)
                         : await sourceBackend.CopyAsync(
                             normalizedSource.Value!,
-                            normalizedDestination.Value!,
+                            destinationTarget,
                             options,
                             cancellationToken).ConfigureAwait(false);
                     if (result.IsSuccess)
@@ -789,14 +823,20 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     sourceBackend,
                     normalizedSource.Value!,
                     destinationBackend,
-                    normalizedDestination.Value!,
+                    destinationTarget,
                     options,
                     cancellationToken).ConfigureAwait(false);
                 if (copied.IsFailure)
                     return Result.Failure(copied.Error!);
                 summary = copied.Value!;
 
-                if (move)
+                if (move && summary.SourceType == StorageItemType.Directory && LeavesSourcesBehind(options, summary))
+                {
+                    var removed = await DeleteTransferredSourcesAsync(sourceBackend, normalizedSource.Value!, summary, cancellationToken).ConfigureAwait(false);
+                    if (removed.IsFailure)
+                        return removed;
+                }
+                else if (move)
                 {
                     var deleted = await sourceBackend.DeleteAsync(
                         normalizedSource.Value!,
@@ -832,8 +872,45 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             normalizedSource.Value!,
             effectiveDestinationId!,
             destinationProvider,
-            normalizedDestination.Value!,
+            destinationTarget,
             summary).ConfigureAwait(false);
+    }
+
+    /// <summary>Whether a directory move must keep some source items: skipped files or skipped links.</summary>
+    private static bool LeavesSourcesBehind(StorageTransferOptions options, StorageTransferSummary summary) =>
+        summary.SkippedFiles > 0 || options.LinkHandling == StorageLinkHandling.Skip;
+
+    /// <summary>
+    /// Completes a partial directory move: deletes only the source files that were transferred, then
+    /// removes directories left empty, deepest first. Skipped files and their directories stay in place.
+    /// </summary>
+    private static async Task<Result> DeleteTransferredSourcesAsync(
+        IStorageBackend source,
+        string sourceRoot,
+        StorageTransferSummary summary,
+        CancellationToken cancellationToken)
+    {
+        foreach (var path in summary.TransferredSources ?? [])
+        {
+            var deleted = await source.DeleteAsync(path, new StorageDeleteOptions { IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+            if (deleted.IsFailure)
+                return Result.Failure(StorageErrors.PartialFailure(
+                    "The destination completed, but a transferred source file could not be deleted.",
+                    $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+        }
+
+        var directories = new List<string> { sourceRoot };
+        await foreach (var item in source.EnumerateItemsAsync(sourceRoot, new StorageListOptions { Recursive = true }, cancellationToken).ConfigureAwait(false))
+        {
+            if (item.IsSuccess && item.Value!.ItemType == StorageItemType.Directory)
+                directories.Add(item.Value.Path);
+        }
+        foreach (var directory in directories.OrderByDescending(path => path.Count(c => c == '/')).ThenByDescending(path => path.Length))
+        {
+            // Non-recursive: a directory that still holds skipped items fails with a conflict and stays.
+            _ = await source.DeleteAsync(directory, new StorageDeleteOptions { IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+        }
+        return Result.Success();
     }
 
     private static Result<string> NormalizeTransferPath(string path, string role)

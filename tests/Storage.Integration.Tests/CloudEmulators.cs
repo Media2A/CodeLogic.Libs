@@ -186,6 +186,13 @@ public sealed class S3EmulatorTests
     }
 
     [S3Fact]
+    public async Task Conflict_policies_apply()
+    {
+        await using var storage = await CloudEmulators.CreateAsync(CloudEmulators.S3());
+        await StorageContract.ConflictPoliciesAsync(storage);
+    }
+
+    [S3Fact]
     public async Task Missing_items_are_not_found()
     {
         await using var storage = await CloudEmulators.CreateAsync(CloudEmulators.S3());

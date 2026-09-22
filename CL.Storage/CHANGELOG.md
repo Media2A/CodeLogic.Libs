@@ -38,6 +38,8 @@
 
 ### Changed (breaking)
 
+- `DownloadToFileAsync` gained a `conflictPolicy` parameter before `cancellationToken`.
+
 - Listings no longer show the library's own staging and backup items (`.cl-storage-*`,
   `.clstorage-*`); set `IncludeInternal` to see them, for example to clean up after a crash.
 
@@ -72,6 +74,10 @@
 
 ### Added
 
+- `StorageConflictPolicy` (`Fail`, `Overwrite`, `Skip`, `OverwriteIfNewer`, `OverwriteIfSizeDiffers`,
+  `OverwriteIfNewerOrSizeDiffers`, `Rename`) on uploads, transfers, directory uploads/downloads, and
+  `DownloadToFileAsync`, with `SkippedFiles` in directory reports and partial moves that keep skipped
+  sources.
 - `StorageListOptions.IncludeInternal`, `IncludeHidden`, and `NamePattern` (`*`/`?` wildcards).
 - `StorageTransferOptions.LinkHandling` (`Reject`, `Skip`, `Follow`, `Recreate`) for relayed
   transfers that meet symbolic links.

@@ -44,6 +44,14 @@ public sealed record StorageUploadOptions
 
     /// <summary>Gets whether an existing destination file may be replaced.</summary>
     public bool Overwrite { get; init; } = true;
+    /// <summary>
+    /// Gets how an existing destination is handled. When set it replaces <see cref="Overwrite"/>; when
+    /// <see langword="null"/>, <see cref="Overwrite"/> decides. Conditional policies are resolved by the
+    /// library's connections and helpers, not by a backend used on its own.
+    /// </summary>
+    public StorageConflictPolicy? ConflictPolicy { get; init; }
+    /// <summary>Gets the source's modification time, compared by <see cref="StorageConflictPolicy.OverwriteIfNewer"/>.</summary>
+    public DateTimeOffset? SourceLastModified { get; init; }
     /// <summary>Gets whether missing physical parent directories should be created.</summary>
     public bool CreateParents { get; init; } = true;
     /// <summary>Gets the optional MIME content type stored with the object.</summary>
@@ -192,6 +200,12 @@ public sealed record StorageTransferOptions
 {
     /// <summary>Gets whether an existing destination file may be replaced.</summary>
     public bool Overwrite { get; init; } = true;
+    /// <summary>
+    /// Gets how each existing destination file is handled. When set it replaces <see cref="Overwrite"/>.
+    /// Conditional policies are decided per file, so directory transfers relay through the client, and a
+    /// move deletes only the source files that were actually transferred.
+    /// </summary>
+    public StorageConflictPolicy? ConflictPolicy { get; init; }
     /// <summary>Gets whether missing physical destination parents should be created.</summary>
     public bool CreateParents { get; init; } = true;
     /// <summary>Gets how user metadata is handled across provider boundaries.</summary>
@@ -205,10 +219,31 @@ public sealed record StorageTransferOptions
     {
         if (!Enum.IsDefined(MetadataPreservation))
             return Result.Failure(StorageErrors.InvalidPath("MetadataPreservation is invalid."));
+        if (ConflictPolicy is { } policy && !Enum.IsDefined(policy))
+            return Result.Failure(StorageErrors.InvalidPath("ConflictPolicy is invalid."));
         return Enum.IsDefined(LinkHandling)
             ? Result.Success()
             : Result.Failure(StorageErrors.InvalidPath("LinkHandling is invalid."));
     }
+}
+
+/// <summary>How an existing destination file is handled, like FileZilla's "target file already exists" choices.</summary>
+public enum StorageConflictPolicy
+{
+    /// <summary>Fails with <c>storage.conflict</c>.</summary>
+    Fail,
+    /// <summary>Replaces the destination.</summary>
+    Overwrite,
+    /// <summary>Leaves the destination untouched.</summary>
+    Skip,
+    /// <summary>Replaces the destination only when the source is newer (2-second tolerance; unknown times count as newer).</summary>
+    OverwriteIfNewer,
+    /// <summary>Replaces the destination only when the sizes differ (unknown sizes count as different).</summary>
+    OverwriteIfSizeDiffers,
+    /// <summary>Replaces the destination when the source is newer or the sizes differ.</summary>
+    OverwriteIfNewerOrSizeDiffers,
+    /// <summary>Writes to the first free name <c>name (1).ext</c>, <c>name (2).ext</c>, … instead.</summary>
+    Rename
 }
 
 /// <summary>How relayed transfers treat symbolic links.</summary>

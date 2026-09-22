@@ -119,6 +119,8 @@ internal static class StorageTransferCoordinator
         long files = 0;
         long directories = 1;
         long bytes = 0;
+        long skipped = 0;
+        var transferred = new List<string>();
         string? continuationToken = null;
         var seenTokens = new HashSet<string>(StringComparer.Ordinal);
         var seenItems = new HashSet<string>(StringComparer.Ordinal);
@@ -195,6 +197,8 @@ internal static class StorageTransferCoordinator
                                 return Result<StorageTransferSummary>.Failure(copied.Error!);
                             files += copied.Value!.Files;
                             bytes += copied.Value.Bytes;
+                            skipped += copied.Value.SkippedFiles;
+                            transferred.AddRange(copied.Value.TransferredSources ?? []);
                             break;
                         }
                     default:
@@ -224,6 +228,12 @@ internal static class StorageTransferCoordinator
                                 return Result<StorageTransferSummary>.Failure(linked.Error!);
                             files += linked.Value!.Files;
                             bytes += linked.Value.Bytes;
+                            skipped += linked.Value.SkippedFiles;
+                            // A skipped or recreated link stays behind on a move; only followed content counts as moved.
+                            if (options.LinkHandling == StorageLinkHandling.Recreate)
+                                transferred.Add(itemPath.Value!);
+                            else
+                                transferred.AddRange(linked.Value.TransferredSources ?? []);
                             break;
                         }
                 }
@@ -250,7 +260,9 @@ internal static class StorageTransferCoordinator
             sourceDirectory.ItemType,
             files,
             directories,
-            bytes));
+            bytes,
+            skipped,
+            transferred));
     }
 
     /// <summary>Applies <see cref="StorageTransferOptions.LinkHandling"/> to one link.</summary>
@@ -337,6 +349,24 @@ internal static class StorageTransferCoordinator
         TransferCleanupTracker cleanup,
         CancellationToken cancellationToken)
     {
+        if (options.ConflictPolicy is not null)
+        {
+            var decision = await StorageConflictResolver.ResolveAsync(
+                destination,
+                destinationPath,
+                options.ConflictPolicy,
+                options.Overwrite,
+                sourceFile.Size,
+                sourceFile.LastModified,
+                cancellationToken).ConfigureAwait(false);
+            if (decision.IsFailure)
+                return Result<StorageTransferSummary>.Failure(decision.Error!);
+            if (decision.Value.Skip)
+                return Result<StorageTransferSummary>.Success(new StorageTransferSummary(StorageItemType.File, 0, 0, 0, SkippedFiles: 1, TransferredSources: []));
+            destinationPath = decision.Value.Path;
+            options = options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null };
+        }
+
         var destinationExists = await destination.ExistsAsync(destinationPath, cancellationToken).ConfigureAwait(false);
         if (destinationExists.IsFailure)
             return Result<StorageTransferSummary>.Failure(destinationExists.Error!);
@@ -536,7 +566,8 @@ internal static class StorageTransferCoordinator
             StorageItemType.File,
             Files: 1,
             Directories: 0,
-            Bytes: relay.Value));
+            Bytes: relay.Value,
+            TransferredSources: [sourceFile.Path]));
     }
 
     private static async Task<Result<long>> RelayAsync(
@@ -970,8 +1001,12 @@ internal static class StorageTransferCoordinator
     }
 }
 
+/// <param name="SkippedFiles">Files the conflict policy left untouched.</param>
+/// <param name="TransferredSources">Source paths of the files that were written, so a move can delete only those.</param>
 internal sealed record StorageTransferSummary(
     StorageItemType SourceType,
     long Files,
     long Directories,
-    long Bytes);
+    long Bytes,
+    long SkippedFiles = 0,
+    IReadOnlyList<string>? TransferredSources = null);

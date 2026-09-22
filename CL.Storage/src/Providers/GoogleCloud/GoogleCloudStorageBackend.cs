@@ -261,6 +261,8 @@ public sealed class GoogleCloudStorageBackend :
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (options?.ConflictPolicy is not null)
+            return await StorageConflictResolver.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);

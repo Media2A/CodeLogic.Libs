@@ -47,12 +47,48 @@ internal sealed class StorageServiceProxy :
             (backend, normalized) => backend.CreateDirectoryAsync(normalized, cancellationToken));
 
     public Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default) =>
-        UploadPathWithEventAsync(path, options?.Validate() ?? Result.Success(), cancellationToken,
-            (backend, normalized) => backend.UploadAsync(normalized, source, options, cancellationToken));
+        UploadWithConflictPolicyAsync(path, options, source.CanSeek ? source.Length - source.Position : null, cancellationToken,
+            (backend, normalized, resolved) => backend.UploadAsync(normalized, source, resolved, cancellationToken));
 
     public Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default) =>
-        UploadPathWithEventAsync(path, options?.Validate() ?? Result.Success(), cancellationToken,
-            (backend, normalized) => backend.UploadBytesAsync(normalized, content, options, cancellationToken));
+        UploadWithConflictPolicyAsync(path, options, content.LongLength, cancellationToken,
+            (backend, normalized, resolved) => backend.UploadBytesAsync(normalized, content, resolved, cancellationToken));
+
+    /// <summary>
+    /// Resolves a conditional <see cref="StorageUploadOptions.ConflictPolicy"/> before uploading. A skipped
+    /// upload succeeds with the existing destination item and publishes no write event.
+    /// </summary>
+    private async Task<Result<StorageItem>> UploadWithConflictPolicyAsync(
+        string path,
+        StorageUploadOptions? options,
+        long? sourceLength,
+        CancellationToken cancellationToken,
+        Func<IStorageBackend, string, StorageUploadOptions?, Task<Result<StorageItem>>> upload)
+    {
+        var validation = options?.Validate() ?? Result.Success();
+        if (validation.IsFailure || options?.ConflictPolicy is null)
+            return await UploadPathWithEventAsync(path, validation, cancellationToken,
+                (backend, normalized) => upload(backend, normalized, options)).ConfigureAwait(false);
+
+        var normalizedPath = StoragePath.Normalize(path);
+        if (normalizedPath.IsFailure)
+            return Result<StorageItem>.Failure(normalizedPath.Error!);
+        var decision = await StorageConflictResolver.ResolveAsync(
+            this,
+            normalizedPath.Value!,
+            options.ConflictPolicy,
+            options.Overwrite,
+            sourceLength,
+            options.SourceLastModified,
+            cancellationToken).ConfigureAwait(false);
+        if (decision.IsFailure)
+            return Result<StorageItem>.Failure(decision.Error!);
+        if (decision.Value.Skip)
+            return Result<StorageItem>.Success(decision.Value.Existing!);
+        var resolved = options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null };
+        return await UploadPathWithEventAsync(decision.Value.Path, Result.Success(), cancellationToken,
+            (backend, normalized) => upload(backend, normalized, resolved)).ConfigureAwait(false);
+    }
 
     public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
         DownloadWithLeaseAsync(path, options, cancellationToken);

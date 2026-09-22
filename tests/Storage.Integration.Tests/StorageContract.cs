@@ -87,6 +87,36 @@ internal static class StorageContract
         }
     }
 
+    /// <summary>Skip, rename, and size-based overwrite behave the same on every provider.</summary>
+    public static async Task ConflictPoliciesAsync(IStorageBackend storage)
+    {
+        var dir = $"cl-conflict-{Guid.NewGuid():N}";
+        try
+        {
+            Assert.True((await storage.UploadBytesAsync($"{dir}/f.txt", Encoding.UTF8.GetBytes("v1"))).IsSuccess);
+
+            var skipped = await storage.UploadBytesAsync($"{dir}/f.txt", Encoding.UTF8.GetBytes("v2"), new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Skip });
+            Assert.True(skipped.IsSuccess, skipped.Error?.ToString());
+            Assert.Equal("v1", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/f.txt")).Value!));
+
+            var renamed = await storage.UploadBytesAsync($"{dir}/f.txt", Encoding.UTF8.GetBytes("v3"), new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Rename });
+            Assert.True(renamed.IsSuccess, renamed.Error?.ToString());
+            Assert.Equal("v3", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/f (1).txt")).Value!));
+
+            var sameSize = await storage.UploadBytesAsync($"{dir}/f.txt", Encoding.UTF8.GetBytes("v4"), new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfSizeDiffers });
+            Assert.True(sameSize.IsSuccess);
+            Assert.Equal("v1", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/f.txt")).Value!));
+
+            var longer = await storage.UploadBytesAsync($"{dir}/f.txt", Encoding.UTF8.GetBytes("v5-longer"), new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfSizeDiffers });
+            Assert.True(longer.IsSuccess);
+            Assert.Equal("v5-longer", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/f.txt")).Value!));
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
     public static async Task MissingItemIsNotFoundAsync(IStorageBackend storage)
     {
         var info = await storage.GetInfoAsync($"missing-{Guid.NewGuid():N}.txt");

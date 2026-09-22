@@ -392,6 +392,30 @@ Check `Capabilities` for `Permissions`, `Ownership`, `SetTimestamps`, `CreateLin
 `ReadLinks`; unsupported calls return `storage.unsupported`. Link targets must stay inside the
 mounted root. On Windows, creating local links needs Developer Mode or the symbolic-link privilege.
 
+### When the destination already exists
+
+`ConflictPolicy` on `StorageUploadOptions` and `StorageTransferOptions` mirrors FileZilla's
+"target file already exists" choices: `Fail`, `Overwrite`, `Skip`, `OverwriteIfNewer`,
+`OverwriteIfSizeDiffers`, `OverwriteIfNewerOrSizeDiffers`, and `Rename` (writes `name (1).ext`).
+When it is not set, the `Overwrite` flag decides as before.
+
+```csharp
+await storage.UploadFileAsync("backup/db.bak", @"C:\dumps\db.bak",
+    new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfNewer });
+var report = await library.UploadDirectoryAsync(@"C:\site", "web", "public",
+    new StorageTransferOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfNewerOrSizeDiffers });
+Console.WriteLine($"{report.Value!.Files} uploaded, {report.Value.SkippedFiles} unchanged");
+```
+
+- Directories are decided file by file; `StorageDirectoryTransferReport.SkippedFiles` counts the rest.
+- A skipped upload succeeds and returns the existing item, without a write event.
+- Moving a directory deletes only the source files that were transferred; skipped files stay.
+- "Newer" allows two seconds of clock slack. `UploadFileAsync` supplies the local file's time; for
+  stream uploads set `SourceLastModified`. Unknown times or sizes count as newer or different.
+- `DownloadToFileAsync` takes a `conflictPolicy` for the local file.
+- Conditional policies on copy and move are applied by `StorageLibrary` and its connections, not by a
+  backend's own `CopyAsync`/`MoveAsync`.
+
 ### Links in transfers
 
 Relayed copies and moves (across connections, or directory copies) meet links as provider-specific
