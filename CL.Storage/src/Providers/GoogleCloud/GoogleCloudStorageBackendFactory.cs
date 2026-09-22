@@ -11,7 +11,7 @@ internal sealed class GoogleCloudStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(GoogleCloudConnectionConfig);
     public StorageProvider Provider => StorageProvider.GoogleCloudStorage;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (GoogleCloudConnectionConfig)configuration;
         GoogleCredential? credential = value.AuthenticationMode switch

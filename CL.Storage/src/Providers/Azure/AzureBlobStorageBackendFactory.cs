@@ -13,7 +13,7 @@ internal sealed class AzureBlobStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(AzureBlobConnectionConfig);
     public StorageProvider Provider => StorageProvider.AzureBlob;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (AzureBlobConnectionConfig)configuration;
         var options = new BlobClientOptions

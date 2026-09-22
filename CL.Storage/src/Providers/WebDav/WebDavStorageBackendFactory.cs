@@ -13,7 +13,7 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(WebDavConnectionConfig);
     public StorageProvider Provider => StorageProvider.WebDav;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (WebDavConnectionConfig)configuration;
         var endpoint = new Uri(value.Endpoint, UriKind.Absolute);
@@ -51,7 +51,9 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             value.Root,
             client.BasePath,
             ownsClient: true,
-            maxBufferedDownloadBytes);
+            maxBufferedDownloadBytes,
+            value.Retry,
+            observer);
     }
 
     private static string NormalizeBasePath(string path)

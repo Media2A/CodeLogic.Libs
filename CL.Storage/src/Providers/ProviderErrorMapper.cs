@@ -55,6 +55,10 @@ internal static class ProviderErrorMapper
     /// <summary>Classifies socket, TLS, IO, HTTP transport, and timeout exceptions; returns null for anything else.</summary>
     public static Error? FromTransport(Exception exception, string operation, string service)
     {
+        if (exception is ProviderPoolExhaustedException exhausted)
+            return StorageErrors.ServerBusy(
+                $"{operation}: all {exhausted.MaxSessions} {service} sessions are in use.",
+                "reason=session_limit");
         if (Find<AuthenticationException>(exception) is not null)
             return StorageErrors.TlsFailure($"{operation}: the {service} TLS handshake or certificate validation failed.");
         if (IsDiskFull(exception))

@@ -10,14 +10,17 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(SftpConnectionConfig);
     public StorageProvider Provider => StorageProvider.Sftp;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (SftpConnectionConfig)configuration;
         return new SftpStorageBackend(
             connectionId,
             () => CreateClient(value),
             value.Root,
-            maxBufferedDownloadBytes);
+            maxBufferedDownloadBytes,
+            value.Session,
+            value.Retry,
+            observer);
     }
 
     private static SftpClient CreateClient(SftpConnectionConfig value)
@@ -37,6 +40,8 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
             Timeout = timeout
         };
         var client = new SftpClient(connection) { OperationTimeout = timeout };
+        if (value.Session is { KeepAliveSeconds: > 0 } session)
+            client.KeepAliveInterval = TimeSpan.FromSeconds(session.KeepAliveSeconds);
         var fingerprints = value.HostKeyFingerprints
             .Select(fingerprint => CertificateFingerprint.TryNormalizeSha256(fingerprint, out var normalized) ? normalized : null)
             .Where(fingerprint => fingerprint is not null)

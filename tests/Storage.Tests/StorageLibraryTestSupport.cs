@@ -336,6 +336,6 @@ internal sealed class FakeStorageBackendFactory(
 {
     public Type ConfigurationType => typeof(LocalConnectionConfig);
     public StorageProvider Provider => StorageProvider.Local;
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes) =>
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null) =>
         create(connectionId, configuration);
 }

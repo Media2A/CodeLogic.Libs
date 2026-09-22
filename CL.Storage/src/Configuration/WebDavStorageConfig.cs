@@ -57,6 +57,9 @@ public sealed class WebDavConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets the request timeout in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 30;
 
+    /// <summary>Gets or sets automatic retry of transient failures.</summary>
+    public StorageRetryConfig Retry { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Root;
 
@@ -76,6 +79,8 @@ public sealed class WebDavConnectionConfig : StorageConnectionConfigBase
             yield return "Root is invalid";
         if (TimeoutSeconds <= 0)
             yield return "TimeoutSeconds must be greater than zero";
+        foreach (var error in (Retry ?? new StorageRetryConfig()).GetValidationErrors("Retry."))
+            yield return error;
         if (AuthenticationMode == WebDavAuthenticationMode.Basic && string.IsNullOrWhiteSpace(Username))
             yield return "Basic authentication requires Username";
         if (AuthenticationMode == WebDavAuthenticationMode.BearerToken && string.IsNullOrWhiteSpace(BearerToken))

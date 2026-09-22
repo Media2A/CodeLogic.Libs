@@ -15,6 +15,10 @@
 
 ### Changed (breaking)
 
+- `FtpStorageBackend`, `SftpStorageBackend`, and `WebDavStorageBackend` constructors take optional
+  session and retry settings. Retries are on by default (3 attempts); pass
+  `new StorageRetryConfig { RetryCount = 0 }` to restore single-attempt behavior.
+
 - Split coarse failures into precise error codes: `storage.authentication_failed`,
   `storage.permission_denied`, `storage.tls_failure`, `storage.host_key_rejected`,
   `storage.connection_failed`, `storage.connection_lost`, `storage.server_busy`, and
@@ -33,6 +37,16 @@
 
 ### Added
 
+- FTP, SFTP, and WebDAV retry transient failures (timeouts, refused or dropped connections, busy
+  servers) with exponential backoff, jitter, and `Retry-After` support, configured per connection
+  through `Retry`. Deletes and moves retry only with `RetryNonIdempotent`; uploads retry only from
+  seekable streams.
+- FTP and SFTP session pools are configurable per connection through `Session`: `MaxSessions` caps
+  open sessions and makes excess callers wait (`storage.server_busy` on timeout), idle sessions are
+  probed before reuse, and sessions that fail mid-operation are retired instead of reused.
+- `Session.KeepAliveSeconds` enables FTP NOOP and SSH keep-alive packets.
+- `StorageConnectionOpenedEvent`, `StorageConnectionLostEvent`, and `StorageConnectionRetryEvent`,
+  plus a warning log line per retry.
 - `StorageErrorInfo` with `IsTransient`, `IsConnectionFault`, `TryGetRetryAfter`, and `TryGetDetail`
   for retry decisions and provider diagnostics (`ftpReply`, `sftpStatus`, `httpStatus`).
 

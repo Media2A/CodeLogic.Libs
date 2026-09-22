@@ -130,3 +130,42 @@ public sealed record StorageDirectoryDownloadedEvent(
     long Directories,
     long Bytes,
     DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a session-oriented connection (FTP, SFTP) opens and authenticates a new session.</summary>
+/// <param name="ConnectionId">Connection that opened the session.</param>
+/// <param name="Provider">Provider used by the connection.</param>
+/// <param name="Timestamp">UTC time the session became usable.</param>
+public sealed record StorageConnectionOpenedEvent(
+    string ConnectionId,
+    StorageProvider Provider,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a session dropped, timed out, or failed TLS and was retired instead of reused.</summary>
+/// <param name="ConnectionId">Connection whose session was retired.</param>
+/// <param name="Provider">Provider used by the connection.</param>
+/// <param name="Operation">Operation that observed the failure.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> error code describing the failure.</param>
+/// <param name="Timestamp">UTC time the failure was observed.</param>
+public sealed record StorageConnectionLostEvent(
+    string ConnectionId,
+    StorageProvider Provider,
+    string Operation,
+    string ErrorCode,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published before an operation is retried after a transient failure.</summary>
+/// <param name="ConnectionId">Connection running the operation.</param>
+/// <param name="Provider">Provider used by the connection.</param>
+/// <param name="Operation">Operation being retried.</param>
+/// <param name="Attempt">One-based retry number.</param>
+/// <param name="Delay">Backoff before the retry starts.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> code of the failure that triggered the retry.</param>
+/// <param name="Timestamp">UTC time the retry was scheduled.</param>
+public sealed record StorageConnectionRetryEvent(
+    string ConnectionId,
+    StorageProvider Provider,
+    string Operation,
+    int Attempt,
+    TimeSpan Delay,
+    string ErrorCode,
+    DateTimeOffset Timestamp) : IEvent;

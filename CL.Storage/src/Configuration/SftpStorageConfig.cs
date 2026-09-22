@@ -63,6 +63,12 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets the operation timeout in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 30;
 
+    /// <summary>Gets or sets session pooling, keep-alive, and concurrency limits.</summary>
+    public StorageSessionConfig Session { get; set; } = new();
+
+    /// <summary>Gets or sets automatic retry of transient failures.</summary>
+    public StorageRetryConfig Retry { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Root;
 
@@ -76,6 +82,10 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
             yield return "Username is required";
         if (TimeoutSeconds <= 0)
             yield return "TimeoutSeconds must be greater than zero";
+        foreach (var error in (Session ?? new StorageSessionConfig()).GetValidationErrors("Session."))
+            yield return error;
+        foreach (var error in (Retry ?? new StorageRetryConfig()).GetValidationErrors("Retry."))
+            yield return error;
         if (StoragePath.Normalize(Root ?? string.Empty).IsFailure)
             yield return "Root is invalid";
         if (AuthenticationMode == SftpAuthenticationMode.Password && Password is null)

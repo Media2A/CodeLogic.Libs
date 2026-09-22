@@ -76,6 +76,52 @@ That option trusts any SSH host key and is best limited to trusted development e
 and WebDAV use normal certificate validation by default and optionally accept configured SHA-256
 certificate pins; there is no accept-any switch.
 
+### Sessions, retries, and keep-alive
+
+FTP and SFTP keep authenticated sessions in a per-connection pool, and FTP, SFTP, and WebDAV
+retry transient failures automatically. Both are tuned per connection:
+
+```json
+{
+  "Connections": {
+    "partner": {
+      "Host": "sftp.partner.example",
+      "Username": "upload",
+      "Password": "...",
+      "HostKeyFingerprints": ["SHA256:..."],
+      "Session": {
+        "MaxSessions": 4,
+        "MaxIdleSessions": 2,
+        "IdleLifetimeSeconds": 120,
+        "AcquireTimeoutSeconds": 30,
+        "ValidateAfterIdleSeconds": 15,
+        "KeepAliveSeconds": 60
+      },
+      "Retry": {
+        "RetryCount": 3,
+        "BaseDelayMs": 100,
+        "MaxDelayMs": 30000,
+        "RetryNonIdempotent": false
+      }
+    }
+  }
+}
+```
+
+- `MaxSessions` caps open sessions, busy or idle, so the library stays under a server's per-user
+  connection limit. Callers beyond it wait up to `AcquireTimeoutSeconds`, then receive
+  `storage.server_busy`.
+- A pooled session idle longer than `ValidateAfterIdleSeconds` is probed (FTP `NOOP`, SFTP `stat`)
+  before reuse. Sessions that time out, drop, or fail TLS mid-operation are closed instead of reused.
+- `KeepAliveSeconds` sends FTP `NOOP` or SSH keep-alive packets while a session is open.
+- Reads, listings, info, and directory creation retry on timeouts, refused or dropped connections,
+  and busy servers, with exponential backoff and jitter; a server `Retry-After` is honored. Uploads
+  retry only from a seekable stream, which is replayed from its starting position; staged uploads
+  never leave a partial file. Deletes and moves retry only with `RetryNonIdempotent`, because the
+  first attempt may already have succeeded.
+- `StorageConnectionOpenedEvent`, `StorageConnectionLostEvent`, and `StorageConnectionRetryEvent`
+  are published for monitoring, and each retry is logged as a warning.
+
 ## Common API
 
 ```csharp
@@ -262,7 +308,10 @@ Do not dispose reusable clients returned by `GetNativeClient`; dispose session l
 ## Failures and compatibility
 
 Expected failures use stable `storage.*` error codes such as `storage.not_found`,
-`storage.conflict`, `storage.unauthorized`, `storage.too_large`, and `storage.unsupported`.
+`storage.conflict`, `storage.authentication_failed`, `storage.permission_denied`,
+`storage.connection_lost`, `storage.server_busy`, `storage.quota_exceeded`, `storage.too_large`, and
+`storage.unsupported`. `StorageErrorInfo.IsTransient` tells whether a failure is worth retrying, and
+`StorageErrorInfo.TryGetDetail` exposes the provider's own code (`ftpReply`, `sftpStatus`, `httpStatus`).
 Incomplete cleanup/source deletion is reported as `storage.partial_failure` with sanitized state and
 error codes. Provider bodies, credentials, and signed query strings are not exposed. Caller
 cancellation propagates as `OperationCanceledException`.

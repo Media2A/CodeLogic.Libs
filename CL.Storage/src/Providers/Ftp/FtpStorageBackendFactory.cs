@@ -14,14 +14,17 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(FtpConnectionConfig);
     public StorageProvider Provider => StorageProvider.Ftp;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (FtpConnectionConfig)configuration;
         return new FtpStorageBackend(
             connectionId,
             () => CreateClient(value),
             value.Root,
-            maxBufferedDownloadBytes);
+            maxBufferedDownloadBytes,
+            value.Session,
+            value.Retry,
+            observer);
     }
 
     private static AsyncFtpClient CreateClient(FtpConnectionConfig value)
@@ -48,6 +51,11 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             DataConnectionConnectTimeout = checked(value.TimeoutSeconds * 1000),
             DataConnectionReadTimeout = checked(value.TimeoutSeconds * 1000)
         };
+        if (value.Session is { KeepAliveSeconds: > 0 } session)
+        {
+            config.Noop = true;
+            config.NoopInterval = checked(session.KeepAliveSeconds * 1000);
+        }
 
         if (!string.IsNullOrWhiteSpace(value.ClientCertificatePath))
         {

@@ -32,6 +32,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private readonly Dictionary<string, StorageConnectionInfo> _connectionInfos = new(StringComparer.OrdinalIgnoreCase);
     private readonly IReadOnlyDictionary<Type, IStorageBackendFactory> _factories;
     private readonly Action? _defaultConnectionSnapshotCaptured;
+    private readonly StorageConnectionObserver _connectionObserver;
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
     private LocalStorageConfig? _localConfig;
@@ -63,6 +64,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(factories);
         _factories = factories.ToDictionary(factory => factory.ConfigurationType);
         _defaultConnectionSnapshotCaptured = defaultConnectionSnapshotCaptured;
+        _connectionObserver = new StorageConnectionObserver(TryCaptureEventPublisher, TryCaptureLogger);
         if (_factories.Count == 0)
             throw new ArgumentException("At least one storage backend factory is required.", nameof(factories));
     }
@@ -1192,7 +1194,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 _factories[configuration.GetType()].Create(
                     id,
                     configuration,
-                    runtime.MaxBufferedDownloadBytes),
+                    runtime.MaxBufferedDownloadBytes,
+                    _connectionObserver),
                 ownsBackend: true);
             var timeoutDuration = TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds);
             using var timeout = new CancellationTokenSource(timeoutDuration);
@@ -1562,6 +1565,18 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
     }
 
+    private StorageEventPublisher? TryCaptureEventPublisher()
+    {
+        lock (_stateGate)
+            return _context is { } context ? new StorageEventPublisher(context.Events, context.Logger) : null;
+    }
+
+    private ILogger? TryCaptureLogger()
+    {
+        lock (_stateGate)
+            return _context?.Logger;
+    }
+
     internal StorageEventPublisher CaptureEventPublisher()
     {
         LibraryContext context;
@@ -1877,7 +1892,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             if (factory is null)
                 throw new InvalidOperationException($"The {provider} provider factory is not registered.");
             entries.Add(id, new BackendEntry(
-                factory.Create(id, connection, maxBufferedDownloadBytes),
+                factory.Create(id, connection, maxBufferedDownloadBytes, _connectionObserver),
                 ownsBackend: true));
         }
     }

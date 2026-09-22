@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using CL.Storage.Abstractions;
+using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
 using CL.Storage.Providers.Local;
@@ -24,30 +25,56 @@ public sealed class FtpStorageBackend : IStorageBackend
     private readonly ProviderClientPool<AsyncFtpClient> _clients;
     private readonly RemotePathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
+    private readonly ProviderRetryPolicy _retry;
+    private readonly IStorageConnectionObserver? _observer;
 
     /// <summary>Initializes a backend that leases FTP clients from a factory.</summary>
     /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
     /// <param name="clientFactory">Factory that creates configured FTP clients.</param>
     /// <param name="root">Optional remote directory mounted as the connection root.</param>
     /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
+    /// <param name="session">Session pool limits; defaults when omitted.</param>
+    /// <param name="retry">Transient-failure retry policy; defaults when omitted.</param>
     public FtpStorageBackend(
         string connectionId,
         Func<AsyncFtpClient> clientFactory,
         string? root = null,
-        long maxBufferedDownloadBytes = 67_108_864)
+        long maxBufferedDownloadBytes = 67_108_864,
+        StorageSessionConfig? session = null,
+        StorageRetryConfig? retry = null)
+        : this(connectionId, clientFactory, root, maxBufferedDownloadBytes, session, retry, observer: null)
+    {
+    }
+
+    internal FtpStorageBackend(
+        string connectionId,
+        Func<AsyncFtpClient> clientFactory,
+        string? root,
+        long maxBufferedDownloadBytes,
+        StorageSessionConfig? session,
+        StorageRetryConfig? retry,
+        IStorageConnectionObserver? observer)
     {
         if (string.IsNullOrWhiteSpace(connectionId)) throw new ArgumentException("Connection ID is required.", nameof(connectionId));
         ArgumentNullException.ThrowIfNull(clientFactory);
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
+        _observer = observer;
         _clients = new ProviderClientPool<AsyncFtpClient>(
             clientFactory,
             static (client, token) => client.Connect(token),
             static client => client.IsConnected,
-            DestroyClientAsync);
+            DestroyClientAsync,
+            ProviderPoolOptions.From(session),
+            ProbeAsync);
+        if (observer is not null)
+            _clients.SessionOpened += () => observer.SessionOpened(connectionId, StorageProvider.Ftp);
+        _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Ftp, observer);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
+
+    internal ProviderPoolStats PoolStats => _clients.Stats;
 
     /// <inheritdoc />
     public string ConnectionId { get; }
@@ -59,7 +86,10 @@ public sealed class FtpStorageBackend : IStorageBackend
     public StorageCapabilities Capabilities => FtpCapabilities;
 
     /// <inheritdoc />
-    public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
+    public Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Get FTP item info", RetryKind.Idempotent, (_, token) => GetInfoCoreAsync(path, token), cancellationToken);
+
+    private async Task<Result<StorageItem>> GetInfoCoreAsync(string path, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var resolved = _paths.Resolve(path);
@@ -76,12 +106,15 @@ public sealed class FtpStorageBackend : IStorageBackend
                 : Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, item));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get FTP item info")); }
+        catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Get FTP item info")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
-    public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
+    public Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Check FTP item existence", RetryKind.Idempotent, (_, token) => ExistsCoreAsync(path, token), cancellationToken);
+
+    private async Task<Result<bool>> ExistsCoreAsync(string path, CancellationToken cancellationToken)
     {
         var resolved = _paths.Resolve(path);
         if (resolved.IsFailure) return Result<bool>.Failure(resolved.Error!);
@@ -95,12 +128,15 @@ public sealed class FtpStorageBackend : IStorageBackend
             return Result<bool>.Success(exists);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result<bool>.Failure(Map(error, "Check FTP item existence")); }
+        catch (Exception error) { return Result<bool>.Failure(Fail(client, error, "Check FTP item existence")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
-    public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("List FTP directory", RetryKind.Idempotent, (_, token) => ListCoreAsync(path, options, token), cancellationToken);
+
+    private async Task<Result<StoragePage>> ListCoreAsync(string path, StorageListOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageListOptions();
         var validation = options.Validate();
@@ -137,6 +173,7 @@ public sealed class FtpStorageBackend : IStorageBackend
                             .ToArray();
                         return Result<IEnumerable<StorageItem>>.Success(items);
                     }
+                    catch (Exception error) when (Observe(listClient, error, "List FTP directory")) { throw; }
                     finally { if (listClient is not null) await ReleaseClientAsync(listClient).ConfigureAwait(false); }
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -146,7 +183,10 @@ public sealed class FtpStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
-    public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
+    public Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Create FTP directory", RetryKind.Idempotent, (_, token) => CreateDirectoryCoreAsync(path, token), cancellationToken);
+
+    private async Task<Result> CreateDirectoryCoreAsync(string path, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var resolved = _paths.Resolve(path);
@@ -159,12 +199,19 @@ public sealed class FtpStorageBackend : IStorageBackend
             return Result.Success();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result.Failure(Map(error, "Create FTP directory")); }
+        catch (Exception error) { return Result.Failure(Fail(client, error, "Create FTP directory")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
-    public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
+    /// <remarks>Uploads are staged and renamed into place, so replaying a seekable source cannot leave a partial file.</remarks>
+    public Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return _retry.ExecuteUploadAsync("Upload FTP file", source, token => UploadCoreAsync(path, source, options, token), cancellationToken);
+    }
+
+    private async Task<Result<StorageItem>> UploadCoreAsync(string path, Stream source, StorageUploadOptions? options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
         options ??= new StorageUploadOptions();
@@ -225,7 +272,7 @@ public sealed class FtpStorageBackend : IStorageBackend
                 : Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, item));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Upload FTP file")); }
+        catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Upload FTP file")); }
         finally
         {
             if (client is not null && stagingPath is not null)
@@ -244,7 +291,10 @@ public sealed class FtpStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
-    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Download FTP file", RetryKind.Idempotent, (_, token) => DownloadCoreAsync(path, options, token), cancellationToken);
+
+    private async Task<Result<Stream>> DownloadCoreAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
@@ -274,12 +324,12 @@ public sealed class FtpStorageBackend : IStorageBackend
                 stream = new RangeReadStream(stream, item.Size >= 0
                     ? Math.Min(options.Length.Value, Math.Max(0, item.Size - options.Offset))
                     : options.Length.Value);
-            var owned = new AsyncOwnedResourceStream(stream, () => ReleaseClientAsync(client));
+            var owned = new AsyncOwnedResourceStream(stream, () => ReleaseClientAsync(client), () => MarkFaulted(client, "Download FTP file"));
             ownershipTransferred = true;
             return Result<Stream>.Success(owned);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result<Stream>.Failure(Map(error, "Download FTP file")); }
+        catch (Exception error) { return Result<Stream>.Failure(Fail(client, error, "Download FTP file")); }
         finally { if (client is not null && !ownershipTransferred) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
@@ -305,7 +355,10 @@ public sealed class FtpStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
-    public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Delete FTP item", RetryKind.NonIdempotent, (_, token) => DeleteCoreAsync(path, options, token), cancellationToken);
+
+    private async Task<Result> DeleteCoreAsync(string path, StorageDeleteOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDeleteOptions();
         var validation = options.Validate();
@@ -344,7 +397,7 @@ public sealed class FtpStorageBackend : IStorageBackend
             return Result.Success();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result.Failure(Map(error, "Delete FTP item")); }
+        catch (Exception error) { return Result.Failure(Fail(client, error, "Delete FTP item")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
@@ -384,7 +437,10 @@ public sealed class FtpStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
-    public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Move FTP item", RetryKind.NonIdempotent, (_, token) => MoveCoreAsync(sourcePath, destinationPath, options, token), cancellationToken);
+
+    private async Task<Result> MoveCoreAsync(string sourcePath, string destinationPath, StorageTransferOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageTransferOptions();
         var validation = options.Validate();
@@ -423,12 +479,15 @@ public sealed class FtpStorageBackend : IStorageBackend
                 cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result.Failure(Map(error, "Move FTP item")); }
+        catch (Exception error) { return Result.Failure(Fail(client, error, "Move FTP item")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
     /// <inheritdoc />
-    public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
+    public Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Check FTP health", RetryKind.Idempotent, (_, token) => CheckHealthCoreAsync(token), cancellationToken);
+
+    private async Task<Result> CheckHealthCoreAsync(CancellationToken cancellationToken)
     {
         AsyncFtpClient? client = null;
         try
@@ -439,7 +498,7 @@ public sealed class FtpStorageBackend : IStorageBackend
                 : Result.Failure(StorageErrors.NotFound("The configured FTP root was not found."));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result.Failure(Map(error, "Check FTP health")); }
+        catch (Exception error) { return Result.Failure(Fail(client, error, "Check FTP health")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
@@ -466,7 +525,7 @@ public sealed class FtpStorageBackend : IStorageBackend
                 value => _clients.DiscardAsync((AsyncFtpClient)(object)value)));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result<NativeConnectionLease<TClient>>.Failure(Map(error, "Open native FTP connection")); }
+        catch (Exception error) { return Result<NativeConnectionLease<TClient>>.Failure(Fail(client, error, "Open native FTP connection")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
@@ -675,6 +734,13 @@ public sealed class FtpStorageBackend : IStorageBackend
     /// <summary>Returns a client to the pool so the next operation reuses its control connection.</summary>
     private ValueTask ReleaseClientAsync(AsyncFtpClient client) => _clients.ReturnAsync(client);
 
+    /// <summary>Sends NOOP so a session the server silently dropped is detected before reuse.</summary>
+    private static async Task<bool> ProbeAsync(AsyncFtpClient client, CancellationToken cancellationToken)
+    {
+        var reply = await client.Execute("NOOP", cancellationToken).ConfigureAwait(false);
+        return reply.Success && client.IsConnected;
+    }
+
     private static async ValueTask DestroyClientAsync(AsyncFtpClient client)
     {
         try
@@ -685,6 +751,34 @@ public sealed class FtpStorageBackend : IStorageBackend
         catch { }
         finally { client.Dispose(); }
     }
+
+    /// <summary>Maps a failure and retires the session when the failure left it unusable.</summary>
+    private Error Fail(AsyncFtpClient? client, Exception exception, string operation)
+    {
+        var error = Map(exception, operation);
+        if (client is not null && IsSessionFault(error))
+            MarkFaulted(client, operation, error);
+        return error;
+    }
+
+    /// <summary>Exception filter that retires a faulted session without catching the exception.</summary>
+    private bool Observe(AsyncFtpClient? client, Exception exception, string operation)
+    {
+        if (client is not null && exception is not OperationCanceledException)
+            _ = Fail(client, exception, operation);
+        return false;
+    }
+
+    private void MarkFaulted(AsyncFtpClient client, string operation, Error? error = null)
+    {
+        _clients.MarkFaulted(client);
+        try { _observer?.SessionFaulted(ConnectionId, StorageProvider.Ftp, operation, error ?? StorageErrors.ConnectionLost($"{operation}: the transfer was interrupted.")); }
+        catch { /* Observers must never change the operation's outcome. */ }
+    }
+
+    /// <summary>Failures after which the session's protocol state is unknown and it must not be reused.</summary>
+    private static bool IsSessionFault(Error error) =>
+        StorageErrorInfo.IsConnectionFault(error) || error.Code == StorageErrors.TimeoutCode;
 
     private static StorageItem ToItem(string path, FtpListItem item) => new()
     {
