@@ -51,6 +51,9 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             ReadTimeout = Milliseconds(value.ReadTimeoutSeconds ?? value.TimeoutSeconds),
             DataConnectionConnectTimeout = Milliseconds(value.DataConnectionTimeoutSeconds ?? value.TimeoutSeconds),
             DataConnectionReadTimeout = Milliseconds(value.DataConnectionTimeoutSeconds ?? value.TimeoutSeconds),
+            // Listing times and MFMT/MDTM values are converted to and from UTC, using ServerTimeZone
+            // when the server reports local time.
+            TimeConversion = FtpDate.UTC,
             DataConnectionEncryption = value.EncryptDataChannel,
             ValidateCertificateRevocation = value.CheckCertificateRevocation,
             SocketKeepAlive = value.SocketKeepAlive,
@@ -80,7 +83,6 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
         if (!string.IsNullOrWhiteSpace(value.ServerTimeZone))
         {
             config.ServerTimeZone = TimeZoneInfo.FindSystemTimeZoneById(value.ServerTimeZone);
-            config.TimeConversion = FtpDate.ServerTime;
         }
         if (value.Session is { KeepAliveSeconds: > 0 } session)
         {

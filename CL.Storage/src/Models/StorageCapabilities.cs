@@ -65,7 +65,17 @@ public enum StorageFeature : ulong
     /// <summary>The provider can append content without replacing the complete object.</summary>
     Append = 1UL << 28,
     /// <summary>The provider can emit object-change notifications.</summary>
-    ChangeNotifications = 1UL << 29
+    ChangeNotifications = 1UL << 29,
+    /// <summary>Unix permission bits can be changed through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    Permissions = 1UL << 30,
+    /// <summary>Numeric owner and group can be changed through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    Ownership = 1UL << 31,
+    /// <summary>Modification (and possibly access) times can be set through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    SetTimestamps = 1UL << 32,
+    /// <summary>Symbolic links can be created through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    CreateLinks = 1UL << 33,
+    /// <summary>Link targets can be read through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    ReadLinks = 1UL << 34
 }
 
 /// <summary>Optional provider limits. A null value means the provider did not expose a reliable limit.</summary>

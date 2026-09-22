@@ -13,7 +13,7 @@ using Renci.SshNet.Sftp;
 namespace CL.Storage.Providers.Sftp;
 
 /// <summary>Root-scoped storage over SSH File Transfer Protocol.</summary>
-public sealed class SftpStorageBackend : IStorageBackend
+public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService
 {
     private static readonly StorageCapabilities SftpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -22,7 +22,12 @@ public sealed class SftpStorageBackend : IStorageBackend
         StorageFeature.DirectoryMove |
         StorageFeature.RelayedCopy |
         StorageFeature.ServerSideMove |
-        StorageFeature.RangeReads);
+        StorageFeature.RangeReads |
+        StorageFeature.Links |
+        StorageFeature.Permissions |
+        StorageFeature.Ownership |
+        StorageFeature.SetTimestamps |
+        StorageFeature.CreateLinks);
 
     private readonly ProviderClientPool<SftpClient> _clients;
     private readonly RemotePathResolver _paths;
@@ -494,6 +499,81 @@ public sealed class SftpStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
+    public Task<Result> SetPermissionsAsync(string path, int unixMode, CancellationToken cancellationToken = default) =>
+        ChangeAttributesAsync(path, "Set SFTP permissions", attributes =>
+        {
+            attributes.SetPermissions((short)UnixPermissions.ToOctalDigits(unixMode & 0x1FF));
+            attributes.IsUIDBitSet = (unixMode & 0x800) != 0;
+            attributes.IsGroupIDBitSet = (unixMode & 0x400) != 0;
+            attributes.IsStickyBitSet = (unixMode & 0x200) != 0;
+        }, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<Result> SetOwnerAsync(string path, long? ownerId, long? groupId, CancellationToken cancellationToken = default) =>
+        ChangeAttributesAsync(path, "Set SFTP owner", attributes =>
+        {
+            if (ownerId is { } owner) attributes.UserId = checked((int)owner);
+            if (groupId is { } group) attributes.GroupId = checked((int)group);
+        }, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<Result> SetTimestampsAsync(string path, DateTimeOffset? lastModified, DateTimeOffset? lastAccessed = null, CancellationToken cancellationToken = default) =>
+        ChangeAttributesAsync(path, "Set SFTP timestamps", attributes =>
+        {
+            if (lastModified is { } modified) attributes.LastWriteTimeUtc = modified.UtcDateTime;
+            if (lastAccessed is { } accessed) attributes.LastAccessTimeUtc = accessed.UtcDateTime;
+        }, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<Result> CreateLinkAsync(string linkPath, string targetPath, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Create SFTP link", RetryKind.NonIdempotent, async (_, token) =>
+        {
+            var link = _paths.Resolve(linkPath, requireNonRoot: true);
+            if (link.IsFailure) return Result.Failure(link.Error!);
+            var target = _paths.Resolve(targetPath);
+            if (target.IsFailure) return Result.Failure(target.Error!);
+            SftpClient? client = null;
+            try
+            {
+                client = await OpenClientAsync(token).ConfigureAwait(false);
+                if (await client.ExistsAsync(link.Value!.RemotePath, token).ConfigureAwait(false))
+                    return Result.Failure(StorageErrors.Conflict("The SFTP link path already exists."));
+                // SSH.NET swaps the arguments for OpenSSH's reversed SSH_FXP_SYMLINK order itself.
+                client.SymbolicLink(target.Value!.RemotePath, link.Value.RemotePath);
+                return Result.Success();
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) { return Result.Failure(Fail(client, error, "Create SFTP link")); }
+            finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+        }, cancellationToken);
+
+    /// <inheritdoc />
+    /// <remarks>SSH.NET does not expose SFTP <c>readlink</c>, so link targets cannot be read over SFTP.</remarks>
+    public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.Unsupported(
+            "Reading SFTP link targets is not supported by the SSH library.")));
+
+    /// <summary>Reads an item's attributes, applies a change, and writes back only what changed.</summary>
+    private Task<Result> ChangeAttributesAsync(string path, string operation, Action<SftpFileAttributes> change, CancellationToken cancellationToken) =>
+        _retry.ExecuteAsync(operation, RetryKind.Idempotent, async (_, token) =>
+        {
+            var resolved = _paths.Resolve(path);
+            if (resolved.IsFailure) return Result.Failure(resolved.Error!);
+            SftpClient? client = null;
+            try
+            {
+                client = await OpenClientAsync(token).ConfigureAwait(false);
+                var attributes = await client.GetAttributesAsync(resolved.Value!.RemotePath, token).ConfigureAwait(false);
+                change(attributes);
+                client.SetAttributes(resolved.Value.RemotePath, attributes);
+                return Result.Success();
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) { return Result.Failure(Fail(client, error, operation)); }
+            finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+        }, cancellationToken);
+
+    /// <inheritdoc />
     public ValueTask DisposeAsync() => _clients.DisposeAsync();
 
     private Task<SftpClient> OpenClientAsync(CancellationToken cancellationToken) =>
@@ -756,23 +836,44 @@ public sealed class SftpStorageBackend : IStorageBackend
     private static bool IsSessionFault(Error error) =>
         StorageErrorInfo.IsConnectionFault(error) || error.Code == StorageErrors.TimeoutCode;
 
-    private static StorageItem ToItem(string path, SftpFileAttributes attributes) => new()
-    {
-        Path = path,
-        Name = NameOf(path),
-        ItemType = attributes.IsSymbolicLink ? StorageItemType.Link : attributes.IsDirectory ? StorageItemType.Directory : StorageItemType.File,
-        Size = attributes.IsRegularFile ? attributes.Size : null,
-        LastModified = new DateTimeOffset(attributes.LastWriteTimeUtc)
-    };
+    private static StorageItem ToItem(string path, ISftpFile item) => ToItem(path, item.Attributes);
 
-    private static StorageItem ToItem(string path, ISftpFile item) => new()
+    private static StorageItem ToItem(string path, SftpFileAttributes attributes)
     {
-        Path = path,
-        Name = NameOf(path),
-        ItemType = item.IsSymbolicLink ? StorageItemType.Link : item.IsDirectory ? StorageItemType.Directory : StorageItemType.File,
-        Size = item.IsRegularFile ? item.Length : null,
-        LastModified = new DateTimeOffset(item.LastWriteTimeUtc)
-    };
+        var name = NameOf(path);
+        return new StorageItem
+        {
+            Path = path,
+            Name = name,
+            ItemType = attributes.IsSymbolicLink ? StorageItemType.Link : attributes.IsDirectory ? StorageItemType.Directory : StorageItemType.File,
+            Size = attributes.IsRegularFile ? attributes.Size : null,
+            LastModified = new DateTimeOffset(attributes.LastWriteTimeUtc),
+            LastAccessed = new DateTimeOffset(attributes.LastAccessTimeUtc),
+            UnixMode = ModeOf(attributes),
+            OwnerId = attributes.UserId,
+            GroupId = attributes.GroupId,
+            IsHidden = name.StartsWith('.')
+        };
+    }
+
+    /// <summary>Rebuilds the numeric mode from the flags SSH.NET exposes.</summary>
+    internal static int ModeOf(SftpFileAttributes attributes)
+    {
+        var mode = 0;
+        if (attributes.IsUIDBitSet) mode |= 0x800;
+        if (attributes.IsGroupIDBitSet) mode |= 0x400;
+        if (attributes.IsStickyBitSet) mode |= 0x200;
+        if (attributes.OwnerCanRead) mode |= 0x100;
+        if (attributes.OwnerCanWrite) mode |= 0x80;
+        if (attributes.OwnerCanExecute) mode |= 0x40;
+        if (attributes.GroupCanRead) mode |= 0x20;
+        if (attributes.GroupCanWrite) mode |= 0x10;
+        if (attributes.GroupCanExecute) mode |= 0x8;
+        if (attributes.OthersCanRead) mode |= 0x4;
+        if (attributes.OthersCanWrite) mode |= 0x2;
+        if (attributes.OthersCanExecute) mode |= 0x1;
+        return mode;
+    }
 
     private static StorageItem DirectoryItem(string path) => new()
     {

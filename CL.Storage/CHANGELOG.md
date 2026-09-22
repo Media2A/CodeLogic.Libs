@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- FTP listing times were shifted by the client machine's UTC offset: the FTP client now converts to
+  UTC, and unspecified times are no longer reinterpreted as local time.
 - WebDAV uploads, moves, and copies each stranded a pooled HTTP connection until garbage collection,
   because the WebDAV client library never disposes those responses. With a connection limit the next
   request hung; without one, sockets piled up under load. The backend now issues MOVE and COPY itself.
@@ -58,6 +60,10 @@
 
 ### Added
 
+- `IStorageAttributeService` with permissions (including recursive file/directory modes), numeric
+  ownership, timestamps, and symbolic links, plus `StorageItem.UnixMode`, `Permissions`, `Owner`,
+  `Group`, `OwnerId`, `GroupId`, `LinkTarget`, `Created`, `LastAccessed`, and `IsHidden`, and
+  `UnixPermissions` for octal and `rwx` conversion.
 - WebDAV: Digest, NTLM, and Negotiate authentication, public-key (SPKI) pins,
   `RequireValidCertificateChain`, client certificates for mutual TLS, and `MaxConnectionsPerServer`.
   Basic credentials are sent up front instead of after a 401 challenge.

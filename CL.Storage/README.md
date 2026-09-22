@@ -364,6 +364,34 @@ await media.UploadAsync("settings.json", replacement, new StorageUploadOptions
 Providers that cannot enforce the condition atomically reject it instead of performing a racy
 check-then-write.
 
+## Permissions, ownership, timestamps, and links
+
+`StorageItem` now carries `UnixMode` (with `Permissions` as `rwxr-xr-x` text), `Owner`/`Group`
+(FTP listings), `OwnerId`/`GroupId` (SFTP), `LinkTarget`, `Created`, `LastAccessed`, and `IsHidden`
+wherever the provider reports them. Changing them goes through `IStorageAttributeService`, exposed as
+extension methods on every `IStorageService`:
+
+```csharp
+await storage.SetPermissionsAsync("reports/q3.csv", "640");
+await storage.SetPermissionsRecursiveAsync("public", fileMode: 0x1A4, directoryMode: 0x1ED); // 0644 / 0755
+await storage.SetOwnerAsync("reports/q3.csv", ownerId: 1001, groupId: 1001);
+await storage.SetTimestampsAsync("reports/q3.csv", lastModified: sourceTime);
+await storage.CreateLinkAsync("current", "releases/v42");
+var link = await storage.ReadLinkAsync("current");
+```
+
+| | Local | FTP | SFTP |
+|---|---|---|---|
+| Permissions | Unix only | `SITE CHMOD` | yes, incl. setuid/setgid/sticky |
+| Owner/group | no | no | numeric IDs |
+| Timestamps | modified + accessed | modified (`MFMT`/`MDTM`) | modified + accessed |
+| Create link | yes (relative) | no | yes |
+| Read link | yes | from listings | no (SSH.NET lacks `readlink`) |
+
+Check `Capabilities` for `Permissions`, `Ownership`, `SetTimestamps`, `CreateLinks`, and
+`ReadLinks`; unsupported calls return `storage.unsupported`. Link targets must stay inside the
+mounted root. On Windows, creating local links needs Developer Mode or the symbolic-link privilege.
+
 ## Runtime connections, health, and native clients
 
 ```csharp

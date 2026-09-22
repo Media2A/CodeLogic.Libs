@@ -11,7 +11,7 @@ using FluentFTP.Exceptions;
 namespace CL.Storage.Providers.Ftp;
 
 /// <summary>Root-scoped storage over FTP, explicit FTPS, or implicit FTPS.</summary>
-public sealed class FtpStorageBackend : IStorageBackend
+public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService
 {
     private static readonly StorageCapabilities FtpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -20,7 +20,11 @@ public sealed class FtpStorageBackend : IStorageBackend
         StorageFeature.DirectoryMove |
         StorageFeature.RelayedCopy |
         StorageFeature.ServerSideMove |
-        StorageFeature.RangeReads);
+        StorageFeature.RangeReads |
+        StorageFeature.Links |
+        StorageFeature.Permissions |
+        StorageFeature.SetTimestamps |
+        StorageFeature.ReadLinks);
 
     private readonly ProviderClientPool<AsyncFtpClient> _clients;
     private readonly RemotePathResolver _paths;
@@ -537,6 +541,81 @@ public sealed class FtpStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
+    /// <remarks>Uses <c>SITE CHMOD</c>, which Unix-style servers implement and Windows servers usually do not.</remarks>
+    public Task<Result> SetPermissionsAsync(string path, int unixMode, CancellationToken cancellationToken = default) =>
+        WithClientAsync(path, "Set FTP permissions", RetryKind.Idempotent, (client, remote, token) =>
+            client.Chmod(remote, UnixPermissions.ToOctalDigits(unixMode), token), cancellationToken);
+
+    /// <inheritdoc />
+    public Task<Result> SetOwnerAsync(string path, long? ownerId, long? groupId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Result.Failure(StorageErrors.Unsupported("FTP has no command for changing file ownership.")));
+
+    /// <inheritdoc />
+    /// <remarks>Uses <c>MFMT</c> (or the two-argument <c>MDTM</c>); the access time cannot be set over FTP and is ignored.</remarks>
+    public Task<Result> SetTimestampsAsync(string path, DateTimeOffset? lastModified, DateTimeOffset? lastAccessed = null, CancellationToken cancellationToken = default) =>
+        lastModified is not { } modified
+            ? Task.FromResult(Result.Failure(StorageErrors.Unsupported("FTP can only set the modification time.")))
+            : WithClientAsync(path, "Set FTP timestamps", RetryKind.Idempotent, (client, remote, token) =>
+                client.SetModifiedTime(remote, modified.UtcDateTime, token), cancellationToken);
+
+    /// <inheritdoc />
+    public Task<Result> CreateLinkAsync(string linkPath, string targetPath, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Result.Failure(StorageErrors.Unsupported("FTP has no standard command for creating links.")));
+
+    /// <inheritdoc />
+    public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Read FTP link", RetryKind.Idempotent, async (_, token) =>
+        {
+            var resolved = _paths.Resolve(path, requireNonRoot: true);
+            if (resolved.IsFailure) return Result<StorageLinkInfo>.Failure(resolved.Error!);
+            AsyncFtpClient? client = null;
+            try
+            {
+                client = await OpenClientAsync(token).ConfigureAwait(false);
+                // The link entry itself is only visible in its parent's listing; stat-style calls follow it.
+                var parent = RemotePathResolver.Parent(resolved.Value!.RemotePath);
+                var listing = await client.GetListing(parent, FtpListOption.Auto, token).ConfigureAwait(false);
+                var entry = listing.FirstOrDefault(item => _paths.FromRemotePath(item.FullName) == resolved.Value.StoragePath);
+                if (entry is null)
+                    return Result<StorageLinkInfo>.Failure(StorageErrors.NotFound($"FTP item '{resolved.Value.StoragePath}' was not found."));
+                if (entry.Type != FtpObjectType.Link || string.IsNullOrWhiteSpace(entry.LinkTarget))
+                    return Result<StorageLinkInfo>.Failure(StorageErrors.Conflict($"FTP item '{resolved.Value.StoragePath}' is not a link."));
+                return Result<StorageLinkInfo>.Success(LinkInfo(entry.LinkTarget, parent));
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) { return Result<StorageLinkInfo>.Failure(Fail(client, error, "Read FTP link")); }
+            finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+        }, cancellationToken);
+
+    private StorageLinkInfo LinkInfo(string rawTarget, string linkParent)
+    {
+        var absolute = rawTarget.StartsWith('/') ? rawTarget : RemotePathResolver.Combine(linkParent, rawTarget);
+        return new StorageLinkInfo(rawTarget, _paths.FromRemotePath(absolute));
+    }
+
+    private Task<Result> WithClientAsync(
+        string path,
+        string operation,
+        RetryKind kind,
+        Func<AsyncFtpClient, string, CancellationToken, Task> action,
+        CancellationToken cancellationToken) =>
+        _retry.ExecuteAsync(operation, kind, async (_, token) =>
+        {
+            var resolved = _paths.Resolve(path);
+            if (resolved.IsFailure) return Result.Failure(resolved.Error!);
+            AsyncFtpClient? client = null;
+            try
+            {
+                client = await OpenClientAsync(token).ConfigureAwait(false);
+                await action(client, resolved.Value!.RemotePath, token).ConfigureAwait(false);
+                return Result.Success();
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) { return Result.Failure(Fail(client, error, operation)); }
+            finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+        }, cancellationToken);
+
+    /// <inheritdoc />
     public ValueTask DisposeAsync() => _clients.DisposeAsync();
 
     private static async Task<Result> CommitPathAsync(
@@ -787,19 +866,41 @@ public sealed class FtpStorageBackend : IStorageBackend
     private static bool IsSessionFault(Error error) =>
         StorageErrorInfo.IsConnectionFault(error) || error.Code == StorageErrors.TimeoutCode;
 
-    private static StorageItem ToItem(string path, FtpListItem item) => new()
+    private static StorageItem ToItem(string path, FtpListItem item)
     {
-        Path = path,
-        Name = NameOf(path),
-        ItemType = item.Type switch
+        var name = NameOf(path);
+        return new StorageItem
         {
-            FtpObjectType.Directory => StorageItemType.Directory,
-            FtpObjectType.Link => StorageItemType.Link,
-            _ => StorageItemType.File
-        },
-        Size = item.Type == FtpObjectType.File && item.Size >= 0 ? item.Size : null,
-        LastModified = item.Modified == DateTime.MinValue ? null : new DateTimeOffset(item.Modified.ToUniversalTime())
-    };
+            Path = path,
+            Name = name,
+            ItemType = item.Type switch
+            {
+                FtpObjectType.Directory => StorageItemType.Directory,
+                FtpObjectType.Link => StorageItemType.Link,
+                _ => StorageItemType.File
+            },
+            Size = item.Type == FtpObjectType.File && item.Size >= 0 ? item.Size : null,
+            LastModified = Utc(item.Modified),
+            Created = Utc(item.Created),
+            UnixMode = ModeOf(item.Chmod),
+            Owner = string.IsNullOrWhiteSpace(item.RawOwner) ? null : item.RawOwner,
+            Group = string.IsNullOrWhiteSpace(item.RawGroup) ? null : item.RawGroup,
+            LinkTarget = string.IsNullOrWhiteSpace(item.LinkTarget) ? null : item.LinkTarget,
+            IsHidden = name.StartsWith('.')
+        };
+    }
+
+    /// <summary>
+    /// The client converts listing times to UTC; an unspecified kind must not be reinterpreted as the
+    /// local machine's time zone, which shifted times by the client's UTC offset.
+    /// </summary>
+    internal static DateTimeOffset? Utc(DateTime value) => value == DateTime.MinValue
+        ? null
+        : new DateTimeOffset(value.Kind == DateTimeKind.Local ? value.ToUniversalTime() : DateTime.SpecifyKind(value, DateTimeKind.Utc));
+
+    /// <summary>FluentFTP reports modes as decimal digits (755); converts them to permission bits.</summary>
+    internal static int? ModeOf(int chmod) =>
+        chmod > 0 && UnixPermissions.TryParseOctal(chmod.ToString(System.Globalization.CultureInfo.InvariantCulture), out var mode) ? mode : null;
 
     private static StorageItem DirectoryItem(string path) => new()
     {

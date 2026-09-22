@@ -12,7 +12,8 @@ internal sealed class StorageServiceProxy :
     IStorageMetadataService,
     IStorageTagService,
     IStorageSignedUrlService,
-    IStorageVersionService
+    IStorageVersionService,
+    IStorageAttributeService
 {
     private readonly StorageLibrary _library;
     private readonly string _connectionId;
@@ -218,6 +219,42 @@ internal sealed class StorageServiceProxy :
         using var lease = _library.AcquireOperation(_connectionId);
         return await operation(lease.Backend).ConfigureAwait(false);
     }
+
+    public Task<Result> SetPermissionsAsync(string path, int unixMode, CancellationToken cancellationToken = default) =>
+        unixMode is < 0 or > UnixPermissions.MaxMode
+            ? Task.FromResult(Result.Failure(StorageErrors.InvalidContent("The permission mode must be between 0 and octal 7777.")))
+            : InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes
+                ? attributes.SetPermissionsAsync(normalized, unixMode, cancellationToken)
+                : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support permissions."))));
+
+    public Task<Result> SetOwnerAsync(string path, long? ownerId, long? groupId, CancellationToken cancellationToken = default) =>
+        ownerId is null && groupId is null
+            ? Task.FromResult(Result.Failure(StorageErrors.InvalidContent("An owner or group ID is required.")))
+            : InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes
+                ? attributes.SetOwnerAsync(normalized, ownerId, groupId, cancellationToken)
+                : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support ownership changes."))));
+
+    public Task<Result> SetTimestampsAsync(string path, DateTimeOffset? lastModified, DateTimeOffset? lastAccessed = null, CancellationToken cancellationToken = default) =>
+        lastModified is null && lastAccessed is null
+            ? Task.FromResult(Result.Failure(StorageErrors.InvalidContent("A modification or access time is required.")))
+            : InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes
+                ? attributes.SetTimestampsAsync(normalized, lastModified, lastAccessed, cancellationToken)
+                : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support setting timestamps."))));
+
+    public Task<Result> CreateLinkAsync(string linkPath, string targetPath, CancellationToken cancellationToken = default)
+    {
+        var target = StoragePath.Normalize(targetPath);
+        if (target.IsFailure)
+            return Task.FromResult(Result.Failure(target.Error!));
+        return InvokePathAsync(linkPath, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes
+            ? attributes.CreateLinkAsync(normalized, target.Value!, cancellationToken)
+            : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support creating links."))));
+    }
+
+    public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default) =>
+        InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes
+            ? attributes.ReadLinkAsync(normalized, cancellationToken)
+            : Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.Unsupported("This storage connection does not support reading links."))));
 
     private Task<Result<T>> InvokePathAsync<T>(
         string path,
