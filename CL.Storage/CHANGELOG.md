@@ -13,6 +13,13 @@
 
 ## Unreleased
 
+### Fixed
+
+- WebDAV failures were all reported as `storage.provider_error`, and missing-directory detection never
+  matched: the HTTP status is read from `WebDAVException.GetHttpCode()` (with a message fallback)
+  instead of `ErrorCode`, which the client leaves at zero.
+- FTP server replies wrapped in FluentFTP's generic `FtpException` are now unwrapped and classified.
+
 ### Changed (breaking)
 
 - `FtpStorageBackend`, `SftpStorageBackend`, and `WebDavStorageBackend` constructors take optional
