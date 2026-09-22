@@ -76,6 +76,8 @@ services:
   # connections and resumable-upload URLs also resolve through the proxy.
   ftp-internal:
     image: delfer/alpine-ftp-server
+    # vsftpd resolves its own name for PASV at startup and can die if Docker DNS is not ready yet.
+    restart: unless-stopped
     environment:
       USERS: "cltest|cltest-pw|/home/cltest|1001"
       ADDRESS: "ftp-internal"
