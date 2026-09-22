@@ -12,7 +12,7 @@ using FluentFTP.Exceptions;
 namespace CL.Storage.Providers.Ftp;
 
 /// <summary>Root-scoped storage over FTP, explicit FTPS, or implicit FTPS.</summary>
-public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageChecksumService, IStorageAppendService
+public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageChecksumService, IStorageAppendService, IStorageCommandService, IStorageSpaceService
 {
     private static readonly StorageCapabilities FtpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -25,6 +25,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         // so folder moves no longer fall back to copy-then-delete through the client.
         StorageFeature.AtomicMove |
         StorageFeature.RangeReads |
+        StorageFeature.SpaceInfo |
         StorageFeature.Append |
         StorageFeature.Checksums |
         StorageFeature.Links |
@@ -100,7 +101,12 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     /// <inheritdoc />
     public string Root => _paths.Root;
     /// <inheritdoc />
-    public StorageCapabilities Capabilities => FtpCapabilities;
+    public StorageCapabilities Capabilities => AllowRawCommands
+        ? new StorageCapabilities(FtpCapabilities.Features | StorageFeature.RawCommands, FtpCapabilities.Limits)
+        : FtpCapabilities;
+
+    /// <summary>Gets whether raw commands are allowed; off unless the connection enables <c>AllowRawCommands</c>.</summary>
+    public bool AllowRawCommands { get; init; }
 
     /// <inheritdoc />
     public Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default) =>
@@ -658,6 +664,46 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Append FTP file")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+    }
+
+    /// <inheritdoc />
+    public async Task<Result<StorageCommandResult>> ExecuteCommandAsync(string command, CancellationToken cancellationToken = default)
+    {
+        if (!AllowRawCommands)
+            return Result<StorageCommandResult>.Failure(StorageErrors.Unsupported("Raw commands are disabled for this connection (AllowRawCommands)."));
+        if (string.IsNullOrWhiteSpace(command) || command.IndexOfAny(['\r', '\n']) >= 0)
+            return Result<StorageCommandResult>.Failure(StorageErrors.InvalidContent("A command must be one non-empty line."));
+        AsyncFtpClient? client = null;
+        try
+        {
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            var reply = await client.Execute(command, cancellationToken).ConfigureAwait(false);
+            var text = string.IsNullOrEmpty(reply.InfoMessages) ? reply.Message : $"{reply.InfoMessages}\n{reply.Message}";
+            return Result<StorageCommandResult>.Success(new StorageCommandResult(reply.Success, reply.Code, text ?? string.Empty, string.Empty));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageCommandResult>.Failure(Fail(client, error, "Execute FTP command")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Uses <c>AVBL</c>, which reports available bytes on servers that implement it.</remarks>
+    public async Task<Result<StorageSpaceInfo>> GetSpaceAsync(string path = "", CancellationToken cancellationToken = default)
+    {
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure) return Result<StorageSpaceInfo>.Failure(resolved.Error!);
+        AsyncFtpClient? client = null;
+        try
+        {
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            var reply = await client.Execute($"AVBL {resolved.Value!.RemotePath}", cancellationToken).ConfigureAwait(false);
+            return reply.Success && long.TryParse(reply.Message?.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var available)
+                ? Result<StorageSpaceInfo>.Success(new StorageSpaceInfo(null, available, null))
+                : Result<StorageSpaceInfo>.Failure(StorageErrors.Unsupported("The FTP server does not report free space (AVBL)."));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageSpaceInfo>.Failure(Fail(client, error, "Get FTP free space")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 

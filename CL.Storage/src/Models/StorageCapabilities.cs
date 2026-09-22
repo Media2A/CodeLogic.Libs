@@ -75,7 +75,11 @@ public enum StorageFeature : ulong
     /// <summary>Symbolic links can be created through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
     CreateLinks = 1UL << 33,
     /// <summary>Link targets can be read through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
-    ReadLinks = 1UL << 34
+    ReadLinks = 1UL << 34,
+    /// <summary>Raw protocol commands can be sent through <see cref="Abstractions.IStorageCommandService"/>.</summary>
+    RawCommands = 1UL << 35,
+    /// <summary>Free and used space can be read through <see cref="Abstractions.IStorageSpaceService"/>.</summary>
+    SpaceInfo = 1UL << 36
 }
 
 /// <summary>Optional provider limits. A null value means the provider did not expose a reliable limit.</summary>

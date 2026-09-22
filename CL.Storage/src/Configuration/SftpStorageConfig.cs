@@ -110,6 +110,12 @@ public sealed class SftpConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets automatic retry of transient failures.</summary>
     public StorageRetryConfig Retry { get; set; } = new();
 
+    /// <summary>
+    /// Gets or sets whether raw commands may be sent through <see cref="Abstractions.IStorageCommandService"/>.
+    /// Off by default: commands are not confined to <c>Root</c> and can do anything the account may do.
+    /// </summary>
+    public bool AllowRawCommands { get; set; }
+
     /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
     public StorageProxyConfig Proxy { get; set; } = new();
 

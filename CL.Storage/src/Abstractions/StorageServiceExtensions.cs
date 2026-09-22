@@ -605,6 +605,32 @@ public static class StorageServiceExtensions
         return Result<int>.Success(deleted);
     }
 
+    /// <summary>Sends a raw FTP or SSH command when the connection allows it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="command">Command text.</param>
+    /// <param name="cancellationToken">Token used to cancel the command.</param>
+    /// <returns>The reply, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result<StorageCommandResult>> ExecuteCommandAsync(this IStorageService storage, string command, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageCommandService commands
+            ? commands.ExecuteCommandAsync(command, cancellationToken)
+            : Task.FromResult(Result<StorageCommandResult>.Failure(StorageErrors.Unsupported("This storage connection does not support raw commands.")));
+    }
+
+    /// <summary>Reads free and used space when the connection reports it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Path relative to the mounted root.</param>
+    /// <param name="cancellationToken">Token used to cancel the request.</param>
+    /// <returns>Space figures, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result<StorageSpaceInfo>> GetSpaceAsync(this IStorageService storage, string path = "", CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageSpaceService space
+            ? space.GetSpaceAsync(path, cancellationToken)
+            : Task.FromResult(Result<StorageSpaceInfo>.Failure(StorageErrors.Unsupported("This storage connection does not report free space.")));
+    }
+
     /// <summary>Sets Unix permission bits when supported by the connection.</summary>
     /// <param name="storage">Storage connection.</param>
     /// <param name="path">Item path relative to the mounted root.</param>

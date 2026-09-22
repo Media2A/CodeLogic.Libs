@@ -500,6 +500,18 @@ that cannot (S3, Azure, GCS, Swift) a copy is newer than its source, and "change
 newer", so repeated syncs stay no-ops. Per-file failures are collected in `Failed`. `DryRun` returns
 the plan without changing anything.
 
+### Raw commands and free space
+
+With `AllowRawCommands: true` on an FTP or SFTP connection, `ExecuteCommandAsync` sends a raw FTP
+command (`SITE ...`, `SYST`) or runs an SSH shell command as the connection's account. It is off by
+default because commands are not confined to the connection's `Root`. A rejected command or non-zero
+exit is returned as a result with `Succeeded = false`, not as an error. Servers that allow only SFTP
+(`ForceCommand internal-sftp`) refuse shell commands.
+
+`GetSpaceAsync` reports free and used space: SFTP through `statvfs@openssh.com`, FTP through `AVBL`
+where the server implements it, and local connections from the volume. WebDAV and object stores
+return `storage.unsupported`.
+
 ### Links in transfers
 
 Relayed copies and moves (across connections, or directory copies) meet links as provider-specific

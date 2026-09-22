@@ -15,7 +15,9 @@ internal sealed class StorageServiceProxy :
     IStorageVersionService,
     IStorageAttributeService,
     IStorageChecksumService,
-    IStorageAppendService
+    IStorageAppendService,
+    IStorageCommandService,
+    IStorageSpaceService
 {
     private readonly StorageLibrary _library;
     private readonly string _connectionId;
@@ -301,6 +303,16 @@ internal sealed class StorageServiceProxy :
         UploadPathWithEventAsync(path, Result.Success(), cancellationToken, (backend, normalized) => backend is IStorageAppendService append
             ? append.AppendAsync(normalized, source, cancellationToken)
             : Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Unsupported("This storage connection cannot append."))));
+
+    public Task<Result<StorageCommandResult>> ExecuteCommandAsync(string command, CancellationToken cancellationToken = default) =>
+        InvokeAsync(backend => backend is IStorageCommandService commands
+            ? commands.ExecuteCommandAsync(command, cancellationToken)
+            : Task.FromResult(Result<StorageCommandResult>.Failure(StorageErrors.Unsupported("This storage connection does not support raw commands."))));
+
+    public Task<Result<StorageSpaceInfo>> GetSpaceAsync(string path = "", CancellationToken cancellationToken = default) =>
+        InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageSpaceService space
+            ? space.GetSpaceAsync(normalized, cancellationToken)
+            : Task.FromResult(Result<StorageSpaceInfo>.Failure(StorageErrors.Unsupported("This storage connection does not report free space."))));
 
     public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default) =>
         InvokePathAsync(path, cancellationToken, (backend, normalized) => backend is IStorageAttributeService attributes

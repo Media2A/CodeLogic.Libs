@@ -11,7 +11,7 @@ using CodeLogic.Core.Results;
 namespace CL.Storage.Providers.Local;
 
 /// <summary>Provides storage operations over a local path or mounted UNC root.</summary>
-public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService
+public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageSpaceService
 {
     /// <inheritdoc />
     public const long DefaultMaxBufferedDownloadBytes = 67_108_864;
@@ -26,6 +26,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         StorageFeature.AtomicReplace |
         StorageFeature.ConditionalCreate |
         StorageFeature.RangeReads |
+        StorageFeature.SpaceInfo |
         StorageFeature.Append |
         StorageFeature.Links |
         StorageFeature.SetTimestamps |
@@ -717,6 +718,35 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         {
             return Result<StorageItem>.Failure(StorageErrors.FromException(error, "Append file"));
         }
+    }
+
+    /// <inheritdoc />
+    public Task<Result<StorageSpaceInfo>> GetSpaceAsync(string path = "", CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure) return Task.FromResult(Result<StorageSpaceInfo>.Failure(resolved.Error!));
+        try
+        {
+            var drive = DriveFor(resolved.Value!.FullPath);
+            return Task.FromResult(Result<StorageSpaceInfo>.Success(new StorageSpaceInfo(
+                drive.TotalSize, drive.AvailableFreeSpace, drive.TotalSize - drive.TotalFreeSpace)));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return Task.FromResult(Result<StorageSpaceInfo>.Failure(StorageErrors.FromException(error, "Get free space")));
+        }
+    }
+
+    /// <summary>Finds the mounted volume holding a path: the longest matching mount point on Unix, the drive root on Windows.</summary>
+    private static DriveInfo DriveFor(string fullPath)
+    {
+        if (OperatingSystem.IsWindows())
+            return new DriveInfo(Path.GetPathRoot(fullPath)!);
+        return DriveInfo.GetDrives()
+            .Where(drive => drive.IsReady && fullPath.StartsWith(drive.RootDirectory.FullName, StringComparison.Ordinal))
+            .OrderByDescending(drive => drive.RootDirectory.FullName.Length)
+            .First();
     }
 
     private Task<Result> Attribute(string path, string operation, Action<string> change, CancellationToken cancellationToken)

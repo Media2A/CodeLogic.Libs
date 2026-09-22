@@ -23,10 +23,27 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
             maxBufferedDownloadBytes,
             value.Session,
             value.Retry,
-            observer);
+            observer)
+        {
+            CommandClientFactory = value.AllowRawCommands ? () => CreateCommandClient(value) : null
+        };
     }
 
-    internal static SftpClient CreateClient(SftpConnectionConfig value)
+    internal static SftpClient CreateClient(SftpConnectionConfig value) =>
+        CreateClient(value, connection =>
+        {
+            var client = new SftpClient(connection) { OperationTimeout = connection.Timeout };
+            if (value.BufferSize is { } bufferSize)
+                client.BufferSize = (uint)bufferSize;
+            return client;
+        });
+
+    /// <summary>Creates an SSH shell client with exactly the same authentication, host trust, proxy, and tunnel.</summary>
+    internal static SshClient CreateCommandClient(SftpConnectionConfig value) =>
+        CreateClient(value, connection => new SshClient(connection));
+
+    private static TClient CreateClient<TClient>(SftpConnectionConfig value, Func<ConnectionInfo, TClient> create)
+        where TClient : BaseClient
     {
         var timeout = TimeSpan.FromSeconds(value.TimeoutSeconds);
         var tunnel = value.JumpHost is null ? null : SftpJumpTunnel.Open(value, timeout);
@@ -49,9 +66,7 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
                 Encoding = StorageEncodings.Get(value.Encoding)
             };
             ApplyAlgorithms(connection, value);
-            var client = new SftpClient(connection) { OperationTimeout = timeout };
-            if (value.BufferSize is { } bufferSize)
-                client.BufferSize = (uint)bufferSize;
+            var client = create(connection);
             if (value.Session is { KeepAliveSeconds: > 0 } session)
                 client.KeepAliveInterval = TimeSpan.FromSeconds(session.KeepAliveSeconds);
             // The target key is checked against the real host name, even when reached through a tunnel.
@@ -139,7 +154,7 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
 /// <summary>An SSH session to a jump host with a local port forwarded to the SFTP target.</summary>
 internal sealed class SftpJumpTunnel : IDisposable
 {
-    private static readonly ConditionalWeakTable<SftpClient, SftpJumpTunnel> Tunnels = new();
+    private static readonly ConditionalWeakTable<BaseClient, SftpJumpTunnel> Tunnels = new();
     private readonly SshClient _jump;
     private readonly ForwardedPortLocal _forward;
 
@@ -204,10 +219,10 @@ internal sealed class SftpJumpTunnel : IDisposable
         }
     }
 
-    public static void Attach(SftpClient client, SftpJumpTunnel tunnel) => Tunnels.AddOrUpdate(client, tunnel);
+    public static void Attach(BaseClient client, SftpJumpTunnel tunnel) => Tunnels.AddOrUpdate(client, tunnel);
 
     /// <summary>Closes the tunnel that carried <paramref name="client"/>, if any.</summary>
-    public static void Close(SftpClient client)
+    public static void Close(BaseClient client)
     {
         if (Tunnels.TryGetValue(client, out var tunnel))
         {

@@ -14,7 +14,7 @@ using Renci.SshNet.Sftp;
 namespace CL.Storage.Providers.Sftp;
 
 /// <summary>Root-scoped storage over SSH File Transfer Protocol.</summary>
-public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService
+public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageCommandService, IStorageSpaceService
 {
     private static readonly StorageCapabilities SftpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -27,6 +27,7 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         // so folder moves no longer fall back to copy-then-delete through the client.
         StorageFeature.AtomicMove |
         StorageFeature.RangeReads |
+        StorageFeature.SpaceInfo |
         StorageFeature.Append |
         StorageFeature.Links |
         StorageFeature.Permissions |
@@ -95,7 +96,12 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
     /// <inheritdoc />
     public string Root => _paths.Root;
     /// <inheritdoc />
-    public StorageCapabilities Capabilities => SftpCapabilities;
+    public StorageCapabilities Capabilities => CommandClientFactory is not null
+        ? new StorageCapabilities(SftpCapabilities.Features | StorageFeature.RawCommands, SftpCapabilities.Limits)
+        : SftpCapabilities;
+
+    /// <summary>Creates SSH shell sessions for raw commands; set only when the connection enables <c>AllowRawCommands</c>.</summary>
+    internal Func<SshClient>? CommandClientFactory { get; init; }
 
     /// <inheritdoc />
     public Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default) =>
@@ -581,6 +587,72 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Append SFTP file")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Runs in an SSH shell session as the connection's account, starting in its home directory rather
+    /// than <c>Root</c>. Servers that only allow SFTP (<c>ForceCommand internal-sftp</c>) refuse it.
+    /// </remarks>
+    public async Task<Result<StorageCommandResult>> ExecuteCommandAsync(string command, CancellationToken cancellationToken = default)
+    {
+        if (CommandClientFactory is null)
+            return Result<StorageCommandResult>.Failure(StorageErrors.Unsupported("Raw commands are disabled for this connection (AllowRawCommands)."));
+        if (string.IsNullOrWhiteSpace(command))
+            return Result<StorageCommandResult>.Failure(StorageErrors.InvalidContent("A command is required."));
+        SshClient? client = null;
+        try
+        {
+            client = CommandClientFactory();
+            await SftpHostKeyTracker.ConnectAsync(client, cancellationToken).ConfigureAwait(false);
+            using var run = client.CreateCommand(command);
+            await run.ExecuteAsync(cancellationToken).ConfigureAwait(false);
+            var exit = run.ExitStatus ?? -1;
+            return Result<StorageCommandResult>.Success(new StorageCommandResult(
+                exit == 0,
+                exit.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                run.Result ?? string.Empty,
+                run.Error ?? string.Empty));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageCommandResult>.Failure(Map(error, "Execute SSH command")); }
+        finally
+        {
+            if (client is not null)
+            {
+                try { if (client.IsConnected) client.Disconnect(); }
+                catch { /* Best effort. */ }
+                client.Dispose();
+                SftpJumpTunnel.Close(client);
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Uses the <c>statvfs@openssh.com</c> extension, which OpenSSH servers provide.</remarks>
+    public async Task<Result<StorageSpaceInfo>> GetSpaceAsync(string path = "", CancellationToken cancellationToken = default)
+    {
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure) return Result<StorageSpaceInfo>.Failure(resolved.Error!);
+        SftpClient? client = null;
+        try
+        {
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            var status = await client.GetStatusAsync(resolved.Value!.RemotePath, cancellationToken).ConfigureAwait(false);
+            var block = (long)status.BlockSize;
+            return Result<StorageSpaceInfo>.Success(new StorageSpaceInfo(
+                (long)status.TotalBlocks * block,
+                (long)status.AvailableBlocks * block,
+                ((long)status.TotalBlocks - (long)status.FreeBlocks) * block));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (SshException error) when (error.Message.Contains("statvfs", StringComparison.OrdinalIgnoreCase))
+        {
+            // SSH.NET reports a server without the extension as a plain SshException naming it.
+            return Result<StorageSpaceInfo>.Failure(StorageErrors.Unsupported("The SFTP server does not report free space (statvfs@openssh.com)."));
+        }
+        catch (Exception error) { return Result<StorageSpaceInfo>.Failure(Fail(client, error, "Get SFTP free space")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 

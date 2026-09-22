@@ -76,6 +76,8 @@
 
 ### Added
 
+- `IStorageCommandService.ExecuteCommandAsync` for raw FTP and SSH commands (opt-in with
+  `AllowRawCommands`) and `IStorageSpaceService.GetSpaceAsync` for SFTP, FTP (`AVBL`), and local.
 - Directory `CompareAsync` and `SyncAsync` (`Update`, `Mirror` with optional deletes, `TwoWay`) across
   any two connections, with dry runs, timestamp preservation, checksum comparison, and parallel copies.
 - `StorageLibrary.CreateTransferQueue`: a background queue with global and per-connection concurrency,

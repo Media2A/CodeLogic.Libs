@@ -25,7 +25,10 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             value.Session,
             value.Retry,
             observer,
-            AfterConnect(value));
+            AfterConnect(value))
+        {
+            AllowRawCommands = value.AllowRawCommands
+        };
     }
 
     private static AsyncFtpClient CreateClient(FtpConnectionConfig value)

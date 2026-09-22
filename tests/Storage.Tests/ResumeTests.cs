@@ -113,3 +113,29 @@ public sealed class ResumeTests
         public override bool CanSeek => false;
     }
 }
+
+public sealed class SpaceTests
+{
+    [Fact]
+    public async Task Local_space_reports_the_volume_holding_the_root()
+    {
+        using var directory = new TestDirectory();
+        var storage = new LocalStorageBackend("local", new LocalConnectionConfig { RootPath = directory.Path });
+
+        var space = await storage.GetSpaceAsync();
+
+        Assert.True(space.IsSuccess, space.Error?.ToString());
+        Assert.True(space.Value!.TotalBytes > 0);
+        Assert.InRange(space.Value.AvailableBytes!.Value, 0, space.Value.TotalBytes!.Value);
+        Assert.True(storage.Capabilities.Supports(StorageFeature.SpaceInfo));
+    }
+
+    [Fact]
+    public async Task Connections_without_command_support_say_so()
+    {
+        using var directory = new TestDirectory();
+        var storage = new LocalStorageBackend("local", new LocalConnectionConfig { RootPath = directory.Path });
+
+        Assert.Equal(StorageErrors.UnsupportedCode, (await storage.ExecuteCommandAsync("ls")).Error?.Code);
+    }
+}
