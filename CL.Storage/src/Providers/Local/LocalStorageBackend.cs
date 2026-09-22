@@ -352,7 +352,8 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         if (options.Condition is { IsEmpty: false })
             return Task.FromResult(Result.Failure(StorageErrors.Unsupported(
                 "The local provider does not support atomic ETag or version delete conditions.")));
-        var resolved = _paths.Resolve(path);
+        // A link itself can be deleted even when following links is disabled; its target is never touched.
+        var resolved = _paths.ResolveLink(path);
         if (resolved.IsFailure)
             return Task.FromResult(Result.Failure(resolved.Error!));
         if (resolved.Value!.StoragePath.Length == 0)
@@ -361,7 +362,9 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         try
         {
             var attributes = File.GetAttributes(resolved.Value.FullPath);
-            if ((attributes & FileAttributes.Directory) != 0)
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == (FileAttributes.Directory | FileAttributes.ReparsePoint))
+                Directory.Delete(resolved.Value.FullPath, recursive: false); // removes the link, not the target tree
+            else if ((attributes & FileAttributes.Directory) != 0)
                 Directory.Delete(resolved.Value.FullPath, options.Recursive);
             else
                 File.Delete(resolved.Value.FullPath);

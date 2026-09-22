@@ -183,10 +183,34 @@ public sealed record StorageTransferOptions
     public bool CreateParents { get; init; } = true;
     /// <summary>Gets how user metadata is handled across provider boundaries.</summary>
     public StorageMetadataPreservation MetadataPreservation { get; init; } = StorageMetadataPreservation.BestEffort;
+    /// <summary>Gets how symbolic links are treated when a transfer relays content through the client.</summary>
+    public StorageLinkHandling LinkHandling { get; init; } = StorageLinkHandling.Reject;
 
-    /// <summary>Validates the metadata-preservation mode.</summary>
+    /// <summary>Validates the metadata-preservation and link-handling modes.</summary>
     /// <returns>A provider-neutral validation result.</returns>
-    public Result Validate() => Enum.IsDefined(MetadataPreservation)
-        ? Result.Success()
-        : Result.Failure(StorageErrors.InvalidPath("MetadataPreservation is invalid."));
+    public Result Validate()
+    {
+        if (!Enum.IsDefined(MetadataPreservation))
+            return Result.Failure(StorageErrors.InvalidPath("MetadataPreservation is invalid."));
+        return Enum.IsDefined(LinkHandling)
+            ? Result.Success()
+            : Result.Failure(StorageErrors.InvalidPath("LinkHandling is invalid."));
+    }
+}
+
+/// <summary>How relayed transfers treat symbolic links.</summary>
+public enum StorageLinkHandling
+{
+    /// <summary>Fails the transfer when it meets a link, because link targets are provider-specific.</summary>
+    Reject,
+    /// <summary>Leaves links out of the transfer.</summary>
+    Skip,
+    /// <summary>Copies the content of the file a link points to. Links to directories are refused, which also rules out loops.</summary>
+    Follow,
+    /// <summary>
+    /// Creates an equivalent link at the destination. A target inside the transferred directory is remapped
+    /// to the copy; the source must support <see cref="StorageFeature.ReadLinks"/> and the destination
+    /// <see cref="StorageFeature.CreateLinks"/>.
+    /// </summary>
+    Recreate
 }

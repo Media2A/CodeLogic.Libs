@@ -392,6 +392,21 @@ Check `Capabilities` for `Permissions`, `Ownership`, `SetTimestamps`, `CreateLin
 `ReadLinks`; unsupported calls return `storage.unsupported`. Link targets must stay inside the
 mounted root. On Windows, creating local links needs Developer Mode or the symbolic-link privilege.
 
+### Links in transfers
+
+Relayed copies and moves (across connections, or directory copies) meet links as provider-specific
+items. `StorageTransferOptions.LinkHandling` decides what happens:
+
+| Mode | Behavior |
+|---|---|
+| `Reject` (default) | fail with `storage.unsupported` and roll back |
+| `Skip` | leave links out |
+| `Follow` | copy the target file's content; links to directories are refused, so loops cannot occur |
+| `Recreate` | create an equivalent link; targets inside the copied tree point into the copy |
+
+`Recreate` needs `ReadLinks` on the source and `CreateLinks` on the destination; SFTP cannot be a
+`Recreate` source because SSH.NET cannot read link targets.
+
 ## Server-side checksums
 
 `ComputeChecksumAsync` and `VerifyChecksumAsync` ask the server for a stored digest first and only

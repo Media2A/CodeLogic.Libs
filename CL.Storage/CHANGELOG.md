@@ -69,6 +69,9 @@
 
 ### Added
 
+- `StorageTransferOptions.LinkHandling` (`Reject`, `Skip`, `Follow`, `Recreate`) for relayed
+  transfers that meet symbolic links.
+- Deleting a local link removes the link itself, even when `FollowLinks` is off, and never its target.
 - `IStorageChecksumService.GetServerChecksumAsync` for S3, Azure Blob, Google Cloud Storage, Swift, and
   FTP. `ComputeChecksumAsync`/`VerifyChecksumAsync` use the server digest when available (new
   `StorageChecksumMode` parameter) and report it in `StorageChecksum.Source`.

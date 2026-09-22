@@ -62,8 +62,15 @@ internal static class StorageTransferCoordinator
                     options,
                     cleanup,
                     cancellationToken).ConfigureAwait(false),
-                _ => Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
-                    "Relayed transfer of storage links is not supported because link targets are provider-specific."))
+                _ => await TransferLinkAsync(
+                    source,
+                    sourceInfo.Value,
+                    treeRoot: null,
+                    destination,
+                    destinationPath,
+                    options,
+                    cleanup,
+                    cancellationToken).ConfigureAwait(false)
             };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -191,8 +198,34 @@ internal static class StorageTransferCoordinator
                             break;
                         }
                     default:
-                        return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
-                            $"Relayed directory transfer cannot copy link '{itemPath.Value}'."));
+                        {
+                            var parent = Parent(mappedPath);
+                            if (parent.Length > 0 && options.LinkHandling is StorageLinkHandling.Follow or StorageLinkHandling.Recreate)
+                            {
+                                var directory = await EnsureDirectoryAsync(
+                                    destination,
+                                    parent,
+                                    options.CreateParents,
+                                    cleanup,
+                                    cancellationToken).ConfigureAwait(false);
+                                if (directory.IsFailure)
+                                    return Result<StorageTransferSummary>.Failure(directory.Error!);
+                            }
+                            var linked = await TransferLinkAsync(
+                                source,
+                                item with { Path = itemPath.Value! },
+                                sourceDirectory.Path,
+                                destination,
+                                mappedPath,
+                                options,
+                                cleanup,
+                                cancellationToken).ConfigureAwait(false);
+                            if (linked.IsFailure)
+                                return Result<StorageTransferSummary>.Failure(linked.Error!);
+                            files += linked.Value!.Files;
+                            bytes += linked.Value.Bytes;
+                            break;
+                        }
                 }
             }
 
@@ -218,6 +251,81 @@ internal static class StorageTransferCoordinator
             files,
             directories,
             bytes));
+    }
+
+    /// <summary>Applies <see cref="StorageTransferOptions.LinkHandling"/> to one link.</summary>
+    /// <param name="treeRoot">Source directory being transferred, used to remap link targets inside it; null for a single link.</param>
+    private static async Task<Result<StorageTransferSummary>> TransferLinkAsync(
+        IStorageBackend source,
+        StorageItem link,
+        string? treeRoot,
+        IStorageBackend destination,
+        string destinationPath,
+        StorageTransferOptions options,
+        TransferCleanupTracker cleanup,
+        CancellationToken cancellationToken)
+    {
+        switch (options.LinkHandling)
+        {
+            case StorageLinkHandling.Skip:
+                return Result<StorageTransferSummary>.Success(new StorageTransferSummary(StorageItemType.Link, 0, 0, 0));
+
+            case StorageLinkHandling.Follow:
+            {
+                // Some providers stat through the link and report the target's type.
+                var target = await source.GetInfoAsync(link.Path, cancellationToken).ConfigureAwait(false);
+                if (target.IsSuccess && target.Value!.ItemType == StorageItemType.Directory)
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        $"Link '{link.Path}' points to a directory; following directory links is not supported."));
+                var file = target.IsSuccess && target.Value!.ItemType == StorageItemType.File
+                    ? target.Value with { Path = link.Path }
+                    : link with { ItemType = StorageItemType.File, Size = null };
+                return await CopyFileAsync(source, file, destination, destinationPath, options, cleanup, cancellationToken).ConfigureAwait(false);
+            }
+
+            case StorageLinkHandling.Recreate:
+            {
+                if (source is not IStorageAttributeService reader || !source.Capabilities.Supports(StorageFeature.ReadLinks))
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        "The source connection cannot read link targets, so links cannot be recreated."));
+                if (destination is not IStorageAttributeService writer || !destination.Capabilities.Supports(StorageFeature.CreateLinks))
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        "The destination connection cannot create links."));
+                var target = await reader.ReadLinkAsync(link.Path, cancellationToken).ConfigureAwait(false);
+                if (target.IsFailure)
+                    return Result<StorageTransferSummary>.Failure(target.Error!);
+                if (target.Value!.StoragePath is not { } targetPath)
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        $"Link '{link.Path}' points outside the source root and cannot be recreated."));
+                var mapped = targetPath;
+                if (treeRoot is not null)
+                {
+                    var relative = GetRelativePath(treeRoot, targetPath);
+                    if (relative is null)
+                        return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                            $"Link '{link.Path}' points outside the transferred directory and cannot be recreated."));
+                    mapped = Combine(DestinationTreeRoot(destinationPath, link.Path, treeRoot), relative);
+                }
+                var created = await writer.CreateLinkAsync(destinationPath, mapped, cancellationToken).ConfigureAwait(false);
+                if (created.IsFailure)
+                    return Result<StorageTransferSummary>.Failure(created.Error!);
+                cleanup.TrackFile(destinationPath);
+                return Result<StorageTransferSummary>.Success(new StorageTransferSummary(StorageItemType.Link, 0, 0, 0));
+            }
+
+            default:
+                return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                    $"Link '{link.Path}' was not transferred: link targets are provider-specific. Set LinkHandling to skip, follow, or recreate links."));
+        }
+    }
+
+    /// <summary>Returns the destination directory that corresponds to <paramref name="treeRoot"/>.</summary>
+    private static string DestinationTreeRoot(string destinationItemPath, string sourceItemPath, string treeRoot)
+    {
+        var relative = GetRelativePath(treeRoot, sourceItemPath) ?? string.Empty;
+        var depth = relative.Length == 0 ? 0 : relative.Split('/').Length;
+        var segments = destinationItemPath.Split('/');
+        return string.Join('/', segments.Take(Math.Max(0, segments.Length - depth)));
     }
 
     private static async Task<Result<StorageTransferSummary>> CopyFileAsync(

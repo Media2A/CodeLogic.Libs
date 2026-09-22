@@ -198,6 +198,11 @@ jobs:
             done
           done
 
+      # The windows job above runs the unit suite too; running it here covers Linux-only paths such
+      # as Unix permission bits and local symbolic links, which Windows cannot create without admin.
+      - name: Run storage unit tests on Linux
+        run: dotnet test tests/Storage.Tests/Storage.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
       - name: Run storage integration tests
         run: dotnet test tests/Storage.Integration.Tests/Storage.Integration.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
 
