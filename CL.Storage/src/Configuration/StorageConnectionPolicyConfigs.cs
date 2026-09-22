@@ -71,3 +71,21 @@ public sealed class StorageSessionConfig
             yield return $"{prefix}KeepAliveSeconds must be between 0 and 3600";
     }
 }
+
+/// <summary>Speed limits for one connection, shared by all of its concurrent transfers.</summary>
+public sealed class StorageTransferLimitsConfig
+{
+    /// <summary>Gets or sets the maximum upload speed in bytes per second; null or zero means unlimited.</summary>
+    public long? MaxUploadBytesPerSecond { get; set; }
+
+    /// <summary>Gets or sets the maximum download speed in bytes per second; null or zero means unlimited.</summary>
+    public long? MaxDownloadBytesPerSecond { get; set; }
+
+    internal IEnumerable<string> GetValidationErrors(string prefix)
+    {
+        if (MaxUploadBytesPerSecond < 0)
+            yield return $"{prefix}MaxUploadBytesPerSecond cannot be negative";
+        if (MaxDownloadBytesPerSecond < 0)
+            yield return $"{prefix}MaxDownloadBytesPerSecond cannot be negative";
+    }
+}

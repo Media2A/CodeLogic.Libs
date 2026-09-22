@@ -35,6 +35,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private readonly StorageConnectionObserver _connectionObserver;
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
+    private TransferLimits _libraryLimits = TransferLimits.None;
     private LocalStorageConfig? _localConfig;
     private LocalStorageConfig? _persistedLocalConfig;
     private readonly Dictionary<string, LocalConnectionConfig?> _runtimeLocalOverrides = new(StringComparer.OrdinalIgnoreCase);
@@ -138,6 +139,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         EnsureValid("storage.azure", azure.Validate());
         EnsureValid("storage.gcs", gcs.Validate());
         EnsureValid("storage.swift", swift.Validate());
+        var libraryLimits = StorageTransferPipeline.LibraryLimits(storage.MaxTotalUploadBytesPerSecond, storage.MaxTotalDownloadBytesPerSecond);
 
         ValidateGlobalIds(local, s3, ftp, sftp, webDav, azure, gcs, swift);
 
@@ -152,20 +154,20 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     infos.Add(id, new StorageConnectionInfo(id, StorageProvider.Local, configuration.RootPath, configuration.Enabled));
                     if (!configuration.Enabled)
                         continue;
-                    var backend = _factories[typeof(LocalConnectionConfig)].Create(
+                    var backend = WithLimits(_factories[typeof(LocalConnectionConfig)].Create(
                         id,
                         configuration,
-                        storage.MaxBufferedDownloadBytes);
+                        storage.MaxBufferedDownloadBytes), configuration, libraryLimits);
                     builtEntries.Add(id, new BackendEntry(backend, ownsBackend: true));
                 }
 
-                AddProviderConnections(builtEntries, infos, s3, StorageProvider.S3, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, ftp, StorageProvider.Ftp, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, sftp, StorageProvider.Sftp, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, webDav, StorageProvider.WebDav, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, azure, StorageProvider.AzureBlob, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, gcs, StorageProvider.GoogleCloudStorage, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, swift, StorageProvider.OpenStackSwift, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, s3, StorageProvider.S3, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, ftp, StorageProvider.Ftp, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, sftp, StorageProvider.Sftp, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, webDav, StorageProvider.WebDav, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, azure, StorageProvider.AzureBlob, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, gcs, StorageProvider.GoogleCloudStorage, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, swift, StorageProvider.OpenStackSwift, storage.MaxBufferedDownloadBytes, libraryLimits);
 
                 if (!builtEntries.ContainsKey(storage.DefaultConnection))
                     throw new InvalidOperationException(
@@ -186,6 +188,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 }
 
                 _storageConfig = storage;
+                _libraryLimits = libraryLimits;
                 _localConfig = local;
                 _persistedLocalConfig = CloneLocalConfig(local);
                 _runtimeLocalOverrides.Clear();
@@ -1268,11 +1271,11 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         try
         {
             replacement = new BackendEntry(
-                _factories[configuration.GetType()].Create(
+                WithLimits(_factories[configuration.GetType()].Create(
                     id,
                     configuration,
                     runtime.MaxBufferedDownloadBytes,
-                    _connectionObserver),
+                    _connectionObserver), configuration, _libraryLimits),
                 ownsBackend: true);
             var timeoutDuration = TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds);
             using var timeout = new CancellationTokenSource(timeoutDuration);
@@ -1336,10 +1339,10 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         try
         {
             replacement = new BackendEntry(
-                _factories[typeof(LocalConnectionConfig)].Create(
+                WithLimits(_factories[typeof(LocalConnectionConfig)].Create(
                     id,
                     configuration,
-                    runtime.MaxBufferedDownloadBytes),
+                    runtime.MaxBufferedDownloadBytes), configuration, _libraryLimits),
                 ownsBackend: true);
 
             var timeoutDuration = TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds);
@@ -1957,7 +1960,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         IDictionary<string, StorageConnectionInfo> infos,
         ProviderStorageConfigBase<TConnection> config,
         StorageProvider provider,
-        long maxBufferedDownloadBytes)
+        long maxBufferedDownloadBytes,
+        TransferLimits libraryLimits)
         where TConnection : StorageConnectionConfigBase
     {
         _factories.TryGetValue(typeof(TConnection), out var factory);
@@ -1969,9 +1973,23 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             if (factory is null)
                 throw new InvalidOperationException($"The {provider} provider factory is not registered.");
             entries.Add(id, new BackendEntry(
-                factory.Create(id, connection, maxBufferedDownloadBytes, _connectionObserver),
+                WithLimits(factory.Create(id, connection, maxBufferedDownloadBytes, _connectionObserver), connection, libraryLimits),
                 ownsBackend: true));
         }
+    }
+
+    /// <summary>Attaches a connection's speed limits, plus the library-wide totals, to its backend.</summary>
+    private static IStorageBackend WithLimits(IStorageBackend backend, StorageConnectionConfigBase configuration, TransferLimits libraryLimits) =>
+        WithLimits(backend, configuration.TransferLimits, libraryLimits);
+
+    private static IStorageBackend WithLimits(IStorageBackend backend, LocalConnectionConfig configuration, TransferLimits libraryLimits) =>
+        WithLimits(backend, configuration.TransferLimits, libraryLimits);
+
+    private static IStorageBackend WithLimits(IStorageBackend backend, StorageTransferLimitsConfig? configured, TransferLimits libraryLimits)
+    {
+        var limits = configured ?? new StorageTransferLimitsConfig();
+        StorageTransferPipeline.SetLimits(backend, limits.MaxUploadBytesPerSecond, limits.MaxDownloadBytesPerSecond, libraryLimits);
+        return backend;
     }
 
     private static void ValidateConnectionId(string connectionId)

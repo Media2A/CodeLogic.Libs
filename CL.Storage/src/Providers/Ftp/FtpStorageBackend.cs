@@ -225,8 +225,8 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     public Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
-        if (options?.ConflictPolicy is not null)
-            return StorageConflictResolver.UploadAsync(this, path, source, options, cancellationToken);
+        if (StorageTransferPipeline.Applies(this, options))
+            return StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken);
         return _retry.ExecuteUploadAsync("Upload FTP file", source, token => UploadCoreAsync(path, source, options, token), cancellationToken);
     }
 
@@ -310,7 +310,10 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     }
 
     /// <inheritdoc />
-    public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken) =>
         _retry.ExecuteAsync("Download FTP file", RetryKind.Idempotent, (_, token) => DownloadCoreAsync(path, options, token), cancellationToken);
 
     private async Task<Result<Stream>> DownloadCoreAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)

@@ -52,6 +52,10 @@ public sealed record StorageUploadOptions
     public StorageConflictPolicy? ConflictPolicy { get; init; }
     /// <summary>Gets the source's modification time, compared by <see cref="StorageConflictPolicy.OverwriteIfNewer"/>.</summary>
     public DateTimeOffset? SourceLastModified { get; init; }
+    /// <summary>Gets an optional progress sink, reported at most every 250 ms with speed and remaining time.</summary>
+    public IProgress<StorageTransferProgress>? Progress { get; init; }
+    /// <summary>Set once progress, speed limits, and conflict policy have been applied, so they are not applied twice.</summary>
+    internal bool PipelineApplied { get; init; }
     /// <summary>Gets whether missing physical parent directories should be created.</summary>
     public bool CreateParents { get; init; } = true;
     /// <summary>Gets the optional MIME content type stored with the object.</summary>
@@ -87,6 +91,8 @@ public sealed record StorageUploadOptions
 /// <summary>Controls range, buffering, and exact-version downloads.</summary>
 public sealed record StorageDownloadOptions
 {
+    /// <summary>Gets an optional progress sink, reported as the returned stream is read.</summary>
+    public IProgress<StorageTransferProgress>? Progress { get; init; }
     /// <summary>Gets the zero-based byte offset at which reading begins.</summary>
     public long Offset { get; init; }
     /// <summary>Gets the requested byte count, or <see langword="null"/> to read through end of content.</summary>
@@ -210,6 +216,8 @@ public sealed record StorageTransferOptions
     public bool CreateParents { get; init; } = true;
     /// <summary>Gets how user metadata is handled across provider boundaries.</summary>
     public StorageMetadataPreservation MetadataPreservation { get; init; } = StorageMetadataPreservation.BestEffort;
+    /// <summary>Gets an optional progress sink for relayed transfers; bytes accumulate across the files of a directory.</summary>
+    public IProgress<StorageTransferProgress>? Progress { get; init; }
     /// <summary>Gets how symbolic links are treated when a transfer relays content through the client.</summary>
     public StorageLinkHandling LinkHandling { get; init; } = StorageLinkHandling.Reject;
 

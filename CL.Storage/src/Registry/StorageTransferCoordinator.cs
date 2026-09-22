@@ -28,6 +28,9 @@ internal static class StorageTransferCoordinator
         ArgumentNullException.ThrowIfNull(destination);
         ArgumentNullException.ThrowIfNull(options);
         cancellationToken.ThrowIfCancellationRequested();
+        var aggregate = options.Progress is { } progress ? new AggregateProgress(progress) : null;
+        if (aggregate is not null)
+            options = options with { Progress = aggregate };
 
         var sourceInfo = await source.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         if (sourceInfo.IsFailure)
@@ -94,8 +97,40 @@ internal static class StorageTransferCoordinator
             var committed = await cleanup.CommitAsync().ConfigureAwait(false);
             if (committed.IsFailure)
                 return Result<StorageTransferSummary>.Failure(committed.Error!);
+            aggregate?.Complete();
         }
         return result;
+    }
+
+    /// <summary>Adds up per-file progress into one running total for a whole relayed transfer.</summary>
+    private sealed class AggregateProgress(IProgress<StorageTransferProgress> target) : IProgress<StorageTransferProgress>
+    {
+        private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+        private long _completedFiles;
+        private long _current;
+
+        public void Report(StorageTransferProgress value)
+        {
+            var total = Interlocked.Read(ref _completedFiles) + value.BytesTransferred;
+            Interlocked.Exchange(ref _current, total);
+            if (value.IsCompleted)
+                Interlocked.Add(ref _completedFiles, value.BytesTransferred);
+            target.Report(new StorageTransferProgress(total, null, false, Rate(total), null, value.ItemPath));
+        }
+
+        public void Complete()
+        {
+            var total = Interlocked.Read(ref _completedFiles);
+            target.Report(new StorageTransferProgress(total, total, true, Rate(total), TimeSpan.Zero));
+        }
+
+        private double Rate(long bytes) => _clock.Elapsed.TotalSeconds > 0 ? bytes / _clock.Elapsed.TotalSeconds : 0;
+    }
+
+    /// <summary>Tags a file's progress with its source path instead of the internal staging name.</summary>
+    private sealed class FileProgress(IProgress<StorageTransferProgress> inner, string path) : IProgress<StorageTransferProgress>
+    {
+        public void Report(StorageTransferProgress value) => inner.Report(value with { ItemPath = path });
     }
 
     private static async Task<Result<StorageTransferSummary>> CopyDirectoryAsync(
@@ -265,8 +300,10 @@ internal static class StorageTransferCoordinator
             transferred));
     }
 
-    /// <summary>Applies <see cref="StorageTransferOptions.LinkHandling"/> to one link.</summary>
-    /// <param name="treeRoot">Source directory being transferred, used to remap link targets inside it; null for a single link.</param>
+    /// <summary>
+    /// Applies <see cref="StorageTransferOptions.LinkHandling"/> to one link. <c>treeRoot</c> is the source
+    /// directory being transferred, used to remap link targets inside it, or null for a single link.
+    /// </summary>
     private static async Task<Result<StorageTransferSummary>> TransferLinkAsync(
         IStorageBackend source,
         StorageItem link,
@@ -471,7 +508,8 @@ internal static class StorageTransferCoordinator
                             Overwrite = false,
                             CreateParents = options.CreateParents,
                             ContentType = sourceFile.ContentType,
-                            Metadata = transferredMetadata
+                            Metadata = transferredMetadata,
+                            Progress = options.Progress is { } progress ? new FileProgress(progress, sourceFile.Path) : null
                         },
                         cancellationToken).ConfigureAwait(false);
                 }
@@ -1001,6 +1039,10 @@ internal static class StorageTransferCoordinator
     }
 }
 
+/// <param name="SourceType">Whether the transferred source was a file, directory, or link.</param>
+/// <param name="Files">Files written to the destination.</param>
+/// <param name="Directories">Directories created or reused at the destination.</param>
+/// <param name="Bytes">Content bytes relayed.</param>
 /// <param name="SkippedFiles">Files the conflict policy left untouched.</param>
 /// <param name="TransferredSources">Source paths of the files that were written, so a move can delete only those.</param>
 internal sealed record StorageTransferSummary(

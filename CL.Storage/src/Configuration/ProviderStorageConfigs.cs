@@ -9,6 +9,8 @@ public abstract class StorageConnectionConfigBase
 {
     /// <summary>Gets or sets whether this named connection is enabled.</summary>
     public bool Enabled { get; set; } = true;
+    /// <summary>Gets or sets upload and download speed limits for this connection.</summary>
+    public StorageTransferLimitsConfig TransferLimits { get; set; } = new();
     /// <summary>Gets the provider-specific root mounted as provider-neutral path <c>/</c>.</summary>
     [JsonIgnore]
     public abstract string MountRoot { get; }
@@ -18,7 +20,9 @@ public abstract class StorageConnectionConfigBase
     /// <returns>A configuration validation result containing every detected error.</returns>
     public ConfigValidationResult Validate()
     {
-        var errors = GetValidationErrors().ToArray();
+        var errors = GetValidationErrors()
+            .Concat((TransferLimits ?? new StorageTransferLimitsConfig()).GetValidationErrors("TransferLimits."))
+            .ToArray();
         return errors.Length == 0
             ? ConfigValidationResult.Valid()
             : ConfigValidationResult.Invalid(errors);

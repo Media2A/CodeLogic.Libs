@@ -38,6 +38,8 @@
 
 ### Changed (breaking)
 
+- `UploadWithProgressAsync` no longer hides seeking, so uploads with progress can be retried.
+
 - `DownloadToFileAsync` gained a `conflictPolicy` parameter before `cancellationToken`.
 
 - Listings no longer show the library's own staging and backup items (`.cl-storage-*`,
@@ -74,6 +76,10 @@
 
 ### Added
 
+- `Progress` on upload, download, and transfer options, with speed, remaining time, and the current
+  file; relayed directory transfers report one running total.
+- Per-connection `TransferLimits` and library-wide `MaxTotalUploadBytesPerSecond` /
+  `MaxTotalDownloadBytesPerSecond` speed limits, shared by concurrent transfers.
 - `IStorageAppendService.AppendAsync` (Local, FTP, SFTP), `StorageConflictPolicy.Resume` for
   interrupted uploads and `DownloadToFileAsync`, and `CleanupStaleStagingAsync`.
 - `StorageConflictPolicy` (`Fail`, `Overwrite`, `Skip`, `OverwriteIfNewer`, `OverwriteIfSizeDiffers`,

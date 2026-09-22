@@ -27,14 +27,8 @@ public static class StorageServiceExtensions
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(progress);
         cancellationToken.ThrowIfCancellationRequested();
-        long? total = null;
-        if (source.CanSeek)
-        {
-            try { total = Math.Max(0, source.Length - source.Position); }
-            catch (NotSupportedException) { }
-        }
-        await using var tracked = new ProgressReadStream(source, progress, total, leaveOpen: true);
-        return await storage.UploadAsync(path, tracked, options, cancellationToken).ConfigureAwait(false);
+        // The backend pipeline meters the stream and keeps it seekable, so upload retries still work.
+        return await storage.UploadAsync(path, source, (options ?? new StorageUploadOptions()) with { Progress = progress }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Returns an owned download stream that reports bytes as the caller reads it.</summary>

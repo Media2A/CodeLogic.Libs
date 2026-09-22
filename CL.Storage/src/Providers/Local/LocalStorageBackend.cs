@@ -171,8 +171,8 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(source);
-        if (options?.ConflictPolicy is not null)
-            return await StorageConflictResolver.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
+        if (StorageTransferPipeline.Applies(this, options))
+            return await StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure)
@@ -250,10 +250,10 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
     }
 
     /// <inheritdoc />
-    public Task<Result<Stream>> DownloadAsync(
-        string path,
-        StorageDownloadOptions? options = null,
-        CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         options ??= new StorageDownloadOptions();
@@ -613,7 +613,11 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
     {
         if (OperatingSystem.IsWindows())
             return Task.FromResult(Result.Failure(StorageErrors.Unsupported("Unix permissions are not available on Windows.")));
-        return Attribute(path, "Set permissions", full => File.SetUnixFileMode(full, (UnixFileMode)unixMode), cancellationToken);
+        return Attribute(path, "Set permissions", full =>
+        {
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(full, (UnixFileMode)unixMode);
+        }, cancellationToken);
     }
 
     /// <inheritdoc />

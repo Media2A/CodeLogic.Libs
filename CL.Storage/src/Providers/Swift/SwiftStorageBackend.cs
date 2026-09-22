@@ -221,8 +221,8 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
-        if (options?.ConflictPolicy is not null)
-            return await StorageConflictResolver.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
+        if (StorageTransferPipeline.Applies(this, options))
+            return await StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
@@ -265,7 +265,10 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     }
 
     /// <inheritdoc />
-    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();

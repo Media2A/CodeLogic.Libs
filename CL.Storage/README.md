@@ -425,6 +425,27 @@ checksum afterwards when integrity matters. `DownloadToFileAsync(..., conflictPo
 continues a partial local file with a ranged download. `AppendAsync` appends to a file directly,
 for example a log, and `CleanupStaleStagingAsync` removes staging leftovers of crashed transfers.
 
+### Progress and speed limits
+
+Upload, download, and transfer options take a `Progress` sink. Reports arrive at most every 250 ms and
+carry `BytesTransferred`, `TotalBytes`, `BytesPerSecond`, `EstimatedRemaining`, and, for directory
+transfers, the `ItemPath` of the current file; directory transfers accumulate bytes across files.
+
+```csharp
+var progress = new Progress<StorageTransferProgress>(p =>
+    Console.WriteLine($"{p.ItemPath}: {p.BytesTransferred:N0} B at {p.BytesPerSecond / 1024:N0} KiB/s"));
+await library.CopyAsync("sftp", "exports", "s3", "archive", new StorageTransferOptions { Progress = progress });
+```
+
+Speed limits are set per connection and shared by all of its concurrent transfers:
+
+```json
+"TransferLimits": { "MaxUploadBytesPerSecond": 1048576, "MaxDownloadBytesPerSecond": 5242880 }
+```
+
+`StorageConfig.MaxTotalUploadBytesPerSecond` and `MaxTotalDownloadBytesPerSecond` cap all
+connections together. Limits also apply to relayed transfers between connections.
+
 ### Links in transfers
 
 Relayed copies and moves (across connections, or directory copies) meet links as provider-specific

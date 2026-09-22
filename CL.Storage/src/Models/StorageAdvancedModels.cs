@@ -87,10 +87,16 @@ public sealed record StorageSignedUrl(
 /// <param name="BytesTransferred">Cumulative content bytes consumed or produced.</param>
 /// <param name="TotalBytes">Expected total byte count when known.</param>
 /// <param name="IsCompleted">Whether the transfer reached successful completion.</param>
+/// <param name="BytesPerSecond">Average speed since the transfer started.</param>
+/// <param name="EstimatedRemaining">Estimated time left when the total is known.</param>
+/// <param name="ItemPath">File being transferred, for directory transfers.</param>
 public sealed record StorageTransferProgress(
     long BytesTransferred,
     long? TotalBytes,
-    bool IsCompleted);
+    bool IsCompleted,
+    double BytesPerSecond = 0,
+    TimeSpan? EstimatedRemaining = null,
+    string? ItemPath = null);
 
 /// <summary>Controls one provider page of versions for an exact object path.</summary>
 public sealed record StorageVersionListOptions
