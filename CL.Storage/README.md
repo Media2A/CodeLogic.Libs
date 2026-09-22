@@ -149,6 +149,13 @@ certificate pins; there is no accept-any switch.
 - `LoginCommands` run after every login; a command the server rejects fails the connection so
   misconfiguration surfaces immediately.
 
+### WebDAV options
+
+`AuthenticationMode` accepts `None`, `Basic` (sent up front, saving a challenge round trip),
+`BearerToken`, `Digest`, `Ntlm`, `Negotiate`, and `Windows` (current user). HTTPS endpoints support
+`TrustedCertificateSha256` and `TrustedPublicKeySha256` pins, `RequireValidCertificateChain`, and a
+PFX `ClientCertificatePath` for mutual TLS. `MaxConnectionsPerServer` caps concurrent connections.
+
 ### Proxies
 
 Every remote provider can tunnel through an HTTP (`CONNECT`), SOCKS5, or SOCKS4 proxy:

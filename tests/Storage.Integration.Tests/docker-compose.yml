@@ -119,3 +119,21 @@ services:
       TLS_CN: localhost
       TLS_ORG: cltest
       TLS_C: US
+
+  # WebDAV with Digest authentication.
+  webdav-digest:
+    image: bytemark/webdav
+    ports:
+      - "8081:80"
+    environment:
+      AUTH_TYPE: Digest
+      USERNAME: cltest
+      PASSWORD: cltest-pw
+
+  # WebDAV over HTTPS: Caddy terminates TLS with a certificate from its own internal CA (untrusted
+  # by the host) and forwards to the plain WebDAV server, for pinning and TLS-failure tests.
+  webdav-tls:
+    image: caddy:2-alpine
+    command: caddy reverse-proxy --from https://localhost:443 --to webdav:80 --internal-certs
+    ports:
+      - "8443:443"

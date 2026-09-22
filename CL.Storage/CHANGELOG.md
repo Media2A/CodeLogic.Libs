@@ -15,6 +15,9 @@
 
 ### Fixed
 
+- WebDAV uploads, moves, and copies each stranded a pooled HTTP connection until garbage collection,
+  because the WebDAV client library never disposes those responses. With a connection limit the next
+  request hung; without one, sockets piled up under load. The backend now issues MOVE and COPY itself.
 - Legacy code-page encodings (windows-1252, iso-8859-x, ibm437, shift_jis) were unavailable because
   .NET does not register them by default.
 - A Google Cloud object whose timestamp had fewer than three fractional digits failed the whole
@@ -55,6 +58,9 @@
 
 ### Added
 
+- WebDAV: Digest, NTLM, and Negotiate authentication, public-key (SPKI) pins,
+  `RequireValidCertificateChain`, client certificates for mutual TLS, and `MaxConnectionsPerServer`.
+  Basic credentials are sent up front instead of after a 401 challenge.
 - FTP/FTPS: public-key (SPKI) pins, `RequireValidCertificateChain`, revocation checks, TLS version
   selection, `EncryptDataChannel`, active-mode port range and external IP, file-name `Encoding`
   (including legacy code pages), ASCII `TransferType`, `ListingParser`, `ServerTimeZone`, separate

@@ -13,7 +13,13 @@ public enum WebDavAuthenticationMode
     /// <summary>Uses an HTTP bearer token.</summary>
     BearerToken,
     /// <summary>Uses the current Windows credentials.</summary>
-    Windows
+    Windows,
+    /// <summary>Uses HTTP Digest authentication with <see cref="WebDavConnectionConfig.Username"/> and <see cref="WebDavConnectionConfig.Password"/>.</summary>
+    Digest,
+    /// <summary>Uses NTLM authentication with explicit credentials.</summary>
+    Ntlm,
+    /// <summary>Uses Negotiate (Kerberos, falling back to NTLM) with explicit credentials.</summary>
+    Negotiate
 }
 
 /// <summary>Defines named WebDAV connections.</summary>
@@ -53,6 +59,23 @@ public sealed class WebDavConnectionConfig : StorageConnectionConfigBase
 
     /// <summary>Optional SHA-256 fingerprints of trusted TLS leaf certificates.</summary>
     public List<string> TrustedCertificateSha256 { get; set; } = [];
+
+    /// <summary>Optional SHA-256 fingerprints of trusted server public keys (SPKI); these survive certificate renewals that keep the key.</summary>
+    public List<string> TrustedPublicKeySha256 { get; set; } = [];
+
+    /// <summary>Gets or sets whether a pinned certificate must also pass normal chain validation.</summary>
+    public bool RequireValidCertificateChain { get; set; }
+
+    /// <summary>Gets or sets the optional client-certificate path (PFX/PKCS#12) for mutual TLS.</summary>
+    [ConfigField(Label = "Client certificate", Group = "TLS", Order = 30)]
+    public string? ClientCertificatePath { get; set; }
+
+    /// <summary>Gets or sets the optional client-certificate password.</summary>
+    [ConfigField(Label = "Client certificate password", Secret = true, InputType = ConfigInputType.Password, Group = "TLS", Order = 31)]
+    public string? ClientCertificatePassword { get; set; }
+
+    /// <summary>Gets or sets the maximum number of concurrent HTTP connections to the server.</summary>
+    public int? MaxConnectionsPerServer { get; set; }
 
     /// <summary>Gets or sets the request timeout in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 30;
@@ -105,5 +128,17 @@ public sealed class WebDavConnectionConfig : StorageConnectionConfigBase
                      name.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase) ||
                      name.Equals("Connection", StringComparison.OrdinalIgnoreCase))
                 yield return $"Custom HTTP header '{name}' is managed by the transport or authentication mode";
+        if (AuthenticationMode is WebDavAuthenticationMode.Digest or WebDavAuthenticationMode.Ntlm or WebDavAuthenticationMode.Negotiate &&
+            (string.IsNullOrWhiteSpace(Username) || Password is null))
+            yield return $"{AuthenticationMode} authentication requires Username and Password";
+        if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && !System.IO.Path.IsPathFullyQualified(ClientCertificatePath))
+            yield return "ClientCertificatePath must be an absolute path";
+        foreach (var fingerprint in TrustedPublicKeySha256 ?? [])
+        {
+            if (!CertificateFingerprint.IsValidSha256(fingerprint))
+                yield return $"Trusted public-key fingerprint '{fingerprint}' is not a SHA-256 fingerprint";
+        }
+        if (MaxConnectionsPerServer is < 1 or > 1024)
+            yield return "MaxConnectionsPerServer must be between 1 and 1024";
     }
 }
