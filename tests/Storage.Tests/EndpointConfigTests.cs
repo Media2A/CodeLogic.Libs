@@ -66,3 +66,24 @@ public sealed class EndpointConfigTests
         Assert.True(config.Validate().IsValid);
     }
 }
+
+public sealed class GcsTimestampTests
+{
+    [Theory]
+    [InlineData("2026-09-22T10:15:30.123Z")]
+    [InlineData("2026-09-22T10:15:30.12Z")]
+    [InlineData("2026-09-22T10:15:30Z")]
+    [InlineData("2026-09-22T10:15:30.123456789Z")]
+    public void Timestamps_with_any_fraction_length_parse(string raw)
+    {
+        var parsed = CL.Storage.Providers.GoogleCloud.GoogleCloudStorageBackend.ParseTimestamp(raw);
+
+        Assert.Equal(new DateTimeOffset(2026, 9, 22, 10, 15, 30, TimeSpan.Zero), parsed!.Value.AddTicks(-(parsed.Value.Ticks % TimeSpan.TicksPerSecond)));
+    }
+
+    [Fact]
+    public void Malformed_timestamp_becomes_unknown_instead_of_failing()
+    {
+        Assert.Null(CL.Storage.Providers.GoogleCloud.GoogleCloudStorageBackend.ParseTimestamp("not a date"));
+    }
+}

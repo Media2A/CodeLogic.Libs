@@ -838,7 +838,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         if (exception is HttpRequestException { StatusCode: { } status })
             return ProviderErrorMapper.FromHttpStatus((int)status, operation, "Swift");
         return ProviderErrorMapper.FromTransport(exception, operation, "Swift")
-            ?? StorageErrors.ProviderError($"{operation}: Swift provider failed.");
+            ?? StorageErrors.ProviderError($"{operation}: Swift provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private sealed record SwiftPage(IReadOnlyList<SwiftListItem> Items, string? NextMarker);

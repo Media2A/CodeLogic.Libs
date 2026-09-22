@@ -15,6 +15,9 @@
 
 ### Fixed
 
+- A Google Cloud object whose timestamp had fewer than three fractional digits failed the whole
+  operation with `storage.provider_error`; timestamps are now parsed leniently.
+- Unclassified provider failures now carry the exception type (never its message) in `Details`.
 - Ranged Google Cloud Storage downloads failed hash validation, because the stored CRC32C covers the
   whole object; validation is now skipped for byte ranges only.
 - Google Cloud clients whose credentials cannot sign URLs (anonymous or emulator clients) threw
@@ -25,6 +28,8 @@
 - FTP server replies wrapped in FluentFTP's generic `FtpException` are now unwrapped and classified.
 
 ### Changed (breaking)
+
+- SFTP no longer requires `HostKeyFingerprints` when `KnownHostsPath` is set.
 
 - `FtpStorageBackend`, `SftpStorageBackend`, and `WebDavStorageBackend` constructors take optional
   session and retry settings. Retries are on by default (3 attempts); pass
@@ -48,6 +53,10 @@
 
 ### Added
 
+- SFTP: `KeyboardInteractive` and `Auto` authentication (keys, password, keyboard-interactive, and
+  multi-method servers), inline private keys (`PrivateKeyContent`), several keys, OpenSSH
+  `known_hosts` verification (hashed, wildcard, `[host]:port`, and `@revoked` entries), algorithm
+  allow-lists, file-name `Encoding`, `BufferSize`, and `JumpHost` tunnelling through an SSH bastion.
 - HTTP, SOCKS5, and SOCKS4 proxy support (`Proxy`) for FTP (including data connections), SFTP,
   WebDAV, S3, Azure Blob, Google Cloud Storage, and Swift.
 - Google Cloud Storage `ServiceUrl` and `AllowInsecureHttp` for private endpoints and emulators, plus

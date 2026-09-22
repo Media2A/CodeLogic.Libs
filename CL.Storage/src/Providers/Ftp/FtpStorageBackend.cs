@@ -835,7 +835,7 @@ public sealed class FtpStorageBackend : IStorageBackend
             return transport;
         if (exception is IOException or ObjectDisposedException)
             return StorageErrors.ConnectionLost($"{operation}: the FTP connection was lost.");
-        return StorageErrors.ProviderError($"{operation}: FTP provider failed.");
+        return StorageErrors.ProviderError($"{operation}: FTP provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private static Error MapReply(FtpCommandException command, string operation)

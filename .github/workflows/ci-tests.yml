@@ -184,8 +184,8 @@ jobs:
       - name: Start storage servers and emulators
         shell: bash
         run: |
-          docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d
-          for port in 2021 2022 8080 9010 10000 4443 8082 3128 1080; do
+          docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d --build
+          for port in 2021 2022 2023 8080 9010 10000 4443 8082 3128 1080; do
             for i in {1..60}; do
               if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi
               sleep 1

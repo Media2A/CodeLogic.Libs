@@ -639,6 +639,6 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (exception is WebDAVException webDav && HttpStatusOf(webDav) is > 0 and var status)
             return ProviderErrorMapper.FromHttpStatus(status, operation, "WebDAV");
         return ProviderErrorMapper.FromTransport(exception, operation, "WebDAV")
-            ?? StorageErrors.ProviderError($"{operation}: WebDAV provider failed.");
+            ?? StorageErrors.ProviderError($"{operation}: WebDAV provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 }

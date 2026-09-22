@@ -9,6 +9,10 @@ services:
     environment:
       # user:password:uid:gid:writable-dir. The chroot root is read-only; "upload" is writable.
       SFTP_USERS: "cltest:cltest-pw:1001:1001:upload"
+    volumes:
+      # Test-only public keys for key-based authentication tests.
+      - ./fixtures/test_ed25519.pub:/home/cltest/.ssh/keys/test_ed25519.pub:ro
+      - ./fixtures/test_ed25519_encrypted.pub:/home/cltest/.ssh/keys/test_ed25519_encrypted.pub:ro
 
   ftp:
     image: delfer/alpine-ftp-server
@@ -81,3 +85,19 @@ services:
   gcs-internal:
     image: fsouza/fake-gcs-server
     command: -scheme http -port 4443 -external-url http://gcs-internal:4443 -backend memory
+
+  # SSH bastion that allows TCP forwarding, for jump-host tests. It forwards to the "sftp" service.
+  jump:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache openssh
+        RUN ssh-keygen -A
+        RUN adduser -D jump && echo 'jump:jump-pw' | chpasswd
+        # sshd keeps the first value it reads; the drop-in directory is included before Alpine's
+        # own "AllowTcpForwarding no", so the settings go there.
+        RUN mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication yes\nAllowTcpForwarding yes\n' > /etc/ssh/sshd_config.d/10-jump.conf
+        CMD ["/usr/sbin/sshd", "-D", "-e"]
+    ports:
+      - "2023:22"

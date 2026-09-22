@@ -801,6 +801,6 @@ public sealed class AzureBlobStorageBackend :
             }
         }
         return ProviderErrorMapper.FromTransport(exception, operation, "Azure Blob")
-            ?? StorageErrors.ProviderError($"{operation}: Azure Blob provider failed.");
+            ?? StorageErrors.ProviderError($"{operation}: Azure Blob provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 }

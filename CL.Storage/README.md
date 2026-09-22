@@ -76,6 +76,46 @@ That option trusts any SSH host key and is best limited to trusted development e
 and WebDAV use normal certificate validation by default and optionally accept configured SHA-256
 certificate pins; there is no accept-any switch.
 
+### SFTP authentication, host keys, and jump hosts
+
+```json
+{
+  "Host": "sftp.internal",
+  "Username": "deploy",
+  "AuthenticationMode": "Auto",
+  "Password": "...",
+  "PrivateKeyPath": "/secrets/id_ed25519",
+  "PrivateKeyContent": null,
+  "AdditionalPrivateKeyPaths": [],
+  "PrivateKeyPassphrase": "...",
+  "KnownHostsPath": "/home/app/.ssh/known_hosts",
+  "HostKeyFingerprints": [],
+  "Ciphers": ["aes256-gcm@openssh.com", "aes256-ctr"],
+  "Encoding": "utf-8",
+  "BufferSize": 262144,
+  "JumpHost": {
+    "Host": "bastion.example.com",
+    "Username": "jump",
+    "PrivateKeyPath": "/secrets/bastion_ed25519",
+    "KnownHostsPath": "/home/app/.ssh/known_hosts"
+  }
+}
+```
+
+- `AuthenticationMode`: `Password`, `PrivateKey`, `KeyboardInteractive` (answers the password
+  prompt), or `Auto`, which offers keys, then password, then keyboard-interactive, and also satisfies
+  servers that demand several methods. Keys can be files or inline text (`PrivateKeyContent`) from a
+  secret store. SSH agents are not supported by the underlying SSH library.
+- Host keys are trusted through `HostKeyFingerprints`, an OpenSSH `KnownHostsPath` (plain, hashed,
+  wildcard, and `[host]:port` entries), or `AutoAcceptHostKey` for development. A key marked
+  `@revoked` in `known_hosts` is refused even with auto-accept. A rejected key reports
+  `storage.host_key_rejected` with the presented fingerprint in `Details`.
+- `KeyExchangeAlgorithms`, `Ciphers`, `MacAlgorithms`, and `HostKeyAlgorithms` restrict and order
+  the offered algorithms, for hardening or for old servers. Unknown names fail validation and list
+  what is supported.
+- `JumpHost` tunnels through an SSH bastion. The target's key is still verified against the target's
+  settings, and a configured `Proxy` applies to the bastion connection.
+
 ### Proxies
 
 Every remote provider can tunnel through an HTTP (`CONNECT`), SOCKS5, or SOCKS4 proxy:

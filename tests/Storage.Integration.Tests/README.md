@@ -6,7 +6,7 @@ Swift SAIO), so no cloud account is needed. Each provider's tests skip
 themselves unless its `CL_STORAGE_TEST_*` variables are set, so the project is safe to run anywhere.
 
 ```sh
-docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d
+docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d --build
 
 export CL_STORAGE_TEST_SFTP_HOST=127.0.0.1 CL_STORAGE_TEST_SFTP_PORT=2022 \
        CL_STORAGE_TEST_SFTP_USER=cltest CL_STORAGE_TEST_SFTP_PASS=cltest-pw
@@ -30,3 +30,8 @@ Optional: `CL_STORAGE_TEST_SFTP_ROOT` (default `upload`) and `CL_STORAGE_TEST_FT
 Buckets and containers (`cl-test` by default) are created by the tests. Emulators differ from the
 real services in a few places — for example Azurite answers a bad account key with
 `AuthorizationFailure` where Azure sends `AuthenticationFailed` — and those tests accept both.
+
+The SFTP tests also use `fixtures/` (throwaway key pairs mounted into the SFTP container) and a
+`jump` bastion on port 2023 for jump-host tests (`CL_STORAGE_TEST_SSH_JUMP_HOST`/`_PORT` override it).
+The suite runs sequentially: several tests disable retries to observe a single failure, and parallel
+SSH handshakes would trip the server's `MaxStartups` limit.

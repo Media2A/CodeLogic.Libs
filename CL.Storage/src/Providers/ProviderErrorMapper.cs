@@ -94,6 +94,15 @@ internal static class ProviderErrorMapper
         return false;
     }
 
+    /// <summary>Describes an unclassified failure by exception type only; messages may carry paths or secrets.</summary>
+    public static string ExceptionDetails(Exception exception)
+    {
+        var details = $"exception={exception.GetType().Name}";
+        if (exception.InnerException is { } inner)
+            details += $";inner={inner.GetType().Name}";
+        return details;
+    }
+
     /// <summary>Joins sanitized <c>key=value</c> diagnostics.</summary>
     public static string Details(string key, string value, string? providerCode = null, TimeSpan? retryAfter = null)
     {

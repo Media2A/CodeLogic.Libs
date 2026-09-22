@@ -513,7 +513,11 @@ public sealed class SftpStorageBackend : IStorageBackend
     {
         try { if (client.IsConnected) client.Disconnect(); }
         catch { }
-        finally { client.Dispose(); }
+        finally
+        {
+            client.Dispose();
+            SftpJumpTunnel.Close(client);
+        }
         return ValueTask.CompletedTask;
     }
 
@@ -808,7 +812,7 @@ public sealed class SftpStorageBackend : IStorageBackend
             return StorageErrors.QuotaExceeded($"{operation}: the SFTP server has insufficient storage.");
         if (exception is ObjectDisposedException)
             return StorageErrors.ConnectionLost($"{operation}: the SFTP connection was lost.");
-        return StorageErrors.ProviderError($"{operation}: SFTP provider failed.");
+        return StorageErrors.ProviderError($"{operation}: SFTP provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private static Error MapStatus(SftpException sftp, string operation)

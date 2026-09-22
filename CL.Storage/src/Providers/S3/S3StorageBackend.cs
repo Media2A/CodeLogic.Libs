@@ -1077,7 +1077,7 @@ public sealed class S3StorageBackend :
             return StorageErrors.ProviderError($"{operation}: S3 request failed.", details);
         }
         return ProviderErrorMapper.FromTransport(exception, operation, "S3")
-            ?? StorageErrors.ProviderError($"{operation}: S3 provider failed.");
+            ?? StorageErrors.ProviderError($"{operation}: S3 provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private static string EncodeVersionContinuation(S3VersionContinuation continuation) =>

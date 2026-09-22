@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http.Headers;
@@ -629,8 +630,8 @@ public sealed class GoogleCloudStorageBackend :
                         System.Globalization.CultureInfo.InvariantCulture),
                     ETag = version.ETag,
                     Size = version.Size.HasValue ? checked((long)version.Size.Value) : null,
-                    LastModified = version.UpdatedDateTimeOffset,
-                    IsLatest = version.TimeDeletedDateTimeOffset is null,
+                    LastModified = ParseTimestamp(version.UpdatedRaw),
+                    IsLatest = string.IsNullOrEmpty(version.TimeDeletedRaw),
                     IsDeleteMarker = false
                 });
             }
@@ -866,7 +867,7 @@ public sealed class GoogleCloudStorageBackend :
         Name = NameOf(path.TrimEnd('/')),
         ItemType = path.EndsWith('/') ? StorageItemType.Directory : StorageItemType.File,
         Size = path.EndsWith('/') || !item.Size.HasValue ? null : checked((long)item.Size.Value),
-        LastModified = item.UpdatedDateTimeOffset,
+        LastModified = ParseTimestamp(item.UpdatedRaw),
         ContentType = item.ContentType,
         ETag = item.ETag,
         VersionId = item.Generation?.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -884,12 +885,21 @@ public sealed class GoogleCloudStorageBackend :
 
     private static string NameOf(string path) => path.Split('/')[^1];
 
+    /// <summary>
+    /// Parses an RFC 3339 timestamp leniently. The client library's own parser insists on exactly three
+    /// fractional digits, so a server or emulator that trims them would otherwise fail the whole operation.
+    /// </summary>
+    internal static DateTimeOffset? ParseTimestamp(string? raw) =>
+        DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed)
+            ? parsed
+            : null;
+
     private static Error Map(Exception exception, string operation)
     {
         if (exception is GoogleApiException google && (int)google.HttpStatusCode > 0)
             return ProviderErrorMapper.FromHttpStatus((int)google.HttpStatusCode, operation, "Google Cloud Storage");
         return ProviderErrorMapper.FromTransport(exception, operation, "Google Cloud Storage")
-            ?? StorageErrors.ProviderError($"{operation}: Google Cloud Storage provider failed.");
+            ?? StorageErrors.ProviderError($"{operation}: Google Cloud Storage provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private sealed record GcsContinuationToken(string? ProviderPageToken, int Skip);
