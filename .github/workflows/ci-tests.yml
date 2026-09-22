@@ -142,3 +142,49 @@ jobs:
 
       - name: Run MSSQL tests
         run: dotnet test tests/MSSQL.Tests/MSSQL.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
+  # Live FTP, SFTP and WebDAV servers for CL.Storage. The same compose file is used for local
+  # runs, so CI and a developer machine exercise identical servers. Without the CL_STORAGE_TEST_*
+  # variables the suite self-skips, which is what the windows job above sees.
+  storage-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CL_STORAGE_TEST_SFTP_HOST: 127.0.0.1
+      CL_STORAGE_TEST_SFTP_PORT: '2022'
+      CL_STORAGE_TEST_SFTP_USER: cltest
+      CL_STORAGE_TEST_SFTP_PASS: cltest-pw
+      CL_STORAGE_TEST_FTP_HOST: 127.0.0.1
+      CL_STORAGE_TEST_FTP_PORT: '2021'
+      CL_STORAGE_TEST_FTP_USER: cltest
+      CL_STORAGE_TEST_FTP_PASS: cltest-pw
+      CL_STORAGE_TEST_FTP_ROOT: home/cltest
+      CL_STORAGE_TEST_WEBDAV_URL: http://127.0.0.1:8080/
+      CL_STORAGE_TEST_WEBDAV_USER: cltest
+      CL_STORAGE_TEST_WEBDAV_PASS: cltest-pw
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Start FTP, SFTP and WebDAV servers
+        shell: bash
+        run: |
+          docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d
+          for port in 2021 2022 8080; do
+            for i in {1..60}; do
+              if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi
+              sleep 1
+            done
+          done
+
+      - name: Run storage integration tests
+        run: dotnet test tests/Storage.Integration.Tests/Storage.Integration.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
+      - name: Server logs on failure
+        if: failure()
+        run: docker compose -f tests/Storage.Integration.Tests/docker-compose.yml logs

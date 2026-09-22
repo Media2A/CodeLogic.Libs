@@ -45,6 +45,19 @@ public sealed class ErrorMappingTests
     }
 
     [Fact]
+    public void Ftp_reply_wrapped_in_a_generic_ftp_exception_is_still_classified()
+    {
+        // FluentFTP surfaces upload failures as FtpException("see InnerException") around the reply.
+        var wrapped = new FtpException("Error while uploading the file to the server.", new FtpCommandException("553", "Could not create file."));
+
+        var error = FtpStorageBackend.Map(wrapped, "Upload");
+
+        Assert.Equal(StorageErrors.PermissionDeniedCode, error.Code);
+        Assert.True(StorageErrorInfo.TryGetDetail(error, StorageErrorInfo.FtpReplyKey, out var reply));
+        Assert.Equal("553", reply);
+    }
+
+    [Fact]
     public void Ftp_login_failure_is_authentication_not_generic_provider_error()
     {
         var error = FtpStorageBackend.Map(new FtpAuthenticationException("530", "Login incorrect."), "Connect");
@@ -139,6 +152,20 @@ public sealed class ErrorMappingTests
         Assert.Equal(expected, error.Code);
         Assert.True(StorageErrorInfo.TryGetDetail(error, StorageErrorInfo.HttpStatusKey, out var detail));
         Assert.Equal(status.ToString(), detail);
+    }
+
+    [Theory]
+    [InlineData(401, "Failed retrieving item/folder (Status Code: Unauthorized)", StorageErrors.AuthenticationFailedCode)]
+    [InlineData(0, "Failed retrieving item/folder (Status Code: Unauthorized)", StorageErrors.AuthenticationFailedCode)]
+    [InlineData(0, "Failed retrieving item/folder (Status Code: NotFound)", StorageErrors.NotFoundCode)]
+    [InlineData(0, "Failed (Status Code: 507)", StorageErrors.QuotaExceededCode)]
+    [InlineData(0, "no status here", StorageErrors.ProviderErrorCode)]
+    public void WebDav_status_is_read_from_the_http_code_or_the_message(int httpCode, string message, string expected)
+    {
+        // The WebDAV client keeps the HTTP status in GetHttpCode(); ErrorCode stays zero.
+        var exception = new WebDAVClient.Helpers.WebDAVException(httpCode, message);
+
+        Assert.Equal(expected, CL.Storage.Providers.WebDav.WebDavStorageBackend.Map(exception, "Op").Code);
     }
 
     [Fact]

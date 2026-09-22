@@ -610,12 +610,34 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
 
     private static string EnsureTrailingSlash(string path) => path.EndsWith('/') ? path : path + "/";
     private static string NameOf(string path) => path.Split('/')[^1];
-    private static bool IsNotFound(WebDAVException error) => error.ErrorCode == 404;
+    private static bool IsNotFound(WebDAVException error) => HttpStatusOf(error) == 404;
+
+    /// <summary>Reads the HTTP status from a WebDAV failure.</summary>
+    /// <remarks>
+    /// The client stores the HTTP status in <c>GetHttpCode()</c>; <c>ErrorCode</c> is usually zero. Some
+    /// failures only carry the status name in the message ("Status Code: Unauthorized"), so that is the
+    /// last resort.
+    /// </remarks>
+    internal static int HttpStatusOf(WebDAVException error)
+    {
+        if (error.GetHttpCode() is > 0 and var http) return http;
+        if (error.ErrorCode is >= 100 and < 600) return error.ErrorCode;
+        var match = StatusInMessage.Match(error.Message ?? string.Empty);
+        if (!match.Success) return 0;
+        var token = match.Groups[1].Value;
+        if (int.TryParse(token, out var numeric)) return numeric;
+        return Enum.TryParse<System.Net.HttpStatusCode>(token, ignoreCase: true, out var named) ? (int)named : 0;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex StatusInMessage =
+        new(@"Status Code:\s*([A-Za-z]+|\d{3})", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     internal static Error Map(Exception exception, string operation)
     {
-        if (exception is WebDAVException webDav && webDav.ErrorCode > 0)
-            return ProviderErrorMapper.FromHttpStatus(webDav.ErrorCode, operation, "WebDAV");
+        if (exception is WebDAVConflictException)
+            return StorageErrors.Conflict($"{operation}: WebDAV conflict.");
+        if (exception is WebDAVException webDav && HttpStatusOf(webDav) is > 0 and var status)
+            return ProviderErrorMapper.FromHttpStatus(status, operation, "WebDAV");
         return ProviderErrorMapper.FromTransport(exception, operation, "WebDAV")
             ?? StorageErrors.ProviderError($"{operation}: WebDAV provider failed.");
     }

@@ -1,0 +1,31 @@
+# Live servers for Storage.Integration.Tests. Start with:
+#   docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d
+# then export the variables printed in README.md and run the test project.
+services:
+  sftp:
+    image: atmoz/sftp:alpine
+    ports:
+      - "2022:22"
+    environment:
+      # user:password:uid:gid:writable-dir. The chroot root is read-only; "upload" is writable.
+      SFTP_USERS: "cltest:cltest-pw:1001:1001:upload"
+
+  ftp:
+    image: delfer/alpine-ftp-server
+    ports:
+      - "2021:21"
+      - "21000-21010:21000-21010"
+    environment:
+      USERS: "cltest|cltest-pw|/home/cltest|1001"
+      ADDRESS: "127.0.0.1"
+      MIN_PORT: "21000"
+      MAX_PORT: "21010"
+
+  webdav:
+    image: bytemark/webdav
+    ports:
+      - "8080:80"
+    environment:
+      AUTH_TYPE: Basic
+      USERNAME: cltest
+      PASSWORD: cltest-pw

@@ -814,6 +814,10 @@ public sealed class FtpStorageBackend : IStorageBackend
 
     internal static Error Map(Exception exception, string operation)
     {
+        // FluentFTP wraps the server's reply in a generic FtpException ("see InnerException").
+        if (exception is FtpException { InnerException: FtpCommandException or FtpInvalidCertificateException or IOException or System.Net.Sockets.SocketException } wrapped
+            && exception is not FtpCommandException)
+            return Map(wrapped.InnerException!, operation);
         switch (exception)
         {
             case FtpAuthenticationException auth:
@@ -855,6 +859,8 @@ public sealed class FtpStorageBackend : IStorageBackend
             "450" => StorageErrors.Unavailable($"{operation}: the FTP file is temporarily unavailable.", details),
             "550" => StorageErrors.NotFound($"{operation}: item was not found or is unavailable.", details),
             "452" or "552" => StorageErrors.QuotaExceeded($"{operation}: the FTP server has insufficient storage.", details),
+            "553" when ContainsAny(message, "permission", "denied", "could not create", "cannot create", "read-only")
+                => StorageErrors.PermissionDenied($"{operation}: the FTP server refused to create the file.", details),
             "501" or "553" => StorageErrors.InvalidPath($"{operation}: the FTP server rejected the path.", details),
             "502" or "504" => StorageErrors.Unsupported($"{operation}: the FTP server does not support this command.", details),
             "534" or "535" => StorageErrors.TlsFailure($"{operation}: the FTP server rejected the TLS request.", details),
