@@ -22,7 +22,7 @@ internal sealed class GoogleCloudStorageBackendFactory : IStorageBackendFactory
                 CredentialFactory.FromJson<ServiceAccountCredential>(value.CredentialsJson!).ToGoogleCredential(),
             _ => null
         };
-        var client = credential is null ? StorageClient.Create() : StorageClient.Create(credential);
+        var client = CreateClient(value, credential);
         return new GoogleCloudStorageBackend(
             connectionId,
             client,
@@ -31,5 +31,27 @@ internal sealed class GoogleCloudStorageBackendFactory : IStorageBackendFactory
             value.UploadChunkSizeBytes,
             maxBufferedDownloadBytes,
             ownsClient: true);
+    }
+
+    private static StorageClient CreateClient(GoogleCloudConnectionConfig value, GoogleCredential? credential)
+    {
+        var anonymous = value.AuthenticationMode == GoogleCloudAuthenticationMode.Anonymous;
+        if (string.IsNullOrWhiteSpace(value.ServiceUrl) && !anonymous)
+            return credential is null ? StorageClient.Create() : StorageClient.Create(credential);
+        var builder = new StorageClientBuilder
+        {
+            Credential = credential,
+            UnauthenticatedAccess = anonymous
+        };
+        if (!string.IsNullOrWhiteSpace(value.ServiceUrl))
+            builder.BaseUri = JsonApiBase(value.ServiceUrl);
+        return builder.Build();
+    }
+
+    /// <summary>Normalizes an endpoint to the JSON API root the client expects (<c>.../storage/v1/</c>).</summary>
+    internal static string JsonApiBase(string serviceUrl)
+    {
+        var trimmed = serviceUrl.TrimEnd('/');
+        return trimmed.EndsWith("/storage/v1", StringComparison.OrdinalIgnoreCase) ? trimmed + "/" : trimmed + "/storage/v1/";
     }
 }

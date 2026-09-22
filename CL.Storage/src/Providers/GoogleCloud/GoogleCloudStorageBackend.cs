@@ -78,8 +78,9 @@ public sealed class GoogleCloudStorageBackend :
         if (normalized.IsFailure) throw new ArgumentException(normalized.Error!.Message, nameof(prefix));
         ConnectionId = connectionId;
         _client = client;
+        // Credentials that cannot sign (user credentials, anonymous emulator clients) disable signed URLs.
         try { _urlSigner = client.CreateUrlSigner(); }
-        catch (InvalidOperationException) { }
+        catch (Exception error) when (error is InvalidOperationException or ArgumentException or NotSupportedException) { }
         var features = GcsCapabilities.Features;
         if (_urlSigner is not null)
             features |= StorageFeature.SignedReadUrls | StorageFeature.SignedWriteUrls;
@@ -346,6 +347,8 @@ public sealed class GoogleCloudStorageBackend :
                     : (long?)null;
                 downloadOptions ??= new DownloadObjectOptions();
                 downloadOptions.Range = new RangeHeaderValue(options.Offset, end);
+                // The stored CRC32C/MD5 covers the whole object, so it cannot validate a byte range.
+                downloadOptions.DownloadValidationMode = DownloadValidationMode.Never;
             }
 
             var pipe = new Pipe(new PipeOptions(
@@ -745,7 +748,7 @@ public sealed class GoogleCloudStorageBackend :
         {
             completionError = error is OperationCanceledException
                 ? error
-                : new IOException("The Google Cloud download stream failed.");
+                : new IOException("The Google Cloud download stream failed.", error);
         }
         finally
         {

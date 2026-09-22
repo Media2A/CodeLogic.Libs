@@ -538,9 +538,36 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             if (!string.IsNullOrWhiteSpace(_token) && !string.IsNullOrWhiteSpace(_storageUrl) &&
                 DateTimeOffset.UtcNow < _tokenExpiresAt - TimeSpan.FromMinutes(1))
                 return;
-            await AuthenticateKeystoneAsync(cancellationToken).ConfigureAwait(false);
+            if (_configuration.AuthenticationMode == SwiftAuthenticationMode.TempAuthV1)
+                await AuthenticateTempAuthAsync(cancellationToken).ConfigureAwait(false);
+            else
+                await AuthenticateKeystoneAsync(cancellationToken).ConfigureAwait(false);
         }
         finally { _authenticationGate.Release(); }
+    }
+
+    /// <summary>Authenticates with TempAuth v1: credentials in headers, token and storage URL in the reply.</summary>
+    private async Task AuthenticateTempAuthAsync(CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, _configuration.AuthenticationUrl);
+        request.Headers.TryAddWithoutValidation("X-Auth-User", _configuration.Username);
+        request.Headers.TryAddWithoutValidation("X-Auth-Key", _configuration.Password);
+        using var response = await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"TempAuth authentication failed with HTTP {(int)response.StatusCode}.", null, response.StatusCode);
+        if (!response.Headers.TryGetValues("X-Auth-Token", out var tokens))
+            throw new InvalidOperationException("TempAuth did not return X-Auth-Token.");
+        var storageUrl = _configuration.StorageUrl;
+        if (string.IsNullOrWhiteSpace(storageUrl) && response.Headers.TryGetValues("X-Storage-Url", out var urls))
+            storageUrl = urls.First();
+        var expires = response.Headers.TryGetValues("X-Auth-Token-Expires", out var lifetimes) &&
+            long.TryParse(lifetimes.First(), NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
+                ? DateTimeOffset.UtcNow.AddSeconds(seconds)
+                : DateTimeOffset.UtcNow.AddHours(1);
+        _token = tokens.First();
+        _storageUrl = storageUrl?.TrimEnd('/') ??
+            throw new InvalidOperationException("TempAuth did not return X-Storage-Url.");
+        _tokenExpiresAt = expires;
     }
 
     private async Task AuthenticateKeystoneAsync(CancellationToken cancellationToken)

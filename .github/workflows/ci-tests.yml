@@ -143,7 +143,8 @@ jobs:
       - name: Run MSSQL tests
         run: dotnet test tests/MSSQL.Tests/MSSQL.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
 
-  # Live FTP, SFTP and WebDAV servers for CL.Storage. The same compose file is used for local
+  # Live FTP, SFTP and WebDAV servers plus MinIO, Azurite, fake-gcs-server and Swift SAIO for
+  # CL.Storage, so every provider runs against a real protocol without a cloud account. The same compose file is used for local
   # runs, so CI and a developer machine exercise identical servers. Without the CL_STORAGE_TEST_*
   # variables the suite self-skips, which is what the windows job above sees.
   storage-integration:
@@ -162,6 +163,14 @@ jobs:
       CL_STORAGE_TEST_WEBDAV_URL: http://127.0.0.1:8080/
       CL_STORAGE_TEST_WEBDAV_USER: cltest
       CL_STORAGE_TEST_WEBDAV_PASS: cltest-pw
+      CL_STORAGE_TEST_S3_URL: http://127.0.0.1:9010
+      CL_STORAGE_TEST_S3_ACCESSKEY: cltest
+      CL_STORAGE_TEST_S3_SECRETKEY: cltest-pw-minio
+      CL_STORAGE_TEST_AZURE_CONNECTION_STRING: UseDevelopmentStorage=true
+      CL_STORAGE_TEST_GCS_URL: http://127.0.0.1:4443
+      CL_STORAGE_TEST_SWIFT_AUTH_URL: http://127.0.0.1:8082/auth/v1.0
+      CL_STORAGE_TEST_SWIFT_USER: test:tester
+      CL_STORAGE_TEST_SWIFT_KEY: testing
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -171,11 +180,11 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Start FTP, SFTP and WebDAV servers
+      - name: Start storage servers and emulators
         shell: bash
         run: |
           docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d
-          for port in 2021 2022 8080; do
+          for port in 2021 2022 8080 9010 10000 4443 8082; do
             for i in {1..60}; do
               if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi
               sleep 1

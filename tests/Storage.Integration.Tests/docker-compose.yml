@@ -29,3 +29,30 @@ services:
       AUTH_TYPE: Basic
       USERNAME: cltest
       PASSWORD: cltest-pw
+
+  # Cloud object-store emulators: no cloud account required.
+  minio:
+    image: quay.io/minio/minio
+    command: server /data
+    ports:
+      - "9010:9000"
+    environment:
+      MINIO_ROOT_USER: cltest
+      MINIO_ROOT_PASSWORD: cltest-pw-minio
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    command: azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --skipApiVersionCheck --loose
+    ports:
+      - "10000:10000"
+
+  gcs:
+    image: fsouza/fake-gcs-server
+    command: -scheme http -port 4443 -external-url http://127.0.0.1:4443 -backend memory
+    ports:
+      - "4443:4443"
+
+  swift:
+    image: openstackswift/saio
+    ports:
+      - "8082:8080"

@@ -15,6 +15,10 @@
 
 ### Fixed
 
+- Ranged Google Cloud Storage downloads failed hash validation, because the stored CRC32C covers the
+  whole object; validation is now skipped for byte ranges only.
+- Google Cloud clients whose credentials cannot sign URLs (anonymous or emulator clients) threw
+  from the backend constructor instead of just disabling signed URLs.
 - WebDAV failures were all reported as `storage.provider_error`, and missing-directory detection never
   matched: the HTTP status is read from `WebDAVException.GetHttpCode()` (with a message fallback)
   instead of `ErrorCode`, which the client leaves at zero.
@@ -44,6 +48,9 @@
 
 ### Added
 
+- Google Cloud Storage `ServiceUrl` and `AllowInsecureHttp` for private endpoints and emulators, plus
+  an `Anonymous` authentication mode for public buckets and fake-gcs-server.
+- Swift `TempAuthV1` authentication (`X-Auth-User` / `X-Auth-Key`) and `AllowInsecureHttp`.
 - FTP, SFTP, and WebDAV retry transient failures (timeouts, refused or dropped connections, busy
   servers) with exponential backoff, jitter, and `Retry-After` support, configured per connection
   through `Retry`. Deletes and moves retry only with `RetryNonIdempotent`; uploads retry only from
