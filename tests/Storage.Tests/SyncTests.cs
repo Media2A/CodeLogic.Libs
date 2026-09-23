@@ -220,8 +220,11 @@ public sealed class WatchTests
             {
                 await foreach (var change in storage.WatchAsync("", options, stop.Token))
                 {
-                    lock (seen) seen.Add(change);
-                    lock (seen) if (seen.Count >= 3) break;
+                    lock (seen)
+                    {
+                        seen.Add(change);
+                        if (AllSeen(seen)) break;
+                    }
                 }
             }
             catch (OperationCanceledException) { }
@@ -234,10 +237,16 @@ public sealed class WatchTests
         await watching.WaitAsync(TimeSpan.FromSeconds(15));
 
         lock (seen)
-        {
-            Assert.Contains(seen, change => change is { Kind: StorageChangeKind.Created, Path: "new.txt" });
-            Assert.Contains(seen, change => change is { Kind: StorageChangeKind.Changed, Path: "existing.txt" });
-            Assert.Contains(seen, change => change is { Kind: StorageChangeKind.Deleted, Path: "doomed.txt" });
-        }
+            Assert.True(AllSeen(seen), string.Join(", ", seen.Select(change => $"{change.Kind} {change.Path}")));
     }
+
+    /// <summary>
+    /// An overwrite shows up as a change, or, when a poll lands mid-replace (Windows replaces are not
+    /// atomic for directory listings), as a delete followed by a create.
+    /// </summary>
+    private static bool AllSeen(List<StorageChange> seen) =>
+        seen.Any(change => change is { Kind: StorageChangeKind.Created, Path: "new.txt" }) &&
+        seen.Any(change => change is { Kind: StorageChangeKind.Deleted, Path: "doomed.txt" }) &&
+        (seen.Any(change => change is { Kind: StorageChangeKind.Changed, Path: "existing.txt" }) ||
+         seen.Any(change => change is { Kind: StorageChangeKind.Created, Path: "existing.txt" }));
 }
