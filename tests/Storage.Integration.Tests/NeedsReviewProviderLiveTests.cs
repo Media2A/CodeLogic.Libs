@@ -288,4 +288,166 @@ public sealed class NeedsReviewProviderLiveTests
         using var response = await http.SendAsync(put);
         response.EnsureSuccessStatusCode();
     }
+
+    // needs-review A3 (acceptance R3-8): a folder moved onto an existing folder must not destroy it
+    [SftpFact]
+    public async Task R3_8_an_SFTP_folder_moved_onto_an_existing_folder_keeps_what_the_folder_held()
+    {
+        await using var live = await LiveLibrary.StartAsync(("sftp", LiveServers.Sftp()));
+        var sftp = live.Library.GetStorage("sftp");
+        var dir = $"accept-{Guid.NewGuid():N}";
+        try
+        {
+            await sftp.UploadBytesAsync($"{dir}/from/x.txt", Encoding.UTF8.GetBytes("x"));
+            await sftp.UploadBytesAsync($"{dir}/to/keep.txt", Encoding.UTF8.GetBytes("keep"));
+
+            var moved = await live.Library.MoveAsync("sftp", $"{dir}/from", "sftp", $"{dir}/to");
+            var kept = await sftp.ExistsAsync($"{dir}/to/keep.txt");
+
+            Assert.True(kept.IsSuccess && kept.Value, $"move outcome {moved.Outcome}: the existing folder's file is gone");
+            Assert.Equal("keep", Encoding.UTF8.GetString((await sftp.DownloadBytesAsync($"{dir}/to/keep.txt")).Value!));
+        }
+        finally
+        {
+            await sftp.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
+    // needs-review A3: the backend itself refuses to replace a directory, for a folder or a file source
+    [SftpFact]
+    public async Task An_SFTP_move_onto_an_existing_directory_is_refused() =>
+        await DirectoryDestinationIsKeptAsync(LiveServers.Create(LiveServers.Sftp()));
+
+    // needs-review A3
+    [FtpFact]
+    public async Task An_FTP_move_onto_an_existing_directory_is_refused() =>
+        await DirectoryDestinationIsKeptAsync(LiveServers.Create(LiveServers.Ftp()));
+
+    // needs-review A3
+    [WebDavFact]
+    public async Task A_WebDAV_move_or_copy_onto_an_existing_collection_is_refused() =>
+        await DirectoryDestinationIsKeptAsync(LiveServers.Create(LiveServers.WebDav()), copyToo: true);
+
+    private static async Task DirectoryDestinationIsKeptAsync(IStorageBackend backend, bool copyToo = false)
+    {
+        await using var storage = backend;
+        var dir = $"dirdest-{Guid.NewGuid():N}";
+        try
+        {
+            Assert.True((await storage.UploadBytesAsync($"{dir}/from/x.txt", [1])).IsSuccess);
+            Assert.True((await storage.UploadBytesAsync($"{dir}/file.txt", [2])).IsSuccess);
+            Assert.True((await storage.UploadBytesAsync($"{dir}/to/keep.txt", [3])).IsSuccess);
+
+            var folder = await storage.MoveAsync($"{dir}/from", $"{dir}/to", new StorageTransferOptions { Overwrite = true });
+            var file = await storage.MoveAsync($"{dir}/file.txt", $"{dir}/to", new StorageTransferOptions { Overwrite = true });
+
+            Assert.Equal(StorageErrors.ConflictCode, folder.Error?.Code);
+            Assert.Equal(StorageErrors.ConflictCode, file.Error?.Code);
+            if (copyToo)
+            {
+                var copied = await storage.CopyAsync($"{dir}/from", $"{dir}/to", new StorageTransferOptions { Overwrite = true });
+                Assert.Equal(StorageErrors.ConflictCode, copied.Error?.Code);
+            }
+            Assert.Equal([3], (await storage.DownloadBytesAsync($"{dir}/to/keep.txt")).Value!);
+            Assert.True((await storage.ExistsAsync($"{dir}/from/x.txt")).Value);
+            Assert.True((await storage.ExistsAsync($"{dir}/file.txt")).Value);
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
+    // needs-review A11: a replacement that committed but left its backup reports both
+    [SftpFact]
+    public async Task An_SFTP_replace_whose_backup_cannot_be_removed_reports_the_destination_committed_and_the_backup()
+    {
+        var config = LiveServers.Sftp();
+        await using var storage = new CL.Storage.Providers.Sftp.SftpStorageBackend(
+            "live-sftp-backup",
+            () => CL.Storage.Providers.Sftp.SftpStorageBackendFactory.CreateClient(config),
+            config.Root,
+            64L << 20,
+            config.Session,
+            config.Retry,
+            observer: null)
+        {
+            // A directory where the backup should be deleted: removing it as a file fails.
+            BeforeBackupDelete = async (client, backup) =>
+            {
+                await client.DeleteFileAsync(backup, default);
+                await client.CreateDirectoryAsync(backup, default);
+                await client.CreateDirectoryAsync(backup + "/inside", default);
+            }
+        };
+        var dir = $"backup-{Guid.NewGuid():N}";
+        try
+        {
+            await storage.UploadBytesAsync($"{dir}/f.txt", [1]);
+
+            var replaced = await storage.UploadBytesAsync($"{dir}/f.txt", [2]);
+
+            Assert.True(StorageErrorInfo.DestinationCommitted(replaced.Error), replaced.Error?.ToString());
+            Assert.True(StorageErrorInfo.TryGetDetail(replaced.Error, StorageErrorInfo.LeftBehindKey, out var left));
+            Assert.StartsWith($"{dir}/.cl-storage-backup-", left, StringComparison.Ordinal);
+            Assert.Equal([2], (await storage.DownloadBytesAsync($"{dir}/f.txt")).Value!);
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
+    // needs-review B22: SFTP appends use the server's append flag, so concurrent appenders both land
+    [SftpFact]
+    public async Task Concurrent_SFTP_appends_do_not_overwrite_each_other()
+    {
+        await using var first = LiveServers.Create(LiveServers.Sftp());
+        await using var second = LiveServers.Create(LiveServers.Sftp(c => c.Session = new StorageSessionConfig { MaxSessions = 4 }));
+        var path = $"append-{Guid.NewGuid():N}.log";
+        try
+        {
+            await first.UploadBytesAsync(path, Encoding.UTF8.GetBytes("start\n"));
+            var tasks = Enumerable.Range(0, 20).Select(i =>
+            {
+                var storage = (IStorageAppendService)(i % 2 == 0 ? first : second);
+                return storage.AppendAsync(path, new MemoryStream(Encoding.UTF8.GetBytes($"line {i:00}\n")));
+            }).ToArray();
+            var results = await Task.WhenAll(tasks);
+
+            Assert.All(results, result => Assert.True(result.IsSuccess, result.Error?.ToString()));
+            var text = Encoding.UTF8.GetString((await first.DownloadBytesAsync(path)).Value!);
+            Assert.Equal(21, text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+            for (var i = 0; i < 20; i++) Assert.Contains($"line {i:00}", text);
+        }
+        finally
+        {
+            await first.DeleteAsync(path, new StorageDeleteOptions { IgnoreMissing = true });
+        }
+    }
+
+    // needs-review B17: an SFTP copy on a connection limited to one session no longer waits for a second
+    [SftpFact]
+    public async Task An_SFTP_copy_works_with_one_session_and_the_replace_keeps_its_own_backup()
+    {
+        await using var storage = LiveServers.Create(LiveServers.Sftp(c => c.Session = new StorageSessionConfig { MaxSessions = 1, MaxIdleSessions = 1, AcquireTimeoutSeconds = 5 }));
+        var dir = $"onesession-{Guid.NewGuid():N}";
+        try
+        {
+            await storage.UploadBytesAsync($"{dir}/a.txt", [1, 2, 3]);
+            await storage.UploadBytesAsync($"{dir}/b.txt", [9]);
+
+            var copied = await storage.CopyAsync($"{dir}/a.txt", $"{dir}/b.txt", new StorageTransferOptions { Overwrite = true });
+
+            Assert.True(copied.IsSuccess, copied.Error?.ToString());
+            Assert.Equal([1, 2, 3], (await storage.DownloadBytesAsync($"{dir}/b.txt")).Value!);
+            Assert.IsAssignableFrom<CL.Storage.Providers.IStorageRestoringReplace>(storage);
+            var left = (await storage.ListAsync(dir, new StorageListOptions { IncludeInternal = true })).Value!.Items.Select(item => item.Name).Order();
+            Assert.Equal(["a.txt", "b.txt"], left);
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
 }

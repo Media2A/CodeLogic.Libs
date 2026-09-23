@@ -76,10 +76,11 @@ internal static class StorageContract
             var blocked = await storage.MoveAsync($"{dir}/renamed", $"{dir}/other", new StorageTransferOptions { Overwrite = false });
             Assert.Equal(StorageErrors.ConflictCode, blocked.Error?.Code);
 
+            // needs-review A3: an existing directory is never replaced (that would delete what it holds), overwrite or not.
             var replaced = await storage.MoveAsync($"{dir}/renamed", $"{dir}/other", new StorageTransferOptions { Overwrite = true });
-            Assert.True(replaced.IsSuccess, replaced.Error?.ToString());
-            Assert.False((await storage.ExistsAsync($"{dir}/other/x.txt")).Value);
-            Assert.True((await storage.ExistsAsync($"{dir}/other/sub/deeper/c.txt")).Value);
+            Assert.Equal(StorageErrors.ConflictCode, replaced.Error?.Code);
+            Assert.True((await storage.ExistsAsync($"{dir}/other/x.txt")).Value);
+            Assert.True((await storage.ExistsAsync($"{dir}/renamed/sub/deeper/c.txt")).Value);
         }
         finally
         {
