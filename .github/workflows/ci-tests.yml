@@ -143,10 +143,56 @@ jobs:
       - name: Run MSSQL tests
         run: dotnet test tests/MSSQL.Tests/MSSQL.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
 
+  # The Linux job below proves TLS against OpenSSL; Windows classifies TLS failures through SChannel and keeps
+  # a client certificate's key in a temporary key container, and neither ran in CI while every live test
+  # skipped on the windows job above. GitHub's Windows runners cannot start the Linux containers, so this job
+  # runs the mutual-TLS tests against rclone's WebDAV server with the same requirements as the webdav-mtls
+  # container: TLS 1.3 only and a client certificate issued by fixtures/mtls/client-ca.crt.
+  storage-windows-tls:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CL_STORAGE_TEST_WEBDAV_URL: https://localhost:8444/
+      CL_STORAGE_TEST_WEBDAV_MTLS_URL: https://localhost:8444/
+      CL_STORAGE_TEST_WEBDAV_USER: cltest
+      CL_STORAGE_TEST_WEBDAV_PASS: cltest-pw
+      RCLONE_VERSION: v1.75.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      # One step, so the server started in the background lives exactly as long as the tests need it.
+      - name: Run mutual-TLS tests on Windows (SChannel) against a mutual-TLS WebDAV server
+        shell: bash
+        run: |
+          set -e
+          curl -sSLo rclone.zip "https://downloads.rclone.org/$RCLONE_VERSION/rclone-$RCLONE_VERSION-windows-amd64.zip"
+          unzip -q rclone.zip
+          mkdir -p "$RUNNER_TEMP/dav"
+          MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost" -keyout "$RUNNER_TEMP/srv.key" -out "$RUNNER_TEMP/srv.crt"
+          "./rclone-$RCLONE_VERSION-windows-amd64/rclone.exe" serve webdav "$RUNNER_TEMP/dav" --addr localhost:8444 \
+            --cert "$RUNNER_TEMP/srv.crt" --key "$RUNNER_TEMP/srv.key" \
+            --client-ca tests/Storage.Integration.Tests/fixtures/mtls/client-ca.crt --min-tls-version tls1.3 \
+            --user cltest --pass cltest-pw > "$RUNNER_TEMP/rclone.log" 2>&1 &
+          up=0
+          for i in {1..60}; do
+            if (echo > /dev/tcp/127.0.0.1/8444) >/dev/null 2>&1; then up=1; break; fi
+            sleep 1
+          done
+          if [ "$up" != 1 ]; then cat "$RUNNER_TEMP/rclone.log"; exit 1; fi
+          dotnet test tests/Storage.Integration.Tests/Storage.Integration.Tests.csproj --configuration Release \
+            -p:CodeLogicFromNuGet=true --filter "FullyQualifiedName~MutualTlsLiveTests" --logger "console;verbosity=normal"
+
   # Live FTP, SFTP and WebDAV servers plus MinIO, Azurite, fake-gcs-server and Swift SAIO for
   # CL.Storage, so every provider runs against a real protocol without a cloud account. The same compose file is used for local
   # runs, so CI and a developer machine exercise identical servers. Without the CL_STORAGE_TEST_*
-  # variables the suite self-skips, which is what the windows job above sees.
+  # variables the suite self-skips, which is what the windows test job above sees (storage-windows-tls runs the mutual-TLS tests there).
   storage-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
