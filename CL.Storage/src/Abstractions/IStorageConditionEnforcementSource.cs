@@ -3,7 +3,7 @@ using CL.Storage.Models;
 namespace CL.Storage.Abstractions;
 
 /// <summary>What kind of destination condition a mutation carries.</summary>
-internal enum StorageConditionKind
+public enum StorageConditionKind
 {
     /// <summary>The destination must not exist (create-only upload, copy, or move).</summary>
     CreateOnly = 0,
@@ -51,5 +51,34 @@ internal static class StorageConditionEnforcements
         return ValueTask.FromResult(service.Capabilities.Supports(feature)
             ? StorageConditionEnforcement.Atomic
             : StorageConditionEnforcement.CheckedBeforeCommit);
+    }
+}
+
+/// <summary>Asks a connection how firmly it enforces a destination condition.</summary>
+public static class StorageConditionEnforcementExtensions
+{
+    /// <summary>
+    /// Returns how this connection enforces a condition of the given kind:
+    /// <see cref="StorageConditionEnforcement.Atomic"/> when the server enforces it in the request that commits, or
+    /// <see cref="StorageConditionEnforcement.CheckedBeforeCommit"/> when it is checked immediately before (a writer in
+    /// that short window is not detected). Unlike the <see cref="StorageFeature.ConditionalCreate"/>,
+    /// <see cref="StorageFeature.ConditionalUpdate"/>, and <see cref="StorageFeature.ConditionalDelete"/> flags, which
+    /// describe the provider, this is the connection's own answer: on an S3-compatible server under
+    /// <see cref="Configuration.S3ConditionalRequestSupport.Auto"/> it runs the connection's probe first when it has
+    /// not run yet.
+    /// </summary>
+    /// <param name="service">A connection, as returned by the library.</param>
+    /// <param name="kind">The kind of condition.</param>
+    /// <param name="serverSideCopy">Whether the mutation is a server-side copy or move rather than an upload (ignored for deletes).</param>
+    /// <param name="cancellationToken">Token used to cancel a probe.</param>
+    /// <returns>How the condition is enforced; never <see cref="StorageConditionEnforcement.None"/>.</returns>
+    public static ValueTask<StorageConditionEnforcement> GetConditionEnforcementAsync(
+        this IStorageService service,
+        StorageConditionKind kind,
+        bool serverSideCopy = false,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(service);
+        return StorageConditionEnforcements.ForAsync(service, kind, serverSideCopy, cancellationToken);
     }
 }

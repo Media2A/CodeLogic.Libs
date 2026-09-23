@@ -142,7 +142,21 @@ public sealed class S3StorageBackend :
     /// <inheritdoc />
     public string Root { get; }
     /// <inheritdoc />
-    public StorageCapabilities Capabilities => SendsConditions ? _capabilities : _unconditionalCapabilities;
+    /// <remarks>
+    /// Under <see cref="S3ConditionalRequestSupport.Auto"/> the conditional flags are provisional until the connection's
+    /// probe has run (see <see cref="S3ConditionalRequestSupport.Auto"/>); from then on they name only what the server
+    /// enforces: <see cref="StorageFeature.ConditionalCreate"/> when <c>If-None-Match</c> is enforced on both uploads
+    /// and copies, <see cref="StorageFeature.ConditionalUpdate"/> likewise for <c>If-Match</c>, and
+    /// <see cref="StorageFeature.ConditionalDelete"/> when <c>If-Match</c> is enforced on deletes. To know before
+    /// relying on one, ask <see cref="StorageConditionEnforcementExtensions.GetConditionEnforcementAsync"/>, which runs
+    /// the probe when needed.
+    /// </remarks>
+    public StorageCapabilities Capabilities => ConditionalRequests switch
+    {
+        S3ConditionalRequestSupport.NotEnforced => _unconditionalCapabilities,
+        S3ConditionalRequestSupport.Enforced => _capabilities,
+        _ => Volatile.Read(ref _conditionProbe) is { Conclusive: true } probe ? probe.Capabilities(_capabilities) : _capabilities
+    };
 
     /// <inheritdoc />
     public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
@@ -282,9 +296,10 @@ public sealed class S3StorageBackend :
                 options.Condition,
                 cancellationToken).ConfigureAwait(false);
             if (ifMatch.IsFailure) return Result<StorageItem>.Failure(ifMatch.Error!);
-            if (!SendsConditions)
+            var sendConditions = await UploadConditionsEnforcedAsync(options, cancellationToken).ConfigureAwait(false);
+            if (!sendConditions)
             {
-                // The server would ignore the headers: the condition is checked here, just before the write.
+                // The server would ignore or reject the headers: the condition is checked here, just before the write.
                 var check = await CheckBeforeWriteAsync(key, options.Overwrite ? options.Condition : null, !options.Overwrite, cancellationToken).ConfigureAwait(false);
                 if (check.IsFailure) return Result<StorageItem>.Failure(check.Error!);
             }
@@ -296,12 +311,13 @@ public sealed class S3StorageBackend :
                     source,
                     options,
                     ifMatch.Value,
+                    sendConditions,
                     cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 var request = NewPutRequest(key, source, options.ContentType, options.Metadata);
-                if (!SendsConditions) { /* checked above */ }
+                if (!sendConditions) { /* checked above */ }
                 else if (!options.Overwrite)
                     request.IfNoneMatch = "*";
                 else if (ifMatch.Value is not null)
@@ -425,11 +441,14 @@ public sealed class S3StorageBackend :
             {
                 var condition = ValidateCurrentCondition(info.Value, options.Condition, "S3 object");
                 if (condition.IsFailure) return condition;
+                // Checked just above; sent as If-Match too only where the server enforces it on deletes.
+                var sendIfMatch = options.Condition is { IsEmpty: false } &&
+                    await ConditionStateAsync(S3ProbedCondition.DeleteMatch, cancellationToken).ConfigureAwait(false) == S3ConditionState.Enforced;
                 await _client.DeleteObjectAsync(new DeleteObjectRequest
                 {
                     BucketName = _bucket,
                     Key = ToKey(normalized.Value!),
-                    IfMatch = !SendsConditions ? null : options.Condition?.ExpectedETag ??
+                    IfMatch = !sendIfMatch ? null : options.Condition?.ExpectedETag ??
                         (options.Condition?.ExpectedVersionId is null ? null : info.Value.ETag)
                 }, cancellationToken).ConfigureAwait(false);
             }
@@ -595,8 +614,10 @@ public sealed class S3StorageBackend :
                 ContentDisposition = current.Headers.ContentDisposition,
                 ContentEncoding = current.Headers.ContentEncoding,
                 ContentLanguage = current.Headers.ContentLanguage,
-                ETagToMatch = options.ExpectedETag,
-                IfMatch = options.ExpectedETag ?? (options.ExpectedVersionId is null ? null : current.ETag)
+                // The object is copied onto itself, so pinning the source (x-amz-copy-source-if-match, which every
+                // S3-compatible server honours) pins the destination too; If-Match, which some servers ignore or
+                // reject on CopyObject, is not needed.
+                ETagToMatch = options.ExpectedETag ?? (options.ExpectedVersionId is null ? null : current.ETag)
             };
             foreach (var (name, value) in values)
                 request.Metadata[name] = value;
@@ -964,6 +985,7 @@ public sealed class S3StorageBackend :
         Stream source,
         StorageUploadOptions options,
         string? ifMatch,
+        bool sendConditions,
         CancellationToken cancellationToken)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(_multipartPartSizeBytes);
@@ -975,7 +997,7 @@ public sealed class S3StorageBackend :
             {
                 await using var content = new MemoryStream(buffer, 0, first.Count, writable: false, publiclyVisible: true);
                 var request = NewPutRequest(key, content, options.ContentType, options.Metadata);
-                if (!SendsConditions) { /* checked before the upload */ }
+                if (!sendConditions) { /* checked before the upload */ }
                 else if (!options.Overwrite)
                     request.IfNoneMatch = "*";
                 else if (ifMatch is not null)
@@ -1037,14 +1059,14 @@ public sealed class S3StorageBackend :
                 UploadId = uploadId,
                 PartETags = parts
             };
-            if (!SendsConditions) { /* checked before the upload */ }
+            if (!sendConditions) { /* checked before the upload */ }
             else if (!options.Overwrite)
                 completeRequest.IfNoneMatch = "*";
             else if (ifMatch is not null)
                 completeRequest.IfMatch = ifMatch;
-            var completed = await CompleteMultipartAsync(
-                completeRequest,
-                cancellationToken).ConfigureAwait(false);
+            // Once sent, the completion is not cancelled: it may commit on the server with its reply lost to the cancel.
+            cancellationToken.ThrowIfCancellationRequested();
+            var completed = await CompleteMultipartAsync(completeRequest).ConfigureAwait(false);
             uploadId = null;
             return new S3UploadCompletion(completed.ETag?.Trim('"'), completed.VersionId, totalBytes);
         }
@@ -1132,23 +1154,27 @@ public sealed class S3StorageBackend :
                 $"expectedETag={expected.Trim('"')};actualETag={head.ETag?.Trim('"')}"));
         var sourceKey = ToKey(sourcePath);
         var destinationKey = ToKey(destinationPath);
+        var multipart = head.ContentLength > MultipartCopyThresholdBytes;
         string? ifMatch = null;
         if (options.DestinationCondition is { IsEmpty: false } condition)
         {
             // A condition the server would ignore must not be sent as if it were kept: the caller falls back to a
-            // path that checks it.
-            if (await ConditionStateAsync(S3ProbedCondition.CopyMatch, cancellationToken).ConfigureAwait(false) != S3ConditionState.Enforced)
+            // path that checks it. A large copy commits with CompleteMultipartUpload, so that request must enforce it.
+            if (await ConditionStateAsync(multipart ? S3ProbedCondition.PutMatch : S3ProbedCondition.CopyMatch, cancellationToken).ConfigureAwait(false) != S3ConditionState.Enforced)
                 return Result<S3PinnedSource>.Failure(StorageErrors.Unsupported(
-                    "This S3-compatible server does not enforce If-Match on CopyObject, so a server-side copy cannot keep the destination condition."));
+                    "This S3-compatible server does not enforce If-Match on the request that commits a copy, so a server-side copy cannot keep the destination condition."));
             var resolved = await ResolveUploadIfMatchAsync(destinationKey, condition, cancellationToken).ConfigureAwait(false);
             if (resolved.IsFailure) return Result<S3PinnedSource>.Failure(resolved.Error!);
             ifMatch = resolved.Value;
         }
         var createOnly = !options.Overwrite;
+        var sendCreateOnly = false;
         if (createOnly)
         {
-            // Where the server enforces If-None-Match on the copy this is a courtesy; where it does not (MinIO), it
-            // is the only guard, and the enforcement is reported as checked before commit.
+            // Where the server enforces If-None-Match on the committing request this is a courtesy; where it does not
+            // (MinIO ignores it on CopyObject; some servers reject it), it is the only guard, the header is not sent,
+            // and the enforcement is reported as checked before commit.
+            sendCreateOnly = await ConditionStateAsync(multipart ? S3ProbedCondition.PutCreateOnly : S3ProbedCondition.CopyCreateOnly, cancellationToken).ConfigureAwait(false) == S3ConditionState.Enforced;
             var exists = await ExistsAsync(destinationPath, cancellationToken).ConfigureAwait(false);
             if (exists.IsFailure) return Result<S3PinnedSource>.Failure(exists.Error!);
             if (exists.Value) return Result<S3PinnedSource>.Failure(StorageErrors.Conflict("The S3 destination already exists."));
@@ -1156,10 +1182,15 @@ public sealed class S3StorageBackend :
         }
         try
         {
-            if (head.ContentLength > MultipartCopyThresholdBytes)
-                await CopyMultipartAsync(sourceKey, destinationKey, head, options.SourceVersionId, createOnly, ifMatch, cancellationToken).ConfigureAwait(false);
+            if (multipart)
+                await CopyMultipartAsync(sourceKey, destinationKey, head, options.SourceVersionId, sendCreateOnly, ifMatch, cancellationToken).ConfigureAwait(false);
             else
-                await _client.CopyObjectAsync(NewCopyRequest(sourceKey, destinationKey, head, options.SourceVersionId, createOnly, ifMatch), cancellationToken).ConfigureAwait(false);
+            {
+                // Once sent, a CopyObject is not cancelled: it may commit on the server with its reply lost to the
+                // cancel, and a move would then keep a source whose copy exists.
+                cancellationToken.ThrowIfCancellationRequested();
+                await _client.CopyObjectAsync(NewCopyRequest(sourceKey, destinationKey, head, options.SourceVersionId, sendCreateOnly, ifMatch), CancellationToken.None).ConfigureAwait(false);
+            }
             return Result<S3PinnedSource>.Success(new S3PinnedSource(head.ETag, options.SourceVersionId));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -1180,7 +1211,7 @@ public sealed class S3StorageBackend :
         string destinationKey,
         GetObjectMetadataResponse head,
         string? sourceVersionId,
-        bool createOnly,
+        bool sendCreateOnly,
         string? ifMatch)
     {
         var request = new CopyObjectRequest
@@ -1192,11 +1223,9 @@ public sealed class S3StorageBackend :
             DestinationKey = destinationKey,
             ETagToMatch = head.ETag
         };
-        if (SendsConditions)
-        {
-            if (createOnly) request.IfNoneMatch = "*";
-            else if (ifMatch is not null) request.IfMatch = ifMatch;
-        }
+        // Only conditions the server was found to enforce are sent (see ConditionStateAsync).
+        if (sendCreateOnly) request.IfNoneMatch = "*";
+        else if (ifMatch is not null) request.IfMatch = ifMatch;
         // Without these the copy would take the bucket's defaults: STANDARD storage and the default encryption.
         if (IsNonStandard(head.StorageClass)) request.StorageClass = head.StorageClass;
         if (IsEncrypted(head.ServerSideEncryptionMethod))
@@ -1218,7 +1247,7 @@ public sealed class S3StorageBackend :
         string destinationKey,
         GetObjectMetadataResponse head,
         string? sourceVersionId,
-        bool createOnly,
+        bool sendCreateOnly,
         string? ifMatch,
         CancellationToken cancellationToken)
     {
@@ -1259,7 +1288,7 @@ public sealed class S3StorageBackend :
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var partSize = MultipartCopyPartSize(size, _multipartPartSizeBytes);
+            var partSize = MultipartCopyPartSize(size, _multipartPartSizeBytes, Math.Min(MultipartCopyMinPartBytes, MultipartCopyThresholdBytes));
             var count = checked((int)((size + partSize - 1) / partSize));
             var parts = new PartETag[count];
             Exception? failure = null;
@@ -1320,12 +1349,10 @@ public sealed class S3StorageBackend :
                 UploadId = initiated.UploadId,
                 PartETags = [.. parts]
             };
-            if (SendsConditions)
-            {
-                if (createOnly) complete.IfNoneMatch = "*";
-                else if (ifMatch is not null) complete.IfMatch = ifMatch;
-            }
-            await CompleteMultipartAsync(complete, cancellationToken).ConfigureAwait(false);
+            if (sendCreateOnly) complete.IfNoneMatch = "*";
+            else if (ifMatch is not null) complete.IfMatch = ifMatch;
+            // Once sent, the completion is not cancelled: it may commit with its reply lost to the cancel.
+            await CompleteMultipartAsync(complete).ConfigureAwait(false);
         }
         catch
         {
@@ -1341,34 +1368,56 @@ public sealed class S3StorageBackend :
     /// <summary>How many parts of a large copy run at once.</summary>
     internal const int MultipartCopyConcurrency = 4;
 
-    /// <summary>The part size for copying <paramref name="size"/> bytes: the preferred size, larger when needed to stay within 10,000 parts.</summary>
-    internal static long MultipartCopyPartSize(long size, long preferred) => Math.Max(preferred, (size + 9_999) / 10_000);
+    /// <summary>The smallest part a large server-side copy uses (each part is a request; the data never passes through the client).</summary>
+    internal long MultipartCopyMinPartBytes { get; init; } = 128L * 1024 * 1024;
 
     /// <summary>
-    /// Completes a multipart upload. When the reply to a completion that did commit is lost, the SDK's retry is
-    /// refused (the upload is gone, or a condition no longer holds against our own object); the object is then
-    /// read back, and if it carries the multipart ETag these parts produce, the upload is ours and succeeded.
+    /// The part size for copying <paramref name="size"/> bytes: the larger of the preferred size and
+    /// <paramref name="minimum"/>, larger still when needed to stay within 10,000 parts, and never above S3's 5 GiB part limit.
     /// </summary>
-    private async Task<CompleteMultipartUploadResponse> CompleteMultipartAsync(CompleteMultipartUploadRequest request, CancellationToken cancellationToken)
+    internal static long MultipartCopyPartSize(long size, long preferred, long minimum = 128L * 1024 * 1024) =>
+        Math.Min(5L * 1024 * 1024 * 1024, Math.Max(Math.Max(preferred, minimum), (size + 9_999) / 10_000));
+
+    /// <summary>
+    /// Completes a multipart upload, never cancelled once sent. When the reply to a completion that did commit is
+    /// lost, the SDK's retry is refused (the upload is gone, or a condition no longer holds against our own object);
+    /// the object is then read back, and if it carries the multipart ETag these parts produce, the upload is ours and
+    /// succeeded. In a versioned bucket another writer may already have put a newer version on top; the key's versions
+    /// are then searched for ours, so its version is reported rather than a failure.
+    /// </summary>
+    private async Task<CompleteMultipartUploadResponse> CompleteMultipartAsync(CompleteMultipartUploadRequest request)
     {
         try
         {
-            return await _client.CompleteMultipartUploadAsync(request, cancellationToken).ConfigureAwait(false);
+            return await _client.CompleteMultipartUploadAsync(request, CancellationToken.None).ConfigureAwait(false);
         }
         catch (AmazonS3Exception error) when (error.ErrorCode == "NoSuchUpload" || error.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.PreconditionFailed)
         {
             var expected = MultipartETag(request.PartETags.Select(part => part.ETag));
-            var current = expected is null ? null : await HeadAsync(request.Key, CancellationToken.None).ConfigureAwait(false);
-            if (current is null || !string.Equals(current.ETag?.Trim('"'), expected, StringComparison.OrdinalIgnoreCase))
-                throw;
-            return new CompleteMultipartUploadResponse
-            {
-                BucketName = request.BucketName,
-                Key = request.Key,
-                ETag = current.ETag,
-                VersionId = current.VersionId
-            };
+            if (expected is null) throw;
+            var current = await HeadAsync(request.Key, CancellationToken.None).ConfigureAwait(false);
+            if (current is not null && string.Equals(current.ETag?.Trim('"'), expected, StringComparison.OrdinalIgnoreCase))
+                return new CompleteMultipartUploadResponse { BucketName = request.BucketName, Key = request.Key, ETag = current.ETag, VersionId = current.VersionId };
+            var version = await FindVersionAsync(request.Key, expected).ConfigureAwait(false);
+            if (version is null) throw;
+            return new CompleteMultipartUploadResponse { BucketName = request.BucketName, Key = request.Key, ETag = version.ETag, VersionId = version.VersionId };
         }
+    }
+
+    /// <summary>
+    /// A recent version of <paramref name="key"/> with the given ETag, or null when there is none or the bucket
+    /// cannot list versions (unversioned buckets list only the current object, which was already compared).
+    /// </summary>
+    private async Task<S3ObjectVersion?> FindVersionAsync(string key, string etag)
+    {
+        try
+        {
+            var versions = await _client.ListVersionsAsync(new ListVersionsRequest { BucketName = _bucket, Prefix = key, MaxKeys = 100 }, CancellationToken.None).ConfigureAwait(false);
+            return (versions.Versions ?? []).FirstOrDefault(version =>
+                version.Key == key && version.IsDeleteMarker != true && !string.IsNullOrEmpty(version.VersionId) && version.VersionId != "null" &&
+                string.Equals(version.ETag?.Trim('"'), etag, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception) { return null; }
     }
 
     /// <summary>The ETag S3 gives a multipart upload of these parts (MD5 of the part MD5s, then the part count), or null when a part ETag is not an MD5.</summary>
@@ -1402,13 +1451,14 @@ public sealed class S3StorageBackend :
 
     /// <summary>
     /// Deletes a moved source only while it is still the version that was copied: its ETag (and version, when one
-    /// was pinned) is compared first and the delete carries <c>If-Match</c>. Runs after the destination committed,
-    /// so it is not cancelled.
+    /// was pinned) is compared first, and the delete carries <c>If-Match</c> where the server enforces it on deletes
+    /// (elsewhere the comparison just before is the guard). Runs after the destination committed, so it is not cancelled.
     /// </summary>
     private async Task<Result> DeleteMovedSourceAsync(string sourceKey, S3PinnedSource copied)
     {
         try
         {
+            var sendIfMatch = await ConditionStateAsync(S3ProbedCondition.DeleteMatch, CancellationToken.None).ConfigureAwait(false) == S3ConditionState.Enforced;
             var current = await HeadAsync(sourceKey, CancellationToken.None).ConfigureAwait(false);
             if (current is null)
                 return Result.Success();
@@ -1416,7 +1466,7 @@ public sealed class S3StorageBackend :
                 (copied.VersionId is not null && !string.Equals(copied.VersionId, current.VersionId, StringComparison.Ordinal)))
                 return Result.Failure(StorageErrors.Conflict("The S3 source changed after it was copied, so it was not deleted."));
             var request = new DeleteObjectRequest { BucketName = _bucket, Key = sourceKey };
-            if (SendsConditions) request.IfMatch = current.ETag;
+            if (sendIfMatch) request.IfMatch = current.ETag;
             await _client.DeleteObjectAsync(request, CancellationToken.None).ConfigureAwait(false);
             return Result.Success();
         }
@@ -1433,30 +1483,32 @@ public sealed class S3StorageBackend :
     private static bool IsEncrypted(ServerSideEncryptionMethod? method) =>
         method is not null && !string.IsNullOrEmpty(method.Value) && method != ServerSideEncryptionMethod.None;
 
-    /// <summary>Whether conditional headers are sent at all; a server configured as not enforcing them gets none.</summary>
-    private bool SendsConditions => ConditionalRequests != S3ConditionalRequestSupport.NotEnforced;
+    /// <summary>
+    /// Whether an upload's condition (create-only, or <see cref="StorageUploadOptions.Condition"/>) can be sent with the
+    /// request that commits: the server enforces it there. Otherwise it is checked just before instead. An upload
+    /// without a condition needs no probe.
+    /// </summary>
+    private async ValueTask<bool> UploadConditionsEnforcedAsync(StorageUploadOptions options, CancellationToken cancellationToken)
+    {
+        if (options.Overwrite && options.Condition is null or { IsEmpty: true }) return true;
+        var condition = options.Overwrite ? S3ProbedCondition.PutMatch : S3ProbedCondition.PutCreateOnly;
+        return await ConditionStateAsync(condition, cancellationToken).ConfigureAwait(false) == S3ConditionState.Enforced;
+    }
 
     /// <inheritdoc />
     /// <remarks>
-    /// Uploads are atomic unless the connection says the server does not enforce conditions. For server-side copies
-    /// (<c>If-None-Match</c>/<c>If-Match</c> on <c>CopyObject</c>) and conditional deletes, <see cref="S3ConditionalRequestSupport.Auto"/>
-    /// asks the server once per connection: MinIO, for one, ignores all three.
+    /// With <see cref="S3ConditionalRequestSupport.Auto"/> the answer comes from the connection's probe (run here when
+    /// it has not run yet): <see cref="StorageConditionEnforcement.Atomic"/> only for a condition the server was seen to
+    /// enforce on the request that commits (<c>PutObject</c>/<c>CompleteMultipartUpload</c> for uploads,
+    /// <c>CopyObject</c> for server-side copies, <c>DeleteObject</c> for deletes). MinIO, for one, ignores both
+    /// conditions on <c>CopyObject</c> and <c>If-Match</c> on <c>DeleteObject</c>.
     /// </remarks>
     async ValueTask<StorageConditionEnforcement> IStorageConditionEnforcementSource.GetEnforcementAsync(StorageConditionKind kind, bool serverSideCopy, CancellationToken cancellationToken)
     {
-        switch (ConditionalRequests)
-        {
-            case S3ConditionalRequestSupport.NotEnforced:
-                return StorageConditionEnforcement.CheckedBeforeCommit;
-            case S3ConditionalRequestSupport.Enforced:
-                return StorageConditionEnforcement.Atomic;
-        }
-        if (kind != StorageConditionKind.DeleteMatchVersion && !serverSideCopy)
-            return StorageConditionEnforcement.Atomic;
         var probed = kind switch
         {
-            StorageConditionKind.CreateOnly => S3ProbedCondition.CopyCreateOnly,
-            StorageConditionKind.MatchVersion => S3ProbedCondition.CopyMatch,
+            StorageConditionKind.CreateOnly => serverSideCopy ? S3ProbedCondition.CopyCreateOnly : S3ProbedCondition.PutCreateOnly,
+            StorageConditionKind.MatchVersion => serverSideCopy ? S3ProbedCondition.CopyMatch : S3ProbedCondition.PutMatch,
             _ => S3ProbedCondition.DeleteMatch
         };
         return await ConditionStateAsync(probed, cancellationToken).ConfigureAwait(false) == S3ConditionState.Enforced
@@ -1464,7 +1516,19 @@ public sealed class S3StorageBackend :
             : StorageConditionEnforcement.CheckedBeforeCommit;
     }
 
-    /// <summary>Whether the server enforces a copy or delete condition: by setting, or by the connection's probe.</summary>
+    /// <summary>How long after a probe that could not finish the next one may run; doubled for each further failure, up to 32 times.</summary>
+    internal TimeSpan InconclusiveProbeBackoff { get; init; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>The clock the probe back-off is measured with.</summary>
+    internal Func<DateTimeOffset> Clock { get; init; } = static () => DateTimeOffset.UtcNow;
+
+    private int _inconclusiveProbes;
+
+    /// <summary>
+    /// Whether the server enforces a condition: by setting, or by the connection's probe. A conclusive probe is kept
+    /// for the connection's life. One that could not finish is kept too, as "not enforced", until its back-off ends,
+    /// so a failing server is not probed again by every conditional request.
+    /// </summary>
     private async ValueTask<S3ConditionState> ConditionStateAsync(S3ProbedCondition condition, CancellationToken cancellationToken)
     {
         switch (ConditionalRequests)
@@ -1475,30 +1539,41 @@ public sealed class S3StorageBackend :
                 return S3ConditionState.Enforced;
         }
         var probe = Volatile.Read(ref _conditionProbe);
-        if (probe is null)
+        if (probe is null || (!probe.Conclusive && Clock() >= probe.RetryAt))
         {
             await _probeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                probe = _conditionProbe ?? await ProbeConditionsAsync(cancellationToken).ConfigureAwait(false);
-                // Only a conclusive answer is kept; a probe that could not run is tried again next time.
-                if (probe.Conclusive) Volatile.Write(ref _conditionProbe, probe);
+                probe = _conditionProbe;
+                if (probe is null || (!probe.Conclusive && Clock() >= probe.RetryAt))
+                {
+                    probe = await ProbeConditionsAsync(cancellationToken).ConfigureAwait(false);
+                    if (!probe.Conclusive)
+                    {
+                        var failures = Math.Min(++_inconclusiveProbes, 6);
+                        probe = probe with { RetryAt = Clock() + InconclusiveProbeBackoff * (1 << (failures - 1)) };
+                    }
+                    Volatile.Write(ref _conditionProbe, probe);
+                }
             }
             finally { _probeGate.Release(); }
         }
-        return condition switch
-        {
-            S3ProbedCondition.CopyCreateOnly => probe.CopyCreateOnly,
-            S3ProbedCondition.CopyMatch => probe.CopyMatch,
-            _ => probe.DeleteMatch
-        };
+        return probe.StateOf(condition);
     }
 
     /// <summary>
-    /// Asks the server whether it enforces <c>If-None-Match</c> and <c>If-Match</c> on <c>CopyObject</c> and
-    /// <c>If-Match</c> on <c>DeleteObject</c>, with two one-byte <c>.cl-storage-probe-*</c> objects under the prefix
-    /// that are removed afterwards. A request answered 412 enforces its condition; one that succeeds ignores it.
+    /// Asks the server whether it enforces <c>If-None-Match</c> and <c>If-Match</c> on <c>PutObject</c> and on
+    /// <c>CopyObject</c>, and <c>If-Match</c> on <c>DeleteObject</c>, with two one-byte <c>.cl-storage-probe-*</c>
+    /// objects under the prefix that are removed afterwards. A request answered 412 enforces its condition; one that
+    /// succeeds ignores it; one answered 400 or 501 rejects the header. <c>CompleteMultipartUpload</c> is taken to
+    /// behave as <c>PutObject</c> does.
     /// </summary>
+    /// <remarks>
+    /// The probe's requests are real writes (four PUTs, two COPYs, three DELETEs): on a versioned bucket they leave
+    /// noncurrent versions and delete markers of the probe objects, on an Object Lock bucket versions that cannot be
+    /// deleted until their retention ends, and they raise event notifications and replication like any write. See
+    /// <see cref="S3ConditionalRequestSupport.Auto"/>.
+    /// </remarks>
     private async Task<S3ConditionProbe> ProbeConditionsAsync(CancellationToken cancellationToken)
     {
         var stem = $"{_keyPrefix}.cl-storage-probe-{Guid.NewGuid():N}";
@@ -1512,7 +1587,21 @@ public sealed class S3StorageBackend :
                 await using var content = new MemoryStream([0x2A], writable: false);
                 await _client.PutObjectAsync(NewPutRequest(key, content, "application/octet-stream", null), cancellationToken).ConfigureAwait(false);
             }
-            var createOnly = await ProbeAsync(() => _client.CopyObjectAsync(new CopyObjectRequest
+            var putCreateOnly = await ProbeAsync(async () =>
+            {
+                await using var content = new MemoryStream([0x2B], writable: false);
+                var request = NewPutRequest(second, content, "application/octet-stream", null);
+                request.IfNoneMatch = "*";
+                await _client.PutObjectAsync(request, cancellationToken).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+            var putMatch = await ProbeAsync(async () =>
+            {
+                await using var content = new MemoryStream([0x2C], writable: false);
+                var request = NewPutRequest(second, content, "application/octet-stream", null);
+                request.IfMatch = WrongETag;
+                await _client.PutObjectAsync(request, cancellationToken).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+            var copyCreateOnly = await ProbeAsync(() => _client.CopyObjectAsync(new CopyObjectRequest
             {
                 SourceBucket = _bucket,
                 SourceKey = first,
@@ -1520,7 +1609,7 @@ public sealed class S3StorageBackend :
                 DestinationKey = second,
                 IfNoneMatch = "*"
             }, cancellationToken)).ConfigureAwait(false);
-            var match = await ProbeAsync(() => _client.CopyObjectAsync(new CopyObjectRequest
+            var copyMatch = await ProbeAsync(() => _client.CopyObjectAsync(new CopyObjectRequest
             {
                 SourceBucket = _bucket,
                 SourceKey = first,
@@ -1534,13 +1623,14 @@ public sealed class S3StorageBackend :
                 Key = second,
                 IfMatch = WrongETag
             }, cancellationToken)).ConfigureAwait(false);
-            return new S3ConditionProbe(createOnly, match, delete, Conclusive: true);
+            return new S3ConditionProbe(putCreateOnly, putMatch, copyCreateOnly, copyMatch, delete, Conclusive: true);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception)
         {
-            // Without an answer nothing is assumed enforced.
-            return new S3ConditionProbe(S3ConditionState.Ignored, S3ConditionState.Ignored, S3ConditionState.Ignored, Conclusive: false);
+            // Without an answer nothing is assumed enforced, and no header is sent that the server might reject.
+            return new S3ConditionProbe(S3ConditionState.Unknown, S3ConditionState.Unknown, S3ConditionState.Unknown,
+                S3ConditionState.Unknown, S3ConditionState.Unknown, Conclusive: false);
         }
         finally
         {
@@ -1641,12 +1731,20 @@ public sealed class S3StorageBackend :
             var encryption = response.ServerSideEncryptionMethod?.Value ?? string.Empty;
             if (encryption.StartsWith("aws:kms", StringComparison.Ordinal))
                 return ProviderChecksums.Unavailable(algorithm, "An SSE-KMS object's ETag is not its MD5.");
-            // SSE-C: the ETag is derived from the encrypted content, not the plaintext.
+            // SSE-C: the ETag is derived from the encrypted content, not the plaintext. (Servers that answer a HEAD
+            // without the customer key say so here; AWS refuses that HEAD with 400, handled below.)
             if (response.ServerSideEncryptionCustomerMethod is { Value.Length: > 0 } customer && customer != ServerSideEncryptionCustomerMethod.None)
                 return ProviderChecksums.Unavailable(algorithm, "An SSE-C object's ETag is not its MD5.");
             return ProviderChecksums.FromHex(algorithm, response.ETag);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (AmazonS3Exception error) when (error.StatusCode == HttpStatusCode.BadRequest)
+        {
+            // AWS answers a HEAD of an SSE-C object without the customer key with 400 (a HEAD has no error body to
+            // say more). Such an object's ETag is not its MD5 anyway, and this connection cannot send the key.
+            return ProviderChecksums.Unavailable(algorithm,
+                "S3 refused to read the object's headers (400): it is probably encrypted with a customer key (SSE-C), whose ETag is not its MD5.");
+        }
         catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get S3 checksum")); }
     }
 
@@ -1706,10 +1804,39 @@ public sealed class S3StorageBackend :
     private sealed record S3UploadCompletion(string? ETag, string? VersionId, long? Bytes);
     /// <summary>The source version a copy was pinned to.</summary>
     private sealed record S3PinnedSource(string? ETag, string? VersionId);
-    /// <summary>What a connection's server does with copy and delete conditions.</summary>
-    private sealed record S3ConditionProbe(S3ConditionState CopyCreateOnly, S3ConditionState CopyMatch, S3ConditionState DeleteMatch, bool Conclusive);
-    private enum S3ProbedCondition { CopyCreateOnly, CopyMatch, DeleteMatch }
-    private enum S3ConditionState { Enforced, Ignored, Rejected }
+    /// <summary>What a connection's server does with upload, copy, and delete conditions.</summary>
+    private sealed record S3ConditionProbe(
+        S3ConditionState PutCreateOnly,
+        S3ConditionState PutMatch,
+        S3ConditionState CopyCreateOnly,
+        S3ConditionState CopyMatch,
+        S3ConditionState DeleteMatch,
+        bool Conclusive)
+    {
+        /// <summary>For a probe that could not finish: when the next may run.</summary>
+        public DateTimeOffset RetryAt { get; init; }
+
+        public S3ConditionState StateOf(S3ProbedCondition condition) => condition switch
+        {
+            S3ProbedCondition.PutCreateOnly => PutCreateOnly,
+            S3ProbedCondition.PutMatch => PutMatch,
+            S3ProbedCondition.CopyCreateOnly => CopyCreateOnly,
+            S3ProbedCondition.CopyMatch => CopyMatch,
+            _ => DeleteMatch
+        };
+
+        /// <summary>The capabilities with only the conditional flags this server enforces on every request that commits.</summary>
+        public StorageCapabilities Capabilities(StorageCapabilities all)
+        {
+            var features = all.Features;
+            if (PutCreateOnly != S3ConditionState.Enforced || CopyCreateOnly != S3ConditionState.Enforced) features &= ~StorageFeature.ConditionalCreate;
+            if (PutMatch != S3ConditionState.Enforced || CopyMatch != S3ConditionState.Enforced) features &= ~StorageFeature.ConditionalUpdate;
+            if (DeleteMatch != S3ConditionState.Enforced) features &= ~StorageFeature.ConditionalDelete;
+            return features == all.Features ? all : new StorageCapabilities(features, all.Limits);
+        }
+    }
+    private enum S3ProbedCondition { PutCreateOnly, PutMatch, CopyCreateOnly, CopyMatch, DeleteMatch }
+    private enum S3ConditionState { Enforced, Ignored, Rejected, Unknown }
     private sealed record S3VersionContinuation(string? KeyMarker, string? VersionIdMarker);
     private readonly record struct S3PartRead(int Count, bool EndOfStream);
     private sealed class StorageMultipartLimitException : Exception { }

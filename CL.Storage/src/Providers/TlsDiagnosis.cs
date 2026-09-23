@@ -127,18 +127,32 @@ internal static class TlsDiagnosis
     /// <paramref name="attemptStarted"/>), marks the failure as <see cref="ServerCertificateRejected"/> and adds
     /// the certificate's fingerprints. The error's other details are kept.
     /// </summary>
-    public static Error Enrich(Error error, ServerIdentityRecorder? identity, DateTimeOffset attemptStarted)
+    public static Error Enrich(Error error, ServerIdentityRecorder? identity, DateTimeOffset attemptStarted) =>
+        Enrich(error, identity, attemptStarted,
+            identity?.ClientCertificateRefusedAt is { } refused && refused >= attemptStarted - TimeSpan.FromMilliseconds(50));
+
+    /// <summary>
+    /// Explains a failed attempt. A client-certificate refusal counts only when it was recorded on a connection this
+    /// attempt itself sent a request on (<see cref="ProviderAttempt.ClientCertificateRefused"/>); a refusal on any other
+    /// connection of the backend — a spare connection, a concurrent transfer — leaves this attempt's drop a transient
+    /// <c>storage.connection_lost</c>. Where the watch cannot see the connection (behind an HTTP proxy tunnel, the TLS
+    /// stream sits on the tunnel rather than on the watched socket) nothing is recorded, and a refusal stays a plain
+    /// lost connection with at most a <c>tlsReason</c> hint: never a false refusal.
+    /// </summary>
+    public static Error Enrich(Error error, ServerIdentityRecorder? identity, ProviderAttempt attempt) =>
+        Enrich(error, identity, attempt.Started, attempt.ClientCertificateRefused);
+
+    private static Error Enrich(Error error, ServerIdentityRecorder? identity, DateTimeOffset attemptStarted, bool clientCertificateRefused)
     {
         // TLS 1.3 servers refuse a missing or untrusted client certificate only after the handshake, and SChannel
-        // reports the refusal as a dropped connection. It is taken for a refusal only when, during this attempt, a
-        // connection the server asked for a certificate failed before the server sent anything after our reply
-        // (recorded per connection by TlsConnectionWatch). A drop on another connection, or on one whose certificate
-        // the server accepted (a server that requests but does not require one), stays a transient lost connection.
+        // reports the refusal as a dropped connection. It is taken for a refusal only when a connection the server
+        // asked for a certificate failed right after its alert (recorded per connection by TlsConnectionWatch). A drop
+        // on another connection, or on one whose certificate the server accepted (a server that requests but does not
+        // require one), stays a transient lost connection.
         var unexplained = error.Code == StorageErrors.ConnectionLostCode ||
             (error.Code == StorageErrors.TlsFailureCode && StorageErrorInfo.TryGetDetail(error, StorageErrorInfo.TlsReasonKey, out var why) && why == HandshakeFailed);
         var serverRefused = identity?.Last is { Kind: "tls-certificate", Trusted: false } && identity.LastRecordedAt >= attemptStarted - TimeSpan.FromMilliseconds(50);
-        if (unexplained && !serverRefused && identity?.ClientCertificateRefusedAt is { } refused &&
-            refused >= attemptStarted - TimeSpan.FromMilliseconds(50))
+        if (unexplained && !serverRefused && clientCertificateRefused)
         {
             return StorageErrors.TlsFailure(
                 $"{error.Message} The server asked for a client certificate and closed the connection: the certificate was missing or refused.",
@@ -191,9 +205,17 @@ internal static class TlsDiagnosis
 /// Watches the transport under one TLS connection, so a server refusing our client certificate can be told from an
 /// ordinary drop. TLS 1.3 servers refuse a missing or untrusted certificate only after the handshake, with an alert on
 /// the first read (SChannel then reports a dropped connection or a decryption error). A refusal is recorded only for a
-/// connection the server actually asked for a certificate, and only when it failed after our reply before the server
-/// sent more than an alert; a connection that carried a response afterwards (the server accepted the certificate, or
-/// only requested one) never records it.
+/// connection the server actually asked for a certificate, and only when, after our reply, the connection failed or was
+/// closed with evidence of a refusal: the server sent an alert's worth of bytes (at least one, fewer than
+/// <see cref="AcceptedAfterBytes"/>), or a request sent after the reply got a read error or the end of the stream
+/// instead of an answer. A connection merely closed without having read anything after the reply (a spare connection
+/// the pool opened and later scavenged) records nothing, nor does one that carried a response afterwards (the server
+/// accepted the certificate, or only requested one).
+/// <para>
+/// The refusal is attributed to the <see cref="ProviderAttempt"/> that sent a request on this connection after the
+/// certificate reply, so only that attempt's failure is explained by it. A backend-wide time is kept as well, for
+/// diagnostics only.
+/// </para>
 /// </summary>
 internal sealed class TlsConnectionWatch(Stream inner, ServerIdentityRecorder recorder) : Stream
 {
@@ -207,10 +229,13 @@ internal sealed class TlsConnectionWatch(Stream inner, ServerIdentityRecorder re
     private const int Settled = 3;
     private int _state;
     private long _readAfterReply;
+    private int _requestSent;
+    private ProviderAttempt? _requestAttempt;
 
     /// <summary>
     /// Called from a TLS stream's client-certificate selection: records a request only when the server asked (it sent its
-    /// certificate or the issuers it accepts), and only on the connection it asked on.
+    /// certificate or the issuers it accepts), and only on the connection it asked on. A TLS stream that does not sit
+    /// directly on a watched connection (an HTTP proxy tunnel) is not found, and nothing is recorded.
     /// </summary>
     public static void OnCertificateSelection(object sender, X509Certificate? remoteCertificate, string[]? acceptableIssuers)
     {
@@ -222,19 +247,40 @@ internal sealed class TlsConnectionWatch(Stream inner, ServerIdentityRecorder re
     /// <summary>The server asked this connection for a client certificate.</summary>
     public void CertificateRequested() => Interlocked.CompareExchange(ref _state, Asked, NotAsked);
 
-    private void Wrote() => Interlocked.CompareExchange(ref _state, Replied, Asked);
-
-    private void Read(int count)
+    private void Wrote()
     {
-        if (count == 0) { Failed(); return; }
+        // A write after the certificate reply carries a request: remember that one was sent, and whose it was, so a
+        // refusal explains only that attempt's failure.
+        if (Volatile.Read(ref _state) == Replied)
+        {
+            Volatile.Write(ref _requestSent, 1);
+            if (ProviderAttempt.Current is { } attempt) Volatile.Write(ref _requestAttempt, attempt);
+        }
+        Interlocked.CompareExchange(ref _state, Replied, Asked);
+    }
+
+    private void Read(int count, int requested)
+    {
+        // A zero-byte read of an empty buffer (SslStream waits for data that way) is not the end of the stream.
+        if (count == 0) { if (requested > 0) Failed(disposing: false); return; }
         if (Volatile.Read(ref _state) == Replied && Interlocked.Add(ref _readAfterReply, count) >= AcceptedAfterBytes)
             Interlocked.CompareExchange(ref _state, Settled, Replied);
     }
 
-    private void Failed()
+    /// <summary>
+    /// The connection failed (a read error or the end of the stream) or is being closed. It is taken for a refusal
+    /// only after our certificate reply and before the server sent more than an alert, and only with evidence: an
+    /// alert's worth of bytes was read, or a request sent after the reply failed to read its answer. A connection that
+    /// is merely closed without having read anything after the reply — a spare the pool opened and later scavenged —
+    /// records nothing.
+    /// </summary>
+    private void Failed(bool disposing)
     {
-        if (Interlocked.CompareExchange(ref _state, Settled, Replied) == Replied)
-            recorder.RecordClientCertificateRefusal();
+        var alertRead = Interlocked.Read(ref _readAfterReply) > 0;
+        if (!alertRead && (disposing || Volatile.Read(ref _requestSent) == 0)) return;
+        if (Interlocked.CompareExchange(ref _state, Settled, Replied) != Replied) return;
+        recorder.RecordClientCertificateRefusal();
+        Volatile.Read(ref _requestAttempt)?.RecordClientCertificateRefusal();
     }
 
     public override bool CanRead => inner.CanRead;
@@ -253,8 +299,8 @@ internal sealed class TlsConnectionWatch(Stream inner, ServerIdentityRecorder re
     {
         int count;
         try { count = inner.Read(buffer); }
-        catch { Failed(); throw; }
-        Read(count);
+        catch { Failed(disposing: false); throw; }
+        Read(count, buffer.Length);
         return count;
     }
 
@@ -265,8 +311,8 @@ internal sealed class TlsConnectionWatch(Stream inner, ServerIdentityRecorder re
     {
         int count;
         try { count = await inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false); }
-        catch (Exception error) when (error is not OperationCanceledException) { Failed(); throw; }
-        Read(count);
+        catch (Exception error) when (error is not OperationCanceledException) { Failed(disposing: false); throw; }
+        Read(count, buffer.Length);
         return count;
     }
 
@@ -289,15 +335,15 @@ internal sealed class TlsConnectionWatch(Stream inner, ServerIdentityRecorder re
 
     protected override void Dispose(bool disposing)
     {
-        // Closed after our reply without the server having sent more than an alert: SChannel read the alert and
-        // failed, and the connection is being discarded.
-        if (disposing) { Failed(); inner.Dispose(); }
+        // Closed after our reply with only an alert's worth read: SChannel read the alert and failed, and the
+        // connection is being discarded.
+        if (disposing) { Failed(disposing: true); inner.Dispose(); }
         base.Dispose(disposing);
     }
 
     public override async ValueTask DisposeAsync()
     {
-        Failed();
+        Failed(disposing: true);
         await inner.DisposeAsync().ConfigureAwait(false);
         await base.DisposeAsync().ConfigureAwait(false);
     }
