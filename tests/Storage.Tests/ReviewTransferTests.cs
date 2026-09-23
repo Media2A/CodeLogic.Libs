@@ -180,7 +180,7 @@ public sealed class ReviewTransferTests
         Assert.Equal(content, (await storage.DownloadBytesAsync("f.bin")).Value!);
     }
 
-    [Fact]
+    [Fact] // needs-review B3, E: a foreign file named by the token is neither followed nor deleted
     public async Task A_tampered_resume_token_is_not_followed()
     {
         var (library, directory, _) = await TwoConnectionsAsync();
