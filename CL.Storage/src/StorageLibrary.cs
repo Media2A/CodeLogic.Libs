@@ -1816,9 +1816,24 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     {
         EnsureOperational();
         var opened = await Queue.StorageTransferQueue.OpenAsync(this, options ?? new Queue.StorageTransferQueueOptions(), cancellationToken).ConfigureAwait(false);
-        if (opened.IsSuccess)
-            lock (_queues) _queues.Add(opened.Value!);
+        if (opened.IsSuccess && !TrackQueue(opened.Value!))
+        {
+            // The library began stopping while the queue opened, after it had stopped the queues it knew of.
+            await opened.Value!.DisposeAsync().ConfigureAwait(false);
+            return Result<Queue.StorageTransferQueue>.Failure(StorageErrors.Unavailable("The storage library stopped while the transfer queue was opening."));
+        }
         return opened;
+    }
+
+    /// <summary>Keeps a queue to stop with the library; false when the library is already stopping.</summary>
+    private bool TrackQueue(Queue.StorageTransferQueue queue)
+    {
+        lock (_stateGate)
+        {
+            if (_state is LifecycleState.Stopping or LifecycleState.Stopped or LifecycleState.Disposed) return false;
+            lock (_queues) _queues.Add(queue);
+            return true;
+        }
     }
 
     /// <summary>Forgets a queue that was disposed.</summary>

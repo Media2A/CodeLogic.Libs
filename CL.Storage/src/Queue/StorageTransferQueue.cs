@@ -16,7 +16,9 @@ public sealed record StorageTransferQueueOptions
     public int MaxTransfersPerConnection { get; init; } = 2;
     /// <summary>
     /// Gets how often a job that failed transiently is retried automatically before it is marked failed. A
-    /// failure of the job store itself does not use up a retry.
+    /// failure of the job store itself does not use up a retry; such attempts are tried again with a growing
+    /// delay, and after eight in a row that the store stopped, the job fails with <c>storage.unavailable</c>
+    /// (only in this queue's view when the store cannot record even that).
     /// </summary>
     public int AutomaticRetries { get; init; } = 3;
     /// <summary>Gets the first retry delay; later retries double it, with jitter, up to <see cref="RetryMaxDelay"/>.</summary>
@@ -55,7 +57,11 @@ public sealed record StorageTransferQueueOptions
     /// <summary>
     /// Gets a context to raise <see cref="StorageTransferQueue.JobChanged"/>, <see cref="StorageTransferQueue.JobRemoved"/>,
     /// and <see cref="StorageTransferQueue.ProgressChanged"/> on, such as a UI thread. An event the context refuses
-    /// (it throws, for example after the UI shut down) is dropped.
+    /// (it throws, for example after the UI shut down) is dropped. Without a context, handlers run inline on the
+    /// queue's own threads (progress on the transfer's), never under one of the queue's locks; they must be
+    /// quick and must not wait synchronously on the queue's methods: an attempt does not end while one of its
+    /// progress handlers runs, so a handler that blocks on pausing, cancelling, or removing its own job stalls
+    /// that job until <see cref="ControlTimeout"/> ends the wait.
     /// </summary>
     public SynchronizationContext? EventContext { get; init; }
     /// <summary>Gets how often to read the store for jobs changed by other processes; never when null. Up to one day.</summary>
@@ -65,6 +71,14 @@ public sealed record StorageTransferQueueOptions
     /// still running after it goes on in the background and records its outcome when it ends.
     /// </summary>
     public TimeSpan ShutdownTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// Gets how long <see cref="StorageTransferQueue.PauseJobAsync"/>, <see cref="StorageTransferQueue.CancelAsync"/>,
+    /// and <see cref="StorageTransferQueue.RemoveAsync"/> wait for a running job's attempt to stop, since a
+    /// provider may not honour cancellation at once (or at all). The request is recorded before the wait and
+    /// still takes effect when the attempt stops; a call that stops waiting first fails with
+    /// <c>storage.timeout</c>. Zero returns as soon as the request is recorded. Up to one day; 30 seconds by default.
+    /// </summary>
+    public TimeSpan ControlTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     internal Result Validate()
     {
@@ -79,6 +93,7 @@ public sealed record StorageTransferQueueOptions
         if (StoreRefreshInterval is { } refresh && (refresh <= TimeSpan.Zero || refresh > TimeSpan.FromDays(1)))
             return Result.Failure(StorageErrors.InvalidContent("StoreRefreshInterval must be positive and at most one day."));
         if (ShutdownTimeout < TimeSpan.Zero || ShutdownTimeout > TimeSpan.FromDays(1)) return Result.Failure(StorageErrors.InvalidContent("ShutdownTimeout must be between zero and one day."));
+        if (ControlTimeout < TimeSpan.Zero || ControlTimeout > TimeSpan.FromDays(1)) return Result.Failure(StorageErrors.InvalidContent("ControlTimeout must be between zero and one day."));
         return Result.Success();
     }
 }
@@ -106,6 +121,12 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     private readonly HashSet<string> _removedWhileRefreshing = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly List<Task> _attempts = [];
+    // Background work (store refreshes, recovery, wake-ups) that DisposeAsync waits for.
+    private readonly HashSet<Task> _background = [];
+    // Store calls in flight, and whether the store is closed to this queue (after DisposeAsync).
+    private int _storeCalls;
+    private bool _storeClosed;
+    private TaskCompletionSource _storeQuiet = CompletedIdle();
     private TaskCompletionSource _idle = CompletedIdle();
     private Timer? _refresh;
     private int _running;
@@ -123,7 +144,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     {
         _library = library;
         _options = options;
-        _store = options.Store ?? new InMemoryStorageTransferJobStore();
+        _store = new GuardedStore(this, options.Store ?? new InMemoryStorageTransferJobStore());
         _paused = options.StartPaused;
         _adaptiveLimit = options.AdaptiveConcurrency ? 1 : options.MaxConcurrentTransfers;
     }
@@ -147,19 +168,26 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             return Result<StorageTransferQueue>.Failure(StoreError(error));
         }
         if (options.StoreRefreshInterval is { } interval)
-            queue._refresh = new Timer(_ => _ = queue.RefreshAsync(CancellationToken.None), null, interval, interval);
+            queue._refresh = new Timer(_ => queue.Track(queue.RefreshAsync(CancellationToken.None)), null, interval, interval);
         await queue.PruneAsync().ConfigureAwait(false);
         queue.Pump();
         return Result<StorageTransferQueue>.Success(queue);
     }
 
-    /// <summary>Raised when a job is added or changes state. Handlers must be quick; see <see cref="StorageTransferQueueOptions.EventContext"/>.</summary>
+    /// <summary>
+    /// Raised when a job is added or changes state. Handlers must be quick and must not wait synchronously on
+    /// this queue's methods; see <see cref="StorageTransferQueueOptions.EventContext"/>.
+    /// </summary>
     public event Action<StorageTransferJob>? JobChanged;
 
     /// <summary>Raised once when a job leaves the queue: removed, pruned from history, or gone from the store.</summary>
     public event Action<StorageTransferJob>? JobRemoved;
 
-    /// <summary>Raised with throttled progress of running jobs.</summary>
+    /// <summary>
+    /// Raised with throttled progress of running jobs, one report at a time per job. Without an
+    /// <see cref="StorageTransferQueueOptions.EventContext"/> the handler runs on the transfer's thread and the
+    /// attempt waits for it before it ends, so it must not wait synchronously on this queue's methods.
+    /// </summary>
     public event Action<StorageTransferJob>? ProgressChanged;
 
     /// <summary>Gets whether the queue is paused; running jobs finish, but no new job starts.</summary>
@@ -181,6 +209,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// <param name="jobId">The job.</param>
     public StorageTransferJob? Get(string jobId)
     {
+        if (jobId is null) return null;
         lock (_gate) return _jobs.TryGetValue(jobId, out var entry) ? entry.Snapshot() : null;
     }
 
@@ -315,8 +344,11 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// <summary>
     /// Holds one job. A running job's attempt is stopped, and the call returns once it has: successfully when
     /// the job is paused, with <c>storage.conflict</c> when the attempt finished first (or committed its
-    /// destination, which makes the job need reconciliation). A resumable transfer keeps its staged data and
-    /// continues from it when resumed. Pausing a paused job succeeds.
+    /// destination, which makes the job need reconciliation). The wait is bounded by
+    /// <see cref="StorageTransferQueueOptions.ControlTimeout"/> and <paramref name="cancellationToken"/>; a call
+    /// that stops waiting first fails with <c>storage.timeout</c> or <c>storage.cancelled</c>, and the request
+    /// still takes effect when the attempt stops. A resumable transfer keeps its staged data and continues from
+    /// it when resumed. Pausing a paused job succeeds.
     /// </summary>
     public Task<Result> PauseJobAsync(string jobId, CancellationToken cancellationToken = default) =>
         ControlAsync(jobId, ControlRequest.Pause, cancellationToken);
@@ -330,7 +362,9 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// <summary>
     /// Cancels a queued, paused, or running job. For a running job the call returns once its attempt has
     /// stopped: successfully when the job is cancelled, with <c>storage.conflict</c> when the attempt finished
-    /// first (or committed its destination, which makes the job need reconciliation).
+    /// first (or committed its destination, which makes the job need reconciliation). The wait is bounded as
+    /// for <see cref="PauseJobAsync"/>: after <see cref="StorageTransferQueueOptions.ControlTimeout"/> the call
+    /// fails with <c>storage.timeout</c>, and the cancel still takes effect when the attempt stops.
     /// </summary>
     public Task<Result> CancelAsync(string jobId, CancellationToken cancellationToken = default) =>
         ControlAsync(jobId, ControlRequest.Cancel, cancellationToken);
@@ -380,7 +414,8 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// Removes a job from the store and raises <see cref="JobRemoved"/>. The removal is conditional on the
     /// job's revision, so a job another process changed meanwhile is reloaded instead (<c>storage.conflict</c>).
     /// A running job is cancelled first and removed when its attempt stops; the call returns then, with the
-    /// store's answer.
+    /// store's answer, or with <c>storage.timeout</c> after <see cref="StorageTransferQueueOptions.ControlTimeout"/>
+    /// (the removal still happens when the attempt stops).
     /// </summary>
     public Task<Result> RemoveAsync(string jobId, CancellationToken cancellationToken = default) =>
         ControlAsync(jobId, ControlRequest.Remove, cancellationToken);
@@ -429,13 +464,13 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             IReadOnlyList<StorageTransferJobRecord> records;
             try { records = await _store.LoadAsync(cancellationToken).ConfigureAwait(false); }
             catch (Exception) { return; }
-            HashSet<string> removedMeanwhile;
-            lock (_gate) removedMeanwhile = [.. _removedWhileRefreshing];
             var present = new HashSet<string>(StringComparer.Ordinal);
             foreach (var record in records)
             {
                 present.Add(record.Id);
-                if (!removedMeanwhile.Contains(record.Id)) Adopt(record);
+                // Checked as each record is taken in, so a job removed while earlier ones were (by a handler,
+                // say) does not come back.
+                Adopt(record, fromRefresh: true);
             }
             // A job the store no longer has is forgotten, unless it changed here since the read began.
             foreach (var (id, revision) in known)
@@ -465,39 +500,89 @@ public sealed class StorageTransferQueue : IAsyncDisposable
 
     /// <summary>
     /// Stops running jobs and waits (up to <see cref="StorageTransferQueueOptions.ShutdownTimeout"/>) for them
-    /// to record where they stopped. Queued jobs stay queued in the store; a job stopped before it touched its
-    /// destination returns to the queue, any other becomes <see cref="StorageTransferState.Interrupted"/>. A job
-    /// that finished as it was stopped keeps its result. Afterwards every method that changes a job fails
-    /// with <c>storage.unavailable</c>, and <see cref="WaitForIdleAsync"/> returns.
+    /// to record where they stopped, and for the queue's background work and store calls to end. Queued jobs stay
+    /// queued in the store; a job stopped before it touched its destination returns to the queue, any other
+    /// becomes <see cref="StorageTransferState.Interrupted"/>. A job that finished as it was stopped keeps its
+    /// result. Once this returns the queue makes no new call to the store, so the store may be closed: an
+    /// attempt that outlived the timeout records nothing more, and its job is recovered by the restart rules
+    /// when its lease lapses (a store call still in flight then is the store's to finish). Afterwards every
+    /// method that changes a job fails with <c>storage.unavailable</c>, and <see cref="WaitForIdleAsync"/> returns.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        Task[] attempts;
         lock (_gate)
         {
             if (_disposed) return;
             _disposed = true;
-            attempts = [.. _attempts];
         }
         _library.UntrackQueue(this);
         if (_refresh is not null) await _refresh.DisposeAsync().ConfigureAwait(false);
         await _shutdown.CancelAsync().ConfigureAwait(false);
         var stopped = false;
-        try
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
         {
-            await Task.WhenAll(attempts).WaitAsync(_options.ShutdownTimeout).ConfigureAwait(false);
-            stopped = true;
+            Task[] pending;
+            lock (_gate)
+            {
+                pending = [.. _attempts, .. _background, .. _storeCalls > 0 ? [_storeQuiet.Task] : Array.Empty<Task>()];
+                if (pending.Length == 0)
+                {
+                    // Nothing runs and nothing can start: the store is closed to this queue from here on.
+                    _storeClosed = true;
+                    stopped = true;
+                    break;
+                }
+            }
+            var left = _options.ShutdownTimeout - waited.Elapsed;
+            if (left <= TimeSpan.Zero) break;
+            try { await Task.WhenAll(pending).WaitAsync(left).ConfigureAwait(false); }
+            catch (TimeoutException) { break; }
+            catch (Exception) { /* A failed attempt or refresh has still ended. */ }
         }
-        catch (TimeoutException) { }
-        catch (Exception) { stopped = attempts.All(attempt => attempt.IsCompleted); }
         lock (_gate)
         {
+            // Work that outlived the timeout finds the store closed: it records nothing more, and a job it held
+            // is recovered by the restart rules once its lease lapses.
+            _storeClosed = true;
             _idle.TrySetResult();
             // Attempts that outlived the timeout still use their tokens; they are left to the collector.
-            if (stopped && _attempts.Count == 0)
+            if (stopped)
                 foreach (var entry in _jobs.Values) entry.Cancellation.Dispose();
         }
         if (stopped) _shutdown.Dispose();
+    }
+
+    /// <summary>Keeps background work where <see cref="DisposeAsync"/> waits for it.</summary>
+    private void Track(Task work)
+    {
+        lock (_gate)
+        {
+            if (work.IsCompleted) return;
+            _background.Add(work);
+        }
+        work.ContinueWith(done =>
+        {
+            lock (_gate) _background.Remove(done);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    /// <summary>Starts a store call, or throws when the queue has closed the store (after it was disposed).</summary>
+    private void EnterStore()
+    {
+        lock (_gate)
+        {
+            if (_storeClosed) throw new ObjectDisposedException(nameof(StorageTransferQueue), "The transfer queue has been disposed.");
+            if (_storeCalls++ == 0) _storeQuiet = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    private void LeaveStore()
+    {
+        lock (_gate)
+        {
+            if (--_storeCalls == 0) _storeQuiet.TrySetResult();
+        }
     }
 
     private async Task LoadAsync(CancellationToken cancellationToken)
@@ -556,15 +641,24 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     private bool LeasedElsewhere(StorageTransferJobRecord record) =>
         record.LeaseOwner is not null && record.LeaseOwner != _options.WorkerId && record.LeaseExpiresAt > DateTimeOffset.UtcNow;
 
-    /// <summary>Takes in a record from the store unless this process is running or changing the job, or already has a newer one.</summary>
-    private void Adopt(StorageTransferJobRecord record)
+    /// <summary>
+    /// Takes in a record from the store unless this process is running or changing the job, or already has a
+    /// newer one. A record written by a newer schema is not taken in: the job leaves this queue's view instead.
+    /// </summary>
+    private void Adopt(StorageTransferJobRecord record, bool fromRefresh = false)
     {
-        if (!record.IsReadable) return;
+        if (!record.IsReadable)
+        {
+            ForgetUnreadable(record);
+            return;
+        }
         AdvanceOrder(record.Order);
         Entry entry;
         lock (_gate)
         {
             if (_disposed) return;
+            // A refresh read the store before this job was removed here: its copy is stale.
+            if (fromRefresh && _removedWhileRefreshing.Contains(record.Id)) return;
             if (_jobs.TryGetValue(record.Id, out entry!))
             {
                 if (entry.Attempt is not null || entry.HoldCount > 0 || record.Revision < entry.Record.Revision || entry.Record == record) return;
@@ -596,6 +690,25 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         UpdateIdle();
     }
 
+    /// <summary>
+    /// Leaves a job that a newer version of the library rewrote to that version, unless it is busy here or this
+    /// queue has a later revision; the store keeps it for the version that can read it.
+    /// </summary>
+    private void ForgetUnreadable(StorageTransferJobRecord record)
+    {
+        Entry? entry;
+        lock (_gate)
+        {
+            if (!_jobs.TryGetValue(record.Id, out entry) || entry.Attempt is not null || entry.HoldCount > 0 || entry.Record.Revision > record.Revision) return;
+            Drop(entry);
+        }
+        Raise(JobRemoved, entry.Snapshot());
+        UpdateIdle();
+    }
+
+    /// <summary>A record this version can run, or null (the job is gone from this queue's view) when a newer schema wrote it.</summary>
+    private static StorageTransferJobRecord? Readable(StorageTransferJobRecord? record) => record is { IsReadable: false } ? null : record;
+
     /// <summary>Takes a job out of the local view; call under the gate.</summary>
     private void Drop(Entry entry)
     {
@@ -617,6 +730,8 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         StorageErrors.Unavailable($"The transfer job store failed: {error.GetType().Name}.");
 
     private static Error Disposed() => StorageErrors.Unavailable("The transfer queue has been disposed.");
+
+    private static Error NoJobId() => StorageErrors.InvalidContent("A job id is required.");
 
     /// <summary>Queue order: highest priority first, then lowest order, then id, so equal orders stay stable.</summary>
     private static IEnumerable<Entry> InQueueOrder(IEnumerable<Entry> entries) =>
@@ -658,6 +773,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// </summary>
     private static bool IsOurWrite(StorageTransferJobRecord? fresh, StorageTransferJobRecord sent, StorageTransferLease? lease) =>
         fresh is not null &&
+        fresh.IsReadable &&
         fresh.Revision == sent.Revision + 1 &&
         fresh.State == sent.State &&
         fresh.Priority == sent.Priority &&
@@ -728,6 +844,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// </summary>
     private async Task<Result> ControlAsync(string jobId, ControlRequest request, CancellationToken cancellationToken, bool settling = false)
     {
+        if (jobId is null) return Result.Failure(NoJobId());
         Entry? entry;
         Pending? pending = null;
         long revision = 0;
@@ -759,10 +876,15 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         {
             try { entry.Cancellation.Cancel(); }
             catch (ObjectDisposedException) { }
-            try { return await pending.Done.Task.WaitAsync(cancellationToken).ConfigureAwait(false); }
+            // A provider may ignore cancellation, so the wait is bounded; the request stays recorded either way.
+            try { return await pending.Done.Task.WaitAsync(_options.ControlTimeout, cancellationToken).ConfigureAwait(false); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 return Result.Failure(StorageErrors.Cancelled($"Stopped waiting for job '{jobId}'; the request still applies when its attempt stops."));
+            }
+            catch (TimeoutException)
+            {
+                return Result.Failure(StorageErrors.Timeout($"Job '{jobId}' has not stopped yet; the request still applies when its attempt stops."));
             }
         }
         if (request == ControlRequest.Remove)
@@ -800,7 +922,10 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         }
         catch (Exception error)
         {
+            // The hold kept the job from starting; now that it is released, the job may start after all.
             lock (_gate) entry.HoldCount--;
+            UpdateIdle();
+            Pump();
             return Result.Failure(StoreError(error));
         }
         if (!removed)
@@ -826,6 +951,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         Func<Entry, (Result Result, StorageTransferJobRecord? Next)> change,
         bool settling = false)
     {
+        if (jobId is null) return Result.Failure(NoJobId());
         Entry? entry;
         StorageTransferJobRecord next;
         lock (_gate)
@@ -850,6 +976,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         {
             // An attempt that started meanwhile claimed the old revision; its claim fails and it adopts this one.
             if (entry.Attempt is null && entry.Record.Revision < stored.Revision) entry.Record = stored;
+            entry.StoreFailures = 0;
             if (stored.State == StorageTransferState.Queued) MarkBusy();
         }
         Raise(JobChanged, entry.Snapshot());
@@ -862,71 +989,127 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     }
 
     /// <summary>
-    /// Moves a job one place among waiting jobs of its priority. When there is room between the neighbours'
-    /// positions it takes one save; otherwise the two jobs swap positions (two saves).
+    /// Moves a job one place among waiting jobs of its priority. Queue order is by <see cref="StorageTransferJobRecord.Order"/>,
+    /// then id, so the move is one save: of the job, to a position between its neighbour and the one beyond,
+    /// or of the neighbour, to the job's other side. When neither has room (several jobs share an order), the
+    /// positions around the job are first spread out, one save per job, from the last to the first: every
+    /// intermediate state keeps the queue's order, so a save that fails part-way reorders nothing.
     /// </summary>
     private async Task<Result> SwapAsync(string jobId, bool earlier, CancellationToken cancellationToken)
     {
-        Entry entry, other;
-        long? single = null;
-        lock (_gate)
+        if (jobId is null) return Result.Failure(NoJobId());
+        for (var round = 0; ; round++)
         {
-            if (_disposed) return Result.Failure(Disposed());
-            if (!_jobs.TryGetValue(jobId, out entry!)) return Result.Failure(StorageErrors.NotFound($"Job '{jobId}' was not found."));
-            if (entry.Record.State is not (StorageTransferState.Queued or StorageTransferState.Paused))
-                return Result.Failure(StorageErrors.Conflict($"Job '{jobId}' is not waiting."));
-            var peers = InQueueOrder(_jobs.Values.Where(candidate => candidate.Attempt is null && candidate.Record.Priority == entry.Record.Priority &&
-                                                                     candidate.Record.State is StorageTransferState.Queued or StorageTransferState.Paused)).ToList();
-            var index = peers.IndexOf(entry);
-            var neighbour = earlier ? index - 1 : index + 1;
-            if (neighbour < 0 || neighbour >= peers.Count) return Result.Success();
-            other = peers[neighbour];
-            var target = other.Record.Order;
-            var beyond = earlier ? neighbour - 1 : neighbour + 1;
-            if (beyond < 0 || beyond >= peers.Count)
+            (string Id, long From, long To)[] saves;
+            bool isMove;
+            lock (_gate)
             {
-                if (earlier ? target > long.MinValue : target < long.MaxValue) single = earlier ? target - 1 : target + 1;
+                if (_disposed) return Result.Failure(Disposed());
+                if (!_jobs.TryGetValue(jobId, out var entry)) return Result.Failure(StorageErrors.NotFound($"Job '{jobId}' was not found."));
+                if (entry.Record.State is not (StorageTransferState.Queued or StorageTransferState.Paused))
+                    return Result.Failure(StorageErrors.Conflict($"Job '{jobId}' is not waiting."));
+                var peers = InQueueOrder(_jobs.Values.Where(candidate => candidate.Attempt is null && candidate.Record.Priority == entry.Record.Priority &&
+                                                                         candidate.Record.State is StorageTransferState.Queued or StorageTransferState.Paused))
+                    .Select(candidate => candidate.Record).ToList();
+                var index = peers.FindIndex(record => record.Id == jobId);
+                var neighbour = earlier ? index - 1 : index + 1;
+                if (neighbour < 0 || neighbour >= peers.Count) return Result.Success();
+                var move = PlanMove(peers, index, neighbour);
+                if (move is { } single)
+                {
+                    saves = [single];
+                    isMove = true;
+                }
+                else
+                {
+                    if (round > 0) return Result.Failure(StorageErrors.Conflict($"Job '{jobId}' could not be moved; its neighbours changed meanwhile."));
+                    saves = PlanRoom(peers, Math.Min(index, neighbour), Math.Max(index, neighbour));
+                    if (saves.Length == 0) return Result.Failure(StorageErrors.Conflict($"Job '{jobId}' could not be moved; there is no room in the queue order."));
+                    isMove = false;
+                }
             }
-            else
+            foreach (var (id, from, to) in saves)
             {
-                var bound = peers[beyond].Record.Order;
-                var gap = earlier ? target - bound : bound - target;
-                if (gap >= 2) single = earlier ? bound + gap / 2 : target + gap / 2;
+                var saved = await ChangeAsync(id, cancellationToken, current =>
+                    current.Record.State is StorageTransferState.Queued or StorageTransferState.Paused && current.Record.Order == from
+                        ? (Result.Success(), current.Record with { Order = to })
+                        : (Result.Failure(StorageErrors.Conflict($"Job '{id}' changed meanwhile; try again.")), null)).ConfigureAwait(false);
+                if (saved.IsFailure) return saved;
             }
-            if (single is null && entry.Record.Order == other.Record.Order)
-                return Result.Failure(StorageErrors.Conflict($"Job '{jobId}' shares its position with its neighbours; reprioritize it instead."));
+            // One save moved the job; otherwise room was made, and the next round moves it.
+            if (isMove) return Result.Success();
         }
-        if (single is { } order)
-            return await ChangeAsync(jobId, cancellationToken, current => current.Record.State is StorageTransferState.Queued or StorageTransferState.Paused
-                ? (Result.Success(), current.Record with { Order = order })
-                : (Result.Failure(StorageErrors.Conflict($"Job '{jobId}' is not waiting.")), null)).ConfigureAwait(false);
-
-        StorageTransferJobRecord mine, theirs;
-        lock (_gate)
-        {
-            mine = entry.Record with { Order = other.Record.Order };
-            theirs = other.Record with { Order = entry.Record.Order };
-        }
-        var (savedMine, mineError) = await SaveControlAsync(mine, cancellationToken).ConfigureAwait(false);
-        StorageTransferJobRecord? savedTheirs = null;
-        Error? theirsError = null;
-        if (savedMine is not null)
-            (savedTheirs, theirsError) = await SaveControlAsync(theirs, cancellationToken).ConfigureAwait(false);
-        if (savedMine is null || savedTheirs is null)
-        {
-            await ReloadAsync(mine.Id, theirs.Id).ConfigureAwait(false);
-            return Result.Failure(mineError ?? theirsError ?? StorageErrors.Conflict("The jobs were changed by another worker; their current order has been reloaded."));
-        }
-        lock (_gate)
-        {
-            if (entry.Attempt is null) entry.Record = savedMine;
-            if (other.Attempt is null) other.Record = savedTheirs;
-        }
-        Raise(JobChanged, entry.Snapshot());
-        Raise(JobChanged, other.Snapshot());
-        return Result.Success();
     }
 
+    /// <summary>
+    /// One save that swaps the peers at <paramref name="index"/> and <paramref name="neighbour"/>: the job moved
+    /// past its neighbour, or the neighbour past the job. Null when neither fits between the orders around them.
+    /// </summary>
+    private static (string Id, long From, long To)? PlanMove(List<StorageTransferJobRecord> peers, int index, int neighbour)
+    {
+        var job = peers[index];
+        var other = peers[neighbour];
+        var first = Math.Min(index, neighbour);
+        var last = Math.Max(index, neighbour);
+        var before = first > 0 ? peers[first - 1] : null;
+        var after = last + 1 < peers.Count ? peers[last + 1] : null;
+        // The earlier of the two goes after the later one, or the later one before the earlier one.
+        var (early, late) = index < neighbour ? (job, other) : (other, job);
+        if (OrderBetween(late, after, early.Id) is { } afterLate) return (early.Id, early.Order, afterLate);
+        if (OrderBetween(before, early, late.Id) is { } beforeEarly) return (late.Id, late.Order, beforeEarly);
+        return null;
+    }
+
+    /// <summary>An order that puts job <paramref name="id"/> strictly between two records in queue order (order, then id), or null.</summary>
+    private static long? OrderBetween(StorageTransferJobRecord? lower, StorageTransferJobRecord? upper, string id)
+    {
+        var candidates = new List<long>();
+        if (lower is not null && upper is not null && (Int128)upper.Order - lower.Order >= 2)
+            candidates.Add((long)(lower.Order + ((Int128)upper.Order - lower.Order) / 2));
+        if (upper is not null)
+        {
+            if (upper.Order > long.MinValue) candidates.Add(upper.Order - 1);
+            candidates.Add(upper.Order);
+        }
+        if (lower is not null)
+        {
+            if (lower.Order < long.MaxValue) candidates.Add(lower.Order + 1);
+            candidates.Add(lower.Order);
+        }
+        foreach (var order in candidates)
+            if ((lower is null || Before(lower.Order, lower.Id, order, id)) && (upper is null || Before(order, id, upper.Order, upper.Id)))
+                return order;
+        return null;
+    }
+
+    private static bool Before(long order, string id, long otherOrder, string otherId) =>
+        order < otherOrder || (order == otherOrder && string.CompareOrdinal(id, otherId) < 0);
+
+    /// <summary>
+    /// Saves that spread the orders from the peer before <paramref name="first"/> onwards two apart, keeping
+    /// every later order that is already far enough, so a move around <paramref name="first"/>..<paramref name="last"/>
+    /// fits in one save afterwards. Each new order is at least the old one and below the next peer's, so saving
+    /// them last to first keeps the queue order at every step. Empty when the orders would overflow.
+    /// </summary>
+    private static (string Id, long From, long To)[] PlanRoom(List<StorageTransferJobRecord> peers, int first, int last)
+    {
+        var start = Math.Max(0, first - 1);
+        var saves = new List<(string Id, long From, long To)>();
+        var previous = peers[start].Order;
+        for (var i = start + 1; i < peers.Count; i++)
+        {
+            var old = peers[i].Order;
+            if (previous > long.MaxValue - 2) return [];
+            var wanted = Math.Max(old, previous + 2);
+            if (wanted == old && i > last + 1) break;
+            if (wanted != old) saves.Add((peers[i].Id, old, wanted));
+            previous = wanted;
+        }
+        saves.Reverse();
+        return [.. saves];
+    }
+
+    /// <summary>Takes in the store's current records of some jobs, then starts whatever became eligible.</summary>
     private async Task ReloadAsync(params string[] jobIds)
     {
         foreach (var id in jobIds)
@@ -935,6 +1118,9 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             if (read && fresh is null) Forget(id);
             else if (fresh is not null) Adopt(fresh);
         }
+        // A reloaded job may be queued again, and a caller's hold on it has been released.
+        UpdateIdle();
+        Pump();
     }
 
     /// <summary>Starts as many eligible jobs as the limits allow: highest priority first, then queue order.</summary>
@@ -990,7 +1176,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             wakeAt = new[] { waiting, retryRecovery, leaseEnds }.Where(time => time is not null).Min();
         }
         if (recover)
-            _ = Task.Run(RecoverLapsedAsync);
+            Track(Task.Run(RecoverLapsedAsync));
         if (wakeAt is { } due)
             ScheduleWake(due);
     }
@@ -1005,7 +1191,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             if (_disposed || (_wakeAt is { } armed && armed <= due)) return;
             _wakeAt = due;
         }
-        _ = WakeLaterAsync(due);
+        Track(WakeLaterAsync(due));
     }
 
     private async Task WakeLaterAsync(DateTimeOffset due)
@@ -1049,7 +1235,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                     Forget(entry.Record.Id);
                     continue;
                 }
-                if (fresh is not null && (fresh.State != StorageTransferState.Running || LeasedElsewhere(fresh)))
+                if (fresh is not null && (!fresh.IsReadable || fresh.State != StorageTransferState.Running || LeasedElsewhere(fresh)))
                 {
                     Adopt(fresh);
                     changed = true;
@@ -1105,25 +1291,27 @@ public sealed class StorageTransferQueue : IAsyncDisposable
 
         var spec = claimed.Spec;
         var startedAt = DateTimeOffset.UtcNow;
+        // The recorded phase is kept from earlier attempts: a destination an earlier attempt changed stays
+        // possibly changed, so a crash in this attempt is never misjudged as untouched.
         var running = claimed with
         {
             State = StorageTransferState.Running,
             Attempts = claimed.Attempts + 1,
             StartedAt = startedAt,
-            BlockReason = null,
-            Checkpoint = claimed.Checkpoint with { Phase = StorageTransferPhase.NotStarted }
+            BlockReason = null
         };
         var (saved, startFailed) = await SaveFencedAsync(running, lease, releaseLease: false).ConfigureAwait(false);
         if (saved is null)
         {
             await ReleaseLeaseAsync(lease).ConfigureAwait(false);
-            await StepAsideAsync(entry, claimed, storeFailed: startFailed).ConfigureAwait(false);
+            await StepAsideAsync(entry, claimed, storeFailed: startFailed, saveFailed: startFailed).ConfigureAwait(false);
             return;
         }
 
         StorageTransferJobRecord? final = null;
         StorageTransferReport? report = null;
         var result = Result.Failure(StorageErrors.Unavailable("The transfer did not finish."));
+        Error? outcomeError = null;
         var transient = false;
         var ours = false;
         var removed = false;
@@ -1139,7 +1327,7 @@ public sealed class StorageTransferQueue : IAsyncDisposable
 
             var holder = new LeaseHolder(lease);
             var progress = new Throttled(this, entry);
-            var phase = StorageTransferPhase.NotStarted;
+            var phase = saved.Checkpoint.Phase;
             using (var attempt = CancellationTokenSource.CreateLinkedTokenSource(entry.Cancellation.Token, _shutdown.Token))
             using (var recording = new SemaphoreSlim(1, 1))
             {
@@ -1149,8 +1337,8 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                     await recording.WaitAsync(CancellationToken.None).ConfigureAwait(false);
                     try
                     {
-                        // Within an attempt the recorded phase only moves forward: a directory's per-file phases
-                        // must not make a restart believe a destination it already changed is untouched.
+                        // The recorded phase only moves forward: a directory's per-file phases, or a later
+                        // attempt, must not make a restart believe a destination already changed is untouched.
                         if (next <= phase) return;
                         StorageTransferJobRecord current;
                         lock (_gate) current = entry.Record;
@@ -1189,9 +1377,11 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                 try { await renewal.ConfigureAwait(false); } catch (Exception) { }
                 await recording.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             }
-            progress.Close();
+            await progress.CloseAsync().ConfigureAwait(false);
+            outcomeError = result.Error;
 
-            // Requests made from here on are answered after the outcome is saved (see SettleAsync).
+            // Requests made from here on are answered after the outcome is saved (see SettleAsync); those taken
+            // here are answered in the finally below, whatever happens in between.
             lock (_gate)
             {
                 decided = [.. entry.Requests];
@@ -1202,14 +1392,15 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             {
                 // Another worker owns the job now: the store is the truth.
                 var (read, fresh) = await TryGetAsync(claimed.Id).ConfigureAwait(false);
-                final = read ? fresh : entry.Record with { State = StorageTransferState.Running };
+                final = read ? Readable(fresh) : entry.Record with { State = StorageTransferState.Running };
                 if (!read) lock (_gate) entry.RecoverAfter = DateTimeOffset.UtcNow + _options.LeaseDuration;
             }
             else
             {
                 var fallback = request == ControlRequest.Remove ? ControlRequest.Cancel : request;
-                var (next, isTransient) = Decide(entry, result, report, phase, holder, fallback);
+                var (next, isTransient, gaveUp) = Decide(entry, result, report, phase, holder, fallback);
                 transient = isTransient;
+                if (gaveUp) outcomeError = next.Failure!.ToError();
                 if (request == ControlRequest.Remove)
                 {
                     StorageTransferJobRecord current;
@@ -1221,17 +1412,26 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                 }
                 if (!removed)
                 {
-                    var (stored, _) = await SaveFencedAsync(next, holder.Lease, releaseLease: true).ConfigureAwait(false);
+                    var (stored, storeFailed) = await SaveFencedAsync(next, holder.Lease, releaseLease: true).ConfigureAwait(false);
                     if (stored is not null)
                     {
                         final = stored;
+                        ours = true;
+                        // An attempt that ran to an outcome of its own ends a run of store failures.
+                        if (!holder.StoreFailed) lock (_gate) entry.StoreFailures = 0;
+                    }
+                    else if (gaveUp && storeFailed)
+                    {
+                        // The store keeps failing and this queue has given up on the job: it stops here, in
+                        // this queue's view, and its lease lapses in the store.
+                        final = next;
                         ours = true;
                     }
                     else
                     {
                         var (read, fresh) = await TryGetAsync(next.Id).ConfigureAwait(false);
                         // The store refused (another worker owns the job now) or failed; its record, if readable, is the truth.
-                        final = read ? fresh : next with { State = StorageTransferState.Running };
+                        final = read ? Readable(fresh) : next with { State = StorageTransferState.Running };
                         if (!read) lock (_gate) entry.RecoverAfter = DateTimeOffset.UtcNow + _options.LeaseDuration;
                     }
                 }
@@ -1239,19 +1439,26 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             settle = EndAttempt(entry, final, report, (result.IsSuccess, transient));
             ended = true;
         }
+        catch (Exception)
+        {
+            // Unexpected (a store that returned a malformed record, say): handled below like a lost outcome.
+        }
         finally
         {
-            // Whatever failed above, the slot is released and the job left in a state the queue can act on.
+            // Whatever failed above, the slot is released, the job left in a state the queue can act on, the
+            // requests taken are answered, and a hold raised for later requests is settled.
             if (!ended)
             {
                 lock (_gate) entry.RecoverAfter = DateTimeOffset.UtcNow + _options.LeaseDuration;
-                settle = EndAttempt(entry, entry.Record with { State = StorageTransferState.Running }, report, null);
+                ours = false;
+                final = removed ? null : entry.Record with { State = StorageTransferState.Running };
+                settle = EndAttempt(entry, final, report, null);
             }
+            if (ours) await PublishOutcomeAsync(final, outcomeError).ConfigureAwait(false);
+            foreach (var pending in decided)
+                pending.Done.TrySetResult(Answer(pending.Request, claimed.Id, final, removed, removeError));
+            if (settle) await SettleAsync(entry).ConfigureAwait(false);
         }
-        if (ours) await PublishOutcomeAsync(final, result.Error).ConfigureAwait(false);
-        foreach (var pending in decided)
-            pending.Done.TrySetResult(Answer(pending.Request, claimed.Id, final, removed, removeError));
-        if (settle) await SettleAsync(entry).ConfigureAwait(false);
         await PruneAsync().ConfigureAwait(false);
         UpdateIdle();
         Pump();
@@ -1281,22 +1488,30 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// <summary>
     /// Applies requests that arrived after the attempt decided its outcome (or while it was stepping aside) to
     /// the job as it is now, as if they had been made then; the job is held so it does not start in between.
+    /// Every request is answered and the hold released, whatever fails.
     /// </summary>
     private async Task SettleAsync(Entry entry)
     {
+        Pending[] late = [];
         try
         {
-            Pending[] late;
             lock (_gate)
             {
                 late = [.. entry.Requests.OrderByDescending(pending => pending.Request)];
                 entry.Requests.Clear();
             }
             foreach (var pending in late)
-                pending.Done.TrySetResult(await ControlAsync(entry.Record.Id, pending.Request, CancellationToken.None, settling: true).ConfigureAwait(false));
+            {
+                Result answer;
+                try { answer = await ControlAsync(entry.Record.Id, pending.Request, CancellationToken.None, settling: true).ConfigureAwait(false); }
+                catch (Exception error) { answer = Result.Failure(StorageErrors.FromException(error, "Changing a queued job")); }
+                pending.Done.TrySetResult(answer);
+            }
         }
         finally
         {
+            foreach (var pending in late)
+                pending.Done.TrySetResult(Result.Failure(StorageErrors.Unavailable($"Job '{entry.Record.Id}' could not be changed.")));
             lock (_gate) entry.HoldCount--;
         }
     }
@@ -1304,21 +1519,67 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// <summary>
     /// Gives up a job this worker could not claim or start, taking the store's record. After a store failure,
     /// or a claim refused although the record did not change, the job waits (locally) before it is tried again,
-    /// so the store is not hammered.
+    /// so the store is not hammered. A job whose saves keep failing (<paramref name="saveFailed"/>) waits longer
+    /// each time, and fails after <see cref="MaxStoreFailures"/> in a row.
     /// </summary>
-    private async Task StepAsideAsync(Entry entry, StorageTransferJobRecord claimed, bool storeFailed = false, bool refused = false)
+    private async Task StepAsideAsync(Entry entry, StorageTransferJobRecord claimed, bool storeFailed = false, bool refused = false, bool saveFailed = false)
     {
         var (read, fresh) = await TryGetAsync(claimed.Id).ConfigureAwait(false);
-        var record = read ? fresh : claimed;
-        if (record is not null && (storeFailed || !read || (refused && record.Revision == claimed.Revision)))
+        // A record rewritten by a newer schema is left for that version: the job leaves this queue's view.
+        var record = read ? Readable(fresh) : claimed;
+        Error? gaveUp = null;
+        if (record is not null && saveFailed)
+        {
+            int failures;
+            lock (_gate) failures = ++entry.StoreFailures;
+            if (failures >= MaxStoreFailures)
+            {
+                gaveUp = StoreGaveUp(failures);
+                var failed = record with { State = StorageTransferState.Failed, FinishedAt = DateTimeOffset.UtcNow, Failure = StorageTransferFailure.From(gaveUp) };
+                var (stored, _) = await SaveControlAsync(failed, CancellationToken.None).ConfigureAwait(false);
+                // When the store cannot record even that, the job stops in this queue's view only.
+                record = stored ?? failed;
+            }
+            else
+            {
+                lock (_gate) entry.NotBefore = DateTimeOffset.UtcNow + StoreFailureDelay(failures);
+            }
+        }
+        else if (record is not null && (storeFailed || !read || (refused && record.Revision == claimed.Revision)))
+        {
             lock (_gate) entry.NotBefore = DateTimeOffset.UtcNow + StoreRetryDelay;
-        var settle = EndAttempt(entry, record, null, null);
-        if (settle) await SettleAsync(entry).ConfigureAwait(false);
+        }
+        var settle = false;
+        try
+        {
+            settle = EndAttempt(entry, record, null, null);
+            if (gaveUp is not null) await PublishOutcomeAsync(record, gaveUp).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (settle) await SettleAsync(entry).ConfigureAwait(false);
+        }
         UpdateIdle();
         Pump();
     }
 
     private TimeSpan StoreRetryDelay => _options.RetryBaseDelay > TimeSpan.FromSeconds(1) ? _options.RetryBaseDelay : TimeSpan.FromSeconds(1);
+
+    /// <summary>How many attempts in a row the job store may stop before the job fails.</summary>
+    private const int MaxStoreFailures = 8;
+
+    /// <summary>The wait after the <paramref name="failures"/>th store failure in a row: doubling from the retry base delay (at least 100 ms), up to the retry maximum.</summary>
+    private TimeSpan StoreFailureDelay(int failures)
+    {
+        var floor = TimeSpan.FromMilliseconds(100);
+        var first = _options.RetryBaseDelay > floor ? _options.RetryBaseDelay : floor;
+        var ceiling = _options.RetryMaxDelay > floor ? _options.RetryMaxDelay : floor;
+        var delay = first.TotalMilliseconds * Math.Pow(2, Math.Min(failures - 1, 30));
+        return delay >= ceiling.TotalMilliseconds ? ceiling : TimeSpan.FromMilliseconds(delay);
+    }
+
+    private static Error StoreGaveUp(int failures) =>
+        StorageErrors.Unavailable($"The job store failed to record this job {failures} times in a row, so it was stopped. Retry it when the store works again.");
 
     /// <summary>Runs one attempt of a job.</summary>
     private async Task<(Result Result, StorageTransferReport? Report)> ExecuteAsync(
@@ -1384,9 +1645,10 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// Decides a job's next record after an attempt. A transfer that succeeded is Completed, and one that
     /// committed its destination but did not finish (a move whose source is still there) needs reconciliation,
     /// even if it was being paused, cancelled, or shut down as it got there: re-running it would repeat work
-    /// already done.
+    /// already done. An attempt stopped by the job store is tried again without using up a retry, until
+    /// <see cref="MaxStoreFailures"/> in a row make the job fail (<c>GaveUp</c>).
     /// </summary>
-    private (StorageTransferJobRecord Next, bool Transient) Decide(
+    private (StorageTransferJobRecord Next, bool Transient, bool GaveUp) Decide(
         Entry entry,
         Result result,
         StorageTransferReport? report,
@@ -1403,29 +1665,33 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             Failure = StorageTransferFailure.From(result.Error)
         };
         if (result.IsSuccess)
-            return (record with { State = StorageTransferState.Completed, FinishedAt = now, Failure = null, Checkpoint = new StorageTransferCheckpoint(phase) }, false);
+            return (record with { State = StorageTransferState.Completed, FinishedAt = now, Failure = null, Checkpoint = new StorageTransferCheckpoint(phase) }, false, false);
 
         var error = result.Error!;
         if (report?.Outcome == StorageTransferOutcome.NeedsReconciliation || error.Code == StorageErrors.PartialFailureCode || StorageErrorInfo.DestinationCommitted(error))
-            return (record with { State = StorageTransferState.NeedsReconciliation }, false);
+            return (record with { State = StorageTransferState.NeedsReconciliation }, false, false);
         if (request == ControlRequest.Pause)
-            return (record with { State = StorageTransferState.Paused, Failure = null }, false);
+            return (record with { State = StorageTransferState.Paused, Failure = null }, false, false);
         if (request == ControlRequest.Cancel)
-            return (record with { State = StorageTransferState.Cancelled, FinishedAt = now, Failure = null }, false);
+            return (record with { State = StorageTransferState.Cancelled, FinishedAt = now, Failure = null }, false, false);
         if (_shutdown.IsCancellationRequested)
-            return (Recover(record) with { Failure = null }, false);
+            return (Recover(record) with { Failure = null }, false, false);
         if (holder.StoreFailed)
         {
-            // The job store failed, not the transfer: try again later without using up a retry.
+            // The job store failed, not the transfer: try again later without using up a retry, but not for ever.
+            int failures;
+            lock (_gate) failures = ++entry.StoreFailures;
+            if (failures >= MaxStoreFailures)
+                return (record with { State = StorageTransferState.Failed, FinishedAt = now, Failure = StorageTransferFailure.From(StoreGaveUp(failures)) }, false, true);
             return (record with
             {
                 State = StorageTransferState.Queued,
-                NextAttemptAt = now + StoreRetryDelay,
+                NextAttemptAt = now + StoreFailureDelay(failures),
                 Failure = StorageTransferFailure.From(StorageErrors.Unavailable("The transfer was stopped because the job store failed."))
-            }, false);
+            }, false, false);
         }
         if (BlockReasonFor(error) is { } reason)
-            return (record with { State = StorageTransferState.Blocked, BlockReason = reason }, false);
+            return (record with { State = StorageTransferState.Blocked, BlockReason = reason }, false, false);
         if (StorageErrorInfo.IsTransient(error) && record.RetriesLeft > 0)
         {
             return (record with
@@ -1433,9 +1699,9 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                 State = StorageTransferState.Queued,
                 RetriesLeft = record.RetriesLeft - 1,
                 NextAttemptAt = now + Backoff(record.Attempts, error)
-            }, true);
+            }, true, false);
         }
-        return (record with { State = StorageTransferState.Failed, FinishedAt = now }, StorageErrorInfo.IsTransient(error));
+        return (record with { State = StorageTransferState.Failed, FinishedAt = now }, StorageErrorInfo.IsTransient(error), false);
     }
 
     /// <summary>Trust and credential failures need a person, not a retry.</summary>
@@ -1684,7 +1950,9 @@ public sealed class StorageTransferQueue : IAsyncDisposable
 
     /// <summary>
     /// Keeps the latest report on the job and forwards it at most every <see cref="StorageTransferQueueOptions.ProgressInterval"/>.
-    /// <see cref="Close"/> forwards a report held back by the interval, and ignores any that come later.
+    /// Handlers run outside every lock, one at a time: a report that comes while one is being forwarded is held
+    /// back like a throttled one, so a slow handler never blocks the transfer. <see cref="CloseAsync"/> waits for
+    /// a report being forwarded, then forwards a report held back, and ignores any that come later.
     /// </summary>
     private sealed class Throttled(StorageTransferQueue queue, Entry entry) : IProgress<StorageTransferProgress>
     {
@@ -1692,41 +1960,107 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         private long _lastForward = long.MinValue;
         private bool _pending;
         private bool _closed;
+        // Completed while no report is being forwarded.
+        private TaskCompletionSource _forwarded = CompletedForward();
 
         public void Report(StorageTransferProgress value)
         {
+            StorageTransferJob snapshot;
             lock (_sync)
             {
                 if (_closed) return;
                 lock (queue._gate) entry.Progress = value;
                 var now = Environment.TickCount64;
-                if (!value.IsCompleted && _lastForward != long.MinValue && now - _lastForward < queue._options.ProgressInterval.TotalMilliseconds)
+                var early = !value.IsCompleted && _lastForward != long.MinValue && now - _lastForward < queue._options.ProgressInterval.TotalMilliseconds;
+                if (early || !_forwarded.Task.IsCompleted)
                 {
                     _pending = true;
                     return;
                 }
                 _lastForward = now;
                 _pending = false;
-                Forward();
+                _forwarded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                lock (queue._gate) snapshot = entry.Snapshot();
             }
+            Forward(snapshot);
         }
 
-        public void Close()
+        public async Task CloseAsync()
         {
+            Task forwarding;
             lock (_sync)
             {
                 if (_closed) return;
                 _closed = true;
-                if (_pending) Forward();
+                forwarding = _forwarded.Task;
+            }
+            // No report may arrive after the attempt ended, so one being forwarded elsewhere is waited for.
+            await forwarding.ConfigureAwait(false);
+            StorageTransferJob snapshot;
+            lock (_sync)
+            {
+                if (!_pending) return;
+                _pending = false;
+                lock (queue._gate) snapshot = entry.Snapshot();
+            }
+            queue.Raise(queue.ProgressChanged, snapshot);
+        }
+
+        private void Forward(StorageTransferJob snapshot)
+        {
+            try
+            {
+                queue.Raise(queue.ProgressChanged, snapshot);
+            }
+            finally
+            {
+                TaskCompletionSource done;
+                lock (_sync) done = _forwarded;
+                done.TrySetResult();
             }
         }
 
-        private void Forward()
+        private static TaskCompletionSource CompletedForward()
         {
-            StorageTransferJob snapshot;
-            lock (queue._gate) snapshot = entry.Snapshot();
-            queue.Raise(queue.ProgressChanged, snapshot);
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            done.SetResult();
+            return done;
         }
+    }
+
+    /// <summary>The queue's view of the job store: every call is counted, and refused once the queue closed the store.</summary>
+    private sealed class GuardedStore(StorageTransferQueue queue, IStorageTransferJobStore inner) : IStorageTransferJobStore
+    {
+        private async Task<T> CallAsync<T>(Func<Task<T>> call)
+        {
+            queue.EnterStore();
+            try { return await call().ConfigureAwait(false); }
+            finally { queue.LeaveStore(); }
+        }
+
+        public Task<IReadOnlyList<StorageTransferJobRecord>> LoadAsync(CancellationToken cancellationToken) =>
+            CallAsync(() => inner.LoadAsync(cancellationToken));
+
+        public Task<StorageTransferJobRecord?> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken) =>
+            CallAsync(() => inner.AddAsync(record, cancellationToken));
+
+        public Task<StorageTransferJobRecord?> GetAsync(string jobId, CancellationToken cancellationToken) =>
+            CallAsync(() => inner.GetAsync(jobId, cancellationToken));
+
+        public Task<StorageTransferLease?> TryClaimAsync(string jobId, string workerId, long expectedRevision, TimeSpan duration, CancellationToken cancellationToken) =>
+            CallAsync(() => inner.TryClaimAsync(jobId, workerId, expectedRevision, duration, cancellationToken));
+
+        public Task<StorageTransferLease?> RenewAsync(StorageTransferLease lease, TimeSpan duration, CancellationToken cancellationToken) =>
+            CallAsync(() => inner.RenewAsync(lease, duration, cancellationToken));
+
+        public Task<bool> ReleaseAsync(StorageTransferLease lease, CancellationToken cancellationToken) =>
+            CallAsync(() => inner.ReleaseAsync(lease, cancellationToken));
+
+        public Task<StorageTransferJobRecord?> SaveAsync(StorageTransferJobRecord record, StorageTransferLease? lease, bool releaseLease, CancellationToken cancellationToken) =>
+            CallAsync(() => inner.SaveAsync(record, lease, releaseLease, cancellationToken));
+
+        public Task<bool> RemoveAsync(string jobId, long expectedRevision, StorageTransferLease? lease, CancellationToken cancellationToken) =>
+            CallAsync(() => inner.RemoveAsync(jobId, expectedRevision, lease, cancellationToken));
     }
 
     private sealed class LeaseHolder(StorageTransferLease lease)
@@ -1752,6 +2086,8 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         public DateTimeOffset NotBefore { get; set; } = DateTimeOffset.MinValue;
         /// <summary>When recovering a job left running may be tried again.</summary>
         public DateTimeOffset RecoverAfter { get; set; } = DateTimeOffset.MinValue;
+        /// <summary>Attempts in a row stopped because the job store failed to save (local only).</summary>
+        public int StoreFailures { get; set; }
 
         public StorageTransferJob Snapshot() => new() { Record = Record, Progress = Progress, LastReport = LastReport };
     }
