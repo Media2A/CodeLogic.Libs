@@ -155,6 +155,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         options ??= new StorageListOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StoragePage>.Failure(validation.Error!);
+        if (ProviderPaging.RecursiveTokenOnFlatListing(options) is { } mixed) return Result<StoragePage>.Failure(mixed);
         var normalized = Normalize(path);
         if (normalized.IsFailure) return Result<StoragePage>.Failure(normalized.Error!);
         if (normalized.Value!.Length > 0)

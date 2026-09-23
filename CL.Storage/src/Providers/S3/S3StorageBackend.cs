@@ -186,6 +186,7 @@ public sealed class S3StorageBackend :
         options ??= new StorageListOptions();
         var valid = options.Validate();
         if (valid.IsFailure) return Result<StoragePage>.Failure(valid.Error!);
+        if (ProviderPaging.RecursiveTokenOnFlatListing(options) is { } mixed) return Result<StoragePage>.Failure(mixed);
         var normalized = Normalize(path);
         if (normalized.IsFailure) return Result<StoragePage>.Failure(normalized.Error!);
         if (normalized.Value!.Length > 0)
@@ -991,8 +992,10 @@ public sealed class S3StorageBackend :
             };
             foreach (var (name, value) in options.Metadata)
                 initiate.Metadata[name] = value;
-            var initiated = await _client.InitiateMultipartUploadAsync(initiate, cancellationToken).ConfigureAwait(false);
+            // Not cancelled half-way: an upload the server created but whose id never came back could not be aborted.
+            var initiated = await _client.InitiateMultipartUploadAsync(initiate, CancellationToken.None).ConfigureAwait(false);
             uploadId = initiated.UploadId;
+            cancellationToken.ThrowIfCancellationRequested();
             var parts = new List<PartETag>();
             long totalBytes = 0;
             var partNumber = 1;
@@ -1251,9 +1254,11 @@ public sealed class S3StorageBackend :
             }, cancellationToken).ConfigureAwait(false);
             initiate.TagSet = tags.Tagging;
         }
-        var initiated = await _client.InitiateMultipartUploadAsync(initiate, cancellationToken).ConfigureAwait(false);
+        // Not cancelled half-way: an upload the server created but whose id never came back could not be aborted.
+        var initiated = await _client.InitiateMultipartUploadAsync(initiate, CancellationToken.None).ConfigureAwait(false);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var partSize = MultipartCopyPartSize(size, _multipartPartSizeBytes);
             var count = checked((int)((size + partSize - 1) / partSize));
             var parts = new PartETag[count];

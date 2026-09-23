@@ -421,4 +421,16 @@ public sealed class NeedsReviewProviderS3Tests
 
         Assert.Equal(["a", "a/b", "a/b/c.txt", "a/d.txt"], paths.Order(StringComparer.Ordinal));
     }
+
+    // needs-review C (providers): a recursive listing's token is not sent to the server by a flat listing
+    [Fact]
+    public async Task A_recursive_token_on_a_flat_listing_is_refused()
+    {
+        var fake = ProviderFakeS3.Create();
+        await using var backend = Backend(fake);
+
+        var listed = await backend.ListAsync("", new StorageListOptions { ContinuationToken = "cl1:YQ==:native" });
+
+        Assert.Equal(StorageErrors.InvalidPathCode, listed.Error?.Code);
+    }
 }

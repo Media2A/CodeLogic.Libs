@@ -238,6 +238,58 @@ public sealed class NeedsReviewProviderTlsTests
         Assert.False(SharedResources.Holds(key2));
     }
 
+    // needs-review C (providers): an upload from a non-seekable stream is attempted once, and its failure is still explained
+    [Fact]
+    public async Task A_non_seekable_upload_failure_is_enriched_like_any_other()
+    {
+        var policy = new ProviderRetryPolicy(new StorageRetryConfig { RetryCount = 3 }, "c", CL.Storage.Models.StorageProvider.WebDav)
+        {
+            Enrich = (error, _) => StorageErrors.TlsFailure(error.Message, "tlsReason=server_certificate_rejected")
+        };
+        await using var source = new NonSeekable();
+
+        var result = await policy.ExecuteUploadAsync("Upload", source, _ => Task.FromResult(Result<int>.Failure(StorageErrors.ConnectionLost("lost"))), CancellationToken.None);
+
+        Assert.Equal(StorageErrors.TlsFailureCode, result.Error?.Code);
+    }
+
+    // needs-review B66: a new session is reported to the registration that opened it, not to every user of a shared pool
+    [Fact]
+    public async Task A_new_session_is_reported_only_to_the_caller_that_opened_it()
+    {
+        await using var pool = new ProviderClientPool<object>(
+            () => new object(),
+            (_, _) => Task.CompletedTask,
+            _ => true,
+            _ => ValueTask.CompletedTask,
+            new ProviderPoolOptions(MaxSessions: 2, MaxIdle: 2));
+        int first = 0, second = 0;
+
+        var a = await pool.RentAsync(CancellationToken.None, () => first++);
+        var b = await pool.RentAsync(CancellationToken.None, () => second++);
+        await pool.ReturnAsync(a);
+        var reused = await pool.RentAsync(CancellationToken.None, () => first++);
+
+        Assert.Equal(1, first);
+        Assert.Equal(1, second);
+        await pool.ReturnAsync(b);
+        await pool.ReturnAsync(reused);
+    }
+
+    private sealed class NonSeekable : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => 0;
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     /// <summary>A transport whose reads return the scripted byte counts; -1 throws as a dropped connection does.</summary>
     private sealed class ScriptedStream(int[] reads) : Stream
     {
