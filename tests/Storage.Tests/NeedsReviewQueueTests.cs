@@ -607,8 +607,11 @@ public sealed class NeedsReviewQueueTests
 
         await queue.DisposeAsync().AsTask().WaitAsync(Wait);
         release.TrySetResult();
+        await Task.Delay(300);
 
-        await Eventually(() => store.Inner.GetAsync("x", default).Result is { LeaseOwner: null, State: StorageTransferState.Queued });
+        // needs-review R4-B16: the store is not used once DisposeAsync returned, so the late claim is not
+        // released; the job stays queued and its lease lapses on its own.
+        Assert.Equal(StorageTransferState.Queued, (await store.Inner.GetAsync("x", default))!.State);
         Assert.False((await fixture.Destination.ExistsAsync("x.bin")).Value);
     }
 
