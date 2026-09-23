@@ -18,7 +18,7 @@ connection cannot do it. Check `Capabilities` first when you need to know in adv
 | `LinkTarget` | FTP listings, local |
 | `Created`, `LastAccessed` | local, SFTP (`LastAccessed`) |
 | `IsHidden` | dot-files; local hidden attribute |
-| `ETag`, `VersionId`, `ContentType`, metadata | object stores, WebDAV; local files get an ETag from their time and size |
+| `ETag`, `VersionId`, `ContentType`, metadata | object stores, WebDAV; local files get a weak ETag (`W/"…"`) from their write time, creation time, and size |
 
 ## Permissions, ownership, timestamps, and links
 
@@ -56,7 +56,7 @@ Result<StorageChecksumVerification> verified = await files.VerifyChecksumAsync(
 
 | Provider | Server digest |
 |---|---|
-| S3 | MD5 from single-part, non-KMS ETags; SHA-256 when stored with the object |
+| S3 | MD5 from single-part ETags of objects without SSE-KMS or SSE-C; SHA-256 when stored with the object |
 | Azure Blob | MD5 (`Content-MD5`) |
 | Google Cloud Storage | MD5 of non-composite objects |
 | Swift | MD5 ETag, except segmented large objects |
@@ -71,13 +71,13 @@ there for interoperability; prefer SHA-256 or stronger for security-sensitive ch
 | Provider | Metadata | Tags | Conditional create/update/delete | Versions | Signed URLs |
 |---|---|---|---|---|---|
 | Local / UNC | no | no | create | no | no |
-| S3-compatible | read/write | read/write | yes/yes/yes | read/list/delete | read/write |
+| S3-compatible | read/write | read/write | yes/yes/yes (per server, see below) | read/list/delete | read/write |
 | FTP / FTPS | no | no | no | no | no |
 | SFTP | no | no | no | no | no |
 | WebDAV | discovered properties, read-only | no | create | no | no |
 | Azure Blob | read/write | read/write | yes/yes/yes | read/list/delete | SAS when credentials permit |
 | Google Cloud Storage | read/write | no | yes/yes/yes | read/list/delete | when signing credentials permit |
-| OpenStack Swift | read/write | no | yes/yes/yes | native only | no |
+| OpenStack Swift | read/write | no | create (update/delete checked just before) | native only; reads by version id | no |
 
 ```csharp
 var metadata = await files.GetMetadataAsync("asset.bin");
@@ -99,8 +99,15 @@ await files.DeleteVersionAsync("asset.bin", "provider-version-id");
 
 Treat signed URLs as credentials and never log them.
 
-`StorageMutationCondition` applies atomic ETag/version guards to uploads and deletes. Providers that
-cannot enforce the condition atomically reject it instead of running a racy check-then-write:
+`StorageMutationCondition` applies ETag/version guards to uploads and deletes:
+
+- **Uploads** are atomic on S3 (conditional uploads, which AWS and MinIO enforce; see
+  `ConditionalRequests`), Azure Blob, and Google Cloud. Everywhere else the content is staged and the
+  condition checked immediately before the staged file replaces the destination.
+- **Deletes** are atomic on Azure Blob, Google Cloud, and S3 servers that enforce `If-Match` on
+  `DeleteObject`. Swift, and S3 servers that ignore it (MinIO), check the condition immediately before the
+  delete. Local, FTP, SFTP, and WebDAV refuse a conditional delete with `storage.unsupported`.
+- Swift ignores `If-Match` on writes, so it declares only `ConditionalCreate`.
 
 ```csharp
 await files.UploadAsync("settings.json", replacement, new StorageUploadOptions

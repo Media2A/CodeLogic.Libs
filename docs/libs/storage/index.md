@@ -10,7 +10,7 @@
 | **Library class** | `CL.Storage.StorageLibrary` |
 | **Config files** | `config.storage.json` · `config.storage.<provider>.json` |
 | **Target** | .NET 10 / CodeLogic 4 |
-| **Result model** | `Result` and `Result<T>`; cancellation throws `OperationCanceledException` |
+| **Result model** | `Result` and `Result<T>`; connection calls throw `OperationCanceledException` on cancel, while `StorageLibrary.CopyAsync`/`MoveAsync` and an applying sync report it |
 
 This overview covers loading, the mount model, configuration, and the everyday API. The rest lives on
 four sub-pages:
@@ -135,8 +135,11 @@ response, session, and registry lease until disposed. `DownloadBytesAsync` is bo
 limit or `StorageDownloadOptions.MaxBufferedBytes`.
 
 Listings hide the library's own staging and backup items (`.cl-storage-*`, `.clstorage-*`); set
-`IncludeInternal` to see them. `IncludeHidden = false` drops dot-files, and `NamePattern` filters
-names with `*` and `?` wildcards (case-insensitive).
+`IncludeInternal` to see them. `IncludeHidden = false` drops hidden items (dot-files, and items marked
+hidden) together with what hidden folders hold, and `NamePattern` filters names with `*` and `?`
+wildcards (case-insensitive). Recursive listings on S3, Azure Blob, Google Cloud, and Swift include
+folders that exist only as key prefixes; they are sorted page by page, and an inferred folder can appear
+again on a later page, so build a tree by path.
 
 `EnumeratePagesAsync` and `EnumerateItemsAsync` walk provider tokens lazily and fail safely if a
 provider repeats a token. Batch helpers preserve input order, cap item count/concurrency, and retain
@@ -160,6 +163,11 @@ Optional features return `storage.unsupported` on connections that lack them. Fl
 `MetadataWrite`, `Tags`, `Versioning`, `SignedReadUrls`, `SignedWriteUrls`, `Permissions`, `Ownership`, `SetTimestamps`,
 `CreateLinks`, `ReadLinks`, `Checksums`, `Append`, `ResumableUpload`, `AtomicMove`, `RawCommands`,
 `SpaceInfo`, `ChangeNotifications`, `ConditionalCreate`, and `CaseInsensitivePaths`.
+
+A flag says what the provider can do; on S3-compatible servers, whether a conditional request is really
+enforced also depends on the server (see `ConditionalRequests` in
+[Connections](connections.md#cloud-emulators-and-compatible-services)). A transfer reports how its
+condition was enforced in `ConditionEnforcement`.
 
 ## Migration
 

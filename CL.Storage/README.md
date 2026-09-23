@@ -146,12 +146,17 @@ certificate pins; there is no accept-any switch.
   (with `presentedCertificateSha256` and `presentedPublicKeySha256`, ready to pin),
   `client_certificate_rejected` (a credential problem), `protocol_mismatch`, or `handshake_failed`.
   The reason comes from the platform's own TLS stack — SChannel status codes on Windows, OpenSSL alerts on
-  Linux — including a TLS 1.3 server that refuses the client certificate only after the handshake.
+  Linux — including a TLS 1.3 server that refuses the client certificate only after the handshake (only
+  when that connection was asked for a certificate). A stream that breaks after the handshake is
+  `storage.connection_lost`, which is transient, with `tlsReason=connection_interrupted` as a hint.
 - A client certificate is read from `ClientCertificatePath`, or from `ClientCertificateContent` (the PFX
   bytes, base64 in JSON) when it comes from a secret store; `ClientCertificatePassword` decrypts either.
-  It is loaded once per connection and disposed with it. On Linux and macOS its key stays in memory; on
-  Windows, SChannel can only use a key in a key container, so the key is imported into a temporary one that
-  is deleted when the connection closes.
+  It is loaded once per connection and disposed with it. On Linux the private key is held in memory only.
+  macOS does not support in-memory keys, so .NET imports the key into a temporary keychain that it deletes
+  when the certificate is disposed with the connection. On Windows SChannel needs a key container: the key
+  goes into a non-persisted container (the machine key store when the user profile is not loaded) that is
+  deleted when the connection is disposed; a process that crashes can leave that container file behind. A
+  PKCS#12 file without its private key is refused when the connection is registered.
 - Legacy encodings such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for
   file names on older servers.
 - `ServerTimeZone` converts listing times from servers that report local time.
@@ -163,7 +168,10 @@ certificate pins; there is no accept-any switch.
 `AuthenticationMode` accepts `None`, `Basic` (sent up front, saving a challenge round trip),
 `BearerToken`, `Digest`, `Ntlm`, `Negotiate`, and `Windows` (current user). HTTPS endpoints support
 `TrustedCertificateSha256` and `TrustedPublicKeySha256` pins, `RequireValidCertificateChain`, and a
-PFX `ClientCertificatePath` for mutual TLS. `MaxConnectionsPerServer` caps concurrent connections.
+PFX `ClientCertificatePath` for mutual TLS. `MaxConnectionsPerServer` caps concurrent connections. A `MOVE` or `COPY` onto an existing
+folder is refused (`storage.conflict`) rather than replacing it; a `207 Multi-Status` answer, where some
+members failed, is `storage.partial_failure` (`destinationState=partial`). WebDAV does not declare
+`AtomicMove`, so the library relays folder moves there.
 
 ### Proxies
 
@@ -212,7 +220,8 @@ retry transient failures automatically. Both are tuned per connection:
 
 - `MaxSessions` caps open sessions, busy or idle, so the library stays under a server's per-user
   connection limit. Callers beyond it wait up to `AcquireTimeoutSeconds`, then receive
-  `storage.server_busy`.
+  `storage.server_busy`. A relayed copy within one FTP connection needs two sessions; with
+  `MaxSessions = 1` it fails at once with `storage.unsupported`.
 - A pooled session idle longer than `ValidateAfterIdleSeconds` is probed (FTP `NOOP`, SFTP `stat`)
   before reuse. Sessions that time out, drop, or fail TLS mid-operation are closed instead of reused.
 - `KeepAliveSeconds` sends FTP `NOOP` or SSH keep-alive packets while a session is open.
@@ -231,7 +240,13 @@ retry transient failures automatically. Both are tuned per connection:
 - Listing continuation tokens are tied to the settings rather than the registration id, so paging
   continues after the same settings are registered again under a new id. A token refers to a listing
   snapshot kept in the process for five minutes after its last use; after that, or in another process, the
-  listing is walked again from where the token points.
+  listing is walked again from where the token points. A listing of more than 250,000 items is not kept,
+  so its token is always walked again. A pool keeps a copy of the settings it was created with.
+- S3-compatible servers differ in which conditional headers they enforce. `ConditionalRequests = Auto`
+  (the default) trusts conditional uploads and probes once per connection whether `CopyObject` and
+  `DeleteObject` honour their conditions (AWS does; MinIO ignores them, so a create-only copy there is
+  checked just before and reported `CheckedBeforeCommit`). `Enforced` trusts everything; `NotEnforced`
+  sends no conditional headers and has the library check conditions just before each write.
 
 ## Common API
 
@@ -264,6 +279,9 @@ Result deleted = await media.DeleteAsync(
 
 The common contract includes info/exists, paged recursive listing, physical or virtual directory
 creation, streaming and bounded byte uploads/downloads, ranges, delete, copy, move, and cancellation.
+Recursive listings on S3, Azure Blob, Google Cloud, and Swift include folders that exist only as key
+prefixes; they are sorted page by page and an inferred folder can appear again on a later page, so build
+a tree by path. `IncludeHidden = false` also leaves out what hidden folders hold.
 Caller upload streams remain open. Returned download streams own their provider response and registry
 lease and must be disposed.
 
@@ -296,16 +314,28 @@ work as on a `Result`). It says what happened — `Completed`, `Skipped` (with `
 actually written (`WrittenPath`, which differs after `Rename`), the bytes, the SHA-256 when verified,
 and the destination's new `DestinationETag`/`DestinationVersionId`. When a transfer does not finish, the
 state fields say exactly what it left: `DestinationCommitted`, `SourceDeleted`, `StagingLeftBehind`,
-`BackupRestored`, `BackupLeftBehind`, and a `ResumeToken`.
+`BackupRestored`, `BackupLeftBehind`, and a `ResumeToken`. `SourceDeleted` is `true` only when the whole
+source of a move is gone. A token cancelled before the call, an unknown connection id, or a provider that
+throws also come back as a report rather than an exception.
 
 Cross-provider data uses a `System.IO.Pipelines` relay capped at 1 MiB. Each destination file is
 uploaded to a unique staging name and committed only after the complete source stream succeeds.
-Existing destination files are backed up and restored if a later directory item fails. A move deletes
-its source only after the entire destination commits. Equal paths and a directory destination below
-its source are rejected.
+Existing destination files are backed up (on FTP and SFTP the provider's replace renames them aside) and
+restored if a later directory item fails, as long as they still hold what this transfer wrote. Once a
+destination is committed it is never rolled back: a leftover backup is reported (`Completed` with
+`BackupLeftBehind`), and a destination that does not hold the committed length is `NeedsReconciliation`.
+
+A move deletes its source only after the entire destination commits, file by file and only while each
+file is still the version that was listed; files added or changed during the move stay, and the move is
+`NeedsReconciliation`. Equal paths and a directory destination below its source are rejected.
 
 The normal `IStorageService.CopyAsync` and `MoveAsync` methods use the same coordinator for recursive
-work. Safe same-provider file copies remain server-side when the provider can guarantee them.
+work (and throw `OperationCanceledException` on a cancel, like every connection call). Safe
+same-provider file copies remain server-side when the provider can guarantee them; on object stores a
+native move copies the version it read and deletes only that version. Folder renames on one FTP, SFTP, or
+local connection are a single server-side rename when the destination does not exist; onto an existing
+folder the transfer merges through the relay. A relay within one FTP connection needs
+`Session.MaxSessions` of at least 2.
 
 Local directory trees can be transferred without manually registering a temporary local connection:
 
@@ -317,8 +347,9 @@ Result<StorageDirectoryTransferReport> download = await storage.DownloadDirector
     "archive", "yearly/2026", @"C:\restore\2026");
 ```
 
-Links/reparse points in a local upload are rejected rather than followed. Reports contain file,
-directory, and byte counts.
+Links (symbolic links and junctions) in a local upload are rejected rather than followed; other Windows
+reparse points, such as OneDrive placeholders, are ordinary files. Reports contain file, directory, and
+byte counts.
 
 ### Guaranteed transfers
 
@@ -339,11 +370,13 @@ var report = await storage.CopyAsync("sftp", "in/report.pdf", "s3", "archive/rep
   and a verified copy is confirmed on the destination (by the server's SHA-256 where it keeps one,
   otherwise by reading it back) before it is promoted. `VerifiedBy` says which. After promotion the
   destination is confirmed again by its length and, where the server keeps one, its SHA-256.
-- `DestinationCondition` is checked before the copy starts and again right before promotion.
-  `ConditionEnforcement` reports how: `Atomic` when the provider enforces it in the same operation
-  (create-new with `Overwrite = false` on connections with `ConditionalCreate`; on S3 the promote completes
-  a part-by-part copy with `If-None-Match`, which S3 and MinIO enforce), otherwise `CheckedBeforeCommit`.
-  When the condition fails at promotion, the destination is left exactly as the other writer left it.
+- `DestinationCondition` is checked before the copy starts and again right before promotion, then handed
+  to the provider's move. `ConditionEnforcement` reports how: `Atomic` when the provider enforced it in the
+  committing request (create-new on Local, WebDAV, Azure, Google Cloud, and S3 servers that enforce
+  `If-None-Match` on `CopyObject`; replace-only-this-version on Azure, Google Cloud, and S3 servers that
+  enforce `If-Match` on `CopyObject`), otherwise `CheckedBeforeCommit` (FTP, SFTP, Swift, a version
+  condition on Local and WebDAV, MinIO). When the condition fails at promotion, the destination is left
+  exactly as the other writer left it, and a destination deleted meanwhile is not brought back.
 - `SourceVersionId` reads that version, and length, ETag, and a move's source deletion refer to it: moving an
   older version fails to delete the source (`NeedsReconciliation`), because the current object is another
   version.
@@ -351,11 +384,14 @@ var report = await storage.CopyAsync("sftp", "in/report.pdf", "s3", "archive/rep
   `storage.conflict` and nothing is committed.
 - A move deletes its source only while it is still the version that was copied — with a conditional delete
   where the provider has one — otherwise the report is `NeedsReconciliation` with `SourceDeleted = false`.
-- Local files now carry an ETag (last-write time and size), so conditions work on local connections too,
-  checked right before the file is replaced.
+- Local files carry a weak ETag (`W/"…"`: last-write time, creation time, and size), so conditions work on
+  local connections too, checked right before the file is replaced. On coarse file systems (FAT 2 s,
+  exFAT, HFS+ 1 s, some SMB/NFS shares) or after a tool restores file times, two versions can share it.
 - Cancelling a copy or move returns a report with `Outcome = Cancelled` (error `storage.cancelled`)
   rather than throwing: staging and backup objects are removed, the destination is as it was, and a
-  resumable transfer's `ResumeToken` continues it.
+  resumable transfer's `ResumeToken` continues it. A cancel that lands after the commit does not turn a
+  finished transfer into `Cancelled`.
+- `ExpectedSha256` implies `Verify`, before and after the commit.
 
 ### Streamed writes
 
@@ -374,7 +410,9 @@ without committing aborts without waiting (the staging object is removed in the 
 
 Nothing appears at the destination until `CommitAsync` succeeds. At most 1 MiB is buffered, so a slow
 destination slows the writer down. Conflict policies, `Condition`, `ExpectedLength`, `Verify`, and
-`ExpectedSha256` apply as for uploads; conflict decisions happen before the first byte is written.
+`ExpectedSha256` apply as for uploads; conflict decisions happen before the first byte is written. A
+write that fails or is cancelled aborts the stream (its bytes may already be buffered); when the
+destination stopped accepting data it throws `StorageWriteException`, whose `Error` says why.
 
 ## File, text, JSON, progress, and integrity helpers
 
@@ -410,13 +448,13 @@ if (media.Capabilities.Supports(StorageFeature.MetadataWrite))
 | Provider | Directories | Metadata | Tags | Conditional create/update/delete | Versions | Signed URLs |
 |---|---|---|---|---|---|---|
 | Local / UNC | physical | no | no | create | no | no |
-| S3-compatible | virtual | read/write | read/write | yes/yes/yes | read/list/delete | read/write |
+| S3-compatible | virtual | read/write | read/write | yes/yes/yes (per server: `ConditionalRequests`) | read/list/delete | read/write |
 | FTP / FTPS | physical | no | no | no | no | no |
 | SFTP | physical | no | no | no | no | no |
 | WebDAV | physical | discovered properties are read-only | no | create | no | no |
 | Azure Blob | virtual | read/write | read/write | yes/yes/yes | read/list/delete | SAS when credentials permit |
 | Google Cloud Storage | virtual | read/write | no portable contract | yes/yes/yes | read/list/delete | when signing credentials permit |
-| OpenStack Swift | virtual | read/write | no portable contract | yes/yes/yes | endpoint-specific/native | no portable TempURL contract |
+| OpenStack Swift | virtual | read/write | no portable contract | create (update/delete checked just before) | endpoint-specific/native | no portable TempURL contract |
 
 Advanced functionality stays out of the basic interface and is exposed through capability-gated
 optional contracts:
@@ -443,13 +481,16 @@ await media.UploadAsync("settings.json", replacement, new StorageUploadOptions
 });
 ```
 
-Providers that cannot enforce the condition atomically reject it instead of performing a racy
-check-then-write.
+An upload's condition is atomic on S3 (conditional uploads, which AWS and MinIO enforce), Azure Blob,
+and Google Cloud Storage; on every other provider the content is staged and the condition checked
+immediately before the staged file replaces the destination. A conditional delete is atomic on Azure,
+Google Cloud, and S3 servers that enforce `If-Match` on `DeleteObject`, checked immediately before on
+Swift and MinIO, and refused with `storage.unsupported` on Local, FTP, SFTP, and WebDAV.
 
-Creating only when absent (`Overwrite = false`) is atomic where `StorageFeature.ConditionalCreate` is
-declared: Local, WebDAV, S3, Azure Blob, Google Cloud Storage, and Swift. FTP and SFTP do not declare it,
-because their protocols have no atomic create-if-absent; a caller that must not race should check the
-flag and refuse. Local overwrites are staged too: the new content is written to a temporary file in the
+Creating only when absent (`Overwrite = false`) is atomic for uploads where `StorageFeature.ConditionalCreate`
+is declared: Local, WebDAV, S3, Azure Blob, Google Cloud Storage, and Swift. FTP and SFTP do not declare
+it, because their protocols have no atomic create-if-absent; a caller that must not race should check the
+flag and refuse. Copies and moves report their own `ConditionEnforcement`. Local overwrites are staged too: the new content is written to a temporary file in the
 same directory and moved over the target, so a reader never sees a half-written file.
 
 ## Permissions, ownership, timestamps, and links
@@ -484,7 +525,8 @@ mounted root. On Windows, creating local links needs Developer Mode or the symbo
 
 `ConflictPolicy` on `StorageUploadOptions` and `StorageTransferOptions` mirrors FileZilla's
 "target file already exists" choices: `Fail`, `Overwrite`, `Skip`, `OverwriteIfNewer`,
-`OverwriteIfSizeDiffers`, `OverwriteIfNewerOrSizeDiffers`, and `Rename` (writes `name (1).ext`).
+`OverwriteIfSizeDiffers`, `OverwriteIfNewerOrSizeDiffers`, and `Rename` (writes the first free name
+`name (1).ext`, `name (2).ext`, …; a folder counts as taken, and `name (1).ext` goes on to `name (2).ext`).
 When it is not set, the `Overwrite` flag decides as before.
 
 ```csharp
@@ -497,7 +539,8 @@ Console.WriteLine($"{report.Value!.Files} uploaded, {report.Value.SkippedFiles} 
 
 - Directories are decided file by file; `StorageDirectoryTransferReport.SkippedFiles` counts the rest.
 - A skipped upload succeeds and returns the existing item, without a write event.
-- Moving a directory deletes only the source files that were transferred; skipped files stay.
+- Moving a directory deletes only the source files that were transferred; skipped files stay, and
+  `SourceDeleted` is `false`. Moving a single link with `LinkHandling = Skip` skips it (`SkipReason = Link`).
 - "Newer" allows two seconds of clock slack. `UploadFileAsync` supplies the local file's time; for
   stream uploads set `SourceLastModified`. Unknown times or sizes count as newer or different.
 - `DownloadToFileAsync` takes a `conflictPolicy` for the local file.
@@ -512,12 +555,18 @@ the staged bytes stay; the next attempt for the same destination and the same so
 missing tail and appends it (FTP `APPE`, SFTP append, local files).
 
 - **The same source only.** Staged bytes are keyed by the source's identity, so a different source of
-  the same length never continues them. Uploads need a seekable stream and `SourceIdentity` (a stable
-  name for the content) or `SourceLastModified`; `UploadFileAsync` sets both. Copies and moves identify the
-  source by its ETag, time, or version, and do not resume a source that has none of them.
+  the same length never continues them. Uploads need a seekable stream and `SourceIdentity` or
+  `SourceLastModified`; `UploadFileAsync` sets both. `SourceIdentity` must change whenever the content
+  changes: use a content id or version, or a path only together with `SourceLastModified` (a path alone
+  lets an edited file of the same length continue the old prefix; only `Verify` would catch it). Copies
+  and moves identify the source by its ETag, time, or version, and do not resume a source that has none.
+- **One writer.** Two transfers of the same source to the same destination in one process never append to
+  one staging object; the second stages privately.
 - **Tokens.** A failed or cancelled copy's report carries a `ResumeToken` that can be stored and passed
   back in `StorageTransferOptions.ResumeToken`, even from another process after a restart. A token is
-  followed only for exactly the same source; otherwise the transfer starts again.
+  followed only for exactly the same source and only onto its own staging object; otherwise the transfer
+  starts again, and nothing the token names is deleted. A token does not mean overwrite: with
+  `Overwrite = false` or `ConflictPolicy = Fail` it fails validation.
 - **Integrity.** With `Verify`, the part staged earlier is read again from the source and must match
   before the rest is appended, so the digest covers the whole file.
 - **Already complete.** A destination is only treated as complete when both sides report the same digest;
@@ -585,25 +634,36 @@ await queue.WaitForIdleAsync();
   revision they read, with a lease carrying a fencing token that the store owns, and renew it while
   running; a save with a stale lease is refused, so a worker that lost its lease never records an outcome,
   and two processes never run one job.
-- **Restarts.** The transfer records its phase as it goes. A job found running from an earlier process goes
-  straight back to the queue when its destination was never touched (and a resumable transfer continues
-  from its staged bytes); otherwise it becomes `Interrupted` for a person to decide. A process restarted
+- **Restarts.** The transfer records its phase as it goes, and the phase never goes backwards. A job found
+  running from an earlier process goes straight back to the queue when its destination was never touched
+  (and a resumable transfer continues from its staged bytes); otherwise it becomes `Interrupted` for a
+  person to decide. File uploads and downloads always count as touched once running. A process restarted
   with the same `WorkerId` takes back its own leases at once; use a distinct `WorkerId` per running queue.
-- **A failing store.** Store calls are guarded: a failed claim is tried again a moment later, renewals are
-  retried while the lease still holds, and a transfer whose outcome cannot be recorded is recovered later
-  instead of being lost. A transfer that succeeded is recorded `Completed` even if it was being paused,
-  cancelled, or shut down as it finished.
+- **A failing store.** Store calls are guarded: a failed claim is tried again a moment later, renewals and
+  saves are retried while the lease still holds, and a transfer whose outcome cannot be recorded is
+  recovered later instead of being lost. A store failure does not use up `AutomaticRetries`. A transfer
+  that succeeded is recorded `Completed` even if it was being paused, cancelled, or shut down as it
+  finished, and a move that committed stays `NeedsReconciliation` whatever arrives afterwards.
+- **Writing a store.** The store's clock alone decides lease expiry; fencing tokens only ever grow for a job
+  id, even across removal; removals take the expected revision and lease; `ReleaseAsync` ends a lease
+  without a save; keep `SchemaVersion` (or use `StorageTransferJobRecord.ToJson`/`FromJson`). Records from a
+  newer schema are left alone.
+- **Shutdown.** Disposing the queue, or stopping the library, waits up to `ShutdownTimeout` (30 s) for
+  running transfers, which end `Queued` or `Interrupted` by their phase, never `Failed`.
 - **States.** `Queued`, `Running`, `Paused`, `Completed`, `Failed`, `Cancelled`, `Blocked` (with
   `BlockReason` `Trust` — an untrusted host key or certificate — or `Credential`), `NeedsReconciliation`
   (the job's `LastReport` says what state it left), and `Interrupted`. Only transient failures are retried,
   with exponential backoff and jitter that honours a server's `Retry-After`.
 - **Control.** `Pause`/`Resume` the queue, or `PauseJobAsync`/`ResumeJobAsync` one job (a running resumable
   transfer keeps its staged data), `CancelAsync`, `RetryAsync` (which also resets `Attempts`), `RemoveAsync`,
-  integer priorities with `SetPriorityAsync` for waiting jobs, and `MoveUpAsync`/`MoveDownAsync`.
-- **History and events.** `MaxFinishedJobs` caps history and `ClearAsync(states)` clears by state. Progress
-  events are throttled (`ProgressInterval`), and `EventContext` raises `JobChanged`/`ProgressChanged`/
-  `JobRemoved` on a UI thread. The event bus receives started, completed, failed, cancelled, retrying,
-  blocked, and needs-reconciliation events.
+  integer priorities with `SetPriorityAsync` for waiting jobs, and `MoveUpAsync`/`MoveDownAsync`. Control
+  calls on a running job return once its transfer has stopped, successfully only if they took effect.
+  `FailedJobs` and `RetryFailedAsync` cover `Failed` jobs; retry `Blocked`, `NeedsReconciliation`, and
+  `Interrupted` jobs one by one with `RetryAsync`.
+- **History and events.** `MaxFinishedJobs` (1,000 by default) caps history and `ClearAsync(states)` clears
+  by state. Progress events are throttled (`ProgressInterval`), and `EventContext` raises `JobChanged`/
+  `ProgressChanged`/`JobRemoved` on a UI thread. The event bus receives started, completed, failed,
+  cancelled, retrying, blocked, needs-reconciliation, and interrupted events.
 - **Adaptive concurrency.** With `AdaptiveConcurrency`, the queue starts with one transfer, adds one after
   each success, and halves after a transient failure, up to `MaxConcurrentTransfers`.
 - `EnqueueDownloadAsync` takes `StorageDownloadOptions`, so a job can fetch an exact version or a range.
@@ -645,7 +705,7 @@ var report = await storage.ApplySyncAsync("sftp", "site", "s3", "backup/site", p
   - Without a baseline, missing files and folders are copied and files that differ are conflicts.
 - A path that is a file on one side and a folder on the other is left alone, with everything below it.
 - Where one side ignores case, a name spelled differently on each side (`Readme.TXT` / `readme.txt`) is
-  one item, and each side keeps its own spelling.
+  one item, and each side keeps its own spelling, folders included.
 
 **Conflict policies.**
 - `Block` (the default) plans a conflict. The plan cannot be applied until the conflict is resolved,
@@ -653,12 +713,16 @@ var report = await storage.ApplySyncAsync("sftp", "site", "s3", "backup/site", p
 - `KeepBoth` keeps the source's version under the original name, and keeps the destination's version on
   both sides as `name (conflict xxxxxxxx).ext`, named from its identity (`… 2`, `… 3` when that name is
   already taken).
-- `NewerWins` applies only when you ask for it; a modification beats a deletion.
+- `NewerWins` applies only when you ask for it; a modification beats a deletion, and two versions with the
+  same time are left alone without blocking the rest.
 
 **Plan, then apply.**
 - The plan lists every step with the versions it depends on. It serializes with `ToJson()`, and
-  `Digest` is a SHA-256 over its content.
-- `ApplySyncAsync` refuses a plan that is not the one approved.
+  `Digest` is a SHA-256 over its content, including its `SchemaVersion`, both connection ids, and
+  `OptionsDigest`.
+- `ApplySyncAsync` refuses a plan that is not the one approved, one made for other connections or in an
+  older format, and options that differ from the plan's (only `MaxConcurrency`, `ItemRetries`,
+  `ContinueOnError`, `DryRun`, `Progress`, and `StateStore` may change at apply).
 - It also refuses a plan whose baseline moved on because another run saved in between.
 - Each step first re-checks its items. A step whose item changed since planning is reported `Stale`
   and not taken.
@@ -672,32 +736,46 @@ var report = await storage.ApplySyncAsync("sftp", "site", "s3", "backup/site", p
 
 A listing that fails part-way fails the plan. Folders are never deleted recursively: their files are
 deleted one by one, each checked at apply time, and then the emptied folders. A folder that gained items
-after the plan, or holds items the filters left out, is kept.
+after the plan, or holds items the filters left out, is kept. A path the source left out (a link, a
+hidden item, anything below an excluded folder) is never deleted from the destination.
 
 **The baseline.** After a two-way run, the baseline records the versions both sides agreed on when the plan
 was made and the versions the run itself wrote, never a listing taken afterwards. A file edited during or
 just after a run is therefore still seen as changed next time. A step that failed, was withheld, or went
-stale keeps its previous entry, so the next run tries again. Neither side having changed while their
-content differs is reported as a conflict, not as in sync.
+stale keeps its previous entry, so the next run tries again, and so do paths that are excluded, hidden,
+or under a file/folder clash. Neither side having changed while their content differs is reported as a
+conflict, not as in sync.
 
 **Copies.** Each copy goes through a staged write that is conditional on the planned versions (create-new,
-or replace-only-that-version), pinned to the planned source, and optionally verified (`Verify`). Copied
-files keep the source's modification time; on object stores that cannot set times, the time is kept in
-`cl-mtime` metadata and used by later comparisons.
+or replace-only-that-version), pinned to the planned source, and optionally verified (`Verify`, which
+confirms the destination and records the SHA-256 in the baseline). Copied files keep the source's
+modification time; on object stores that cannot set times, the time is kept in `cl-mtime` metadata (read
+as UTC when it has no offset) and used by later comparisons. A failed copy restarts from the beginning.
 
 **Comparison.**
 - Size and time are compared by default (two-second tolerance). `CompareBy.Checksum` uses the server's
   digest where there is one.
-- Otherwise it hashes in parallel (`HashConcurrency`) within `MaxHashedFiles`/`MaxHashedBytes`. Beyond
-  that budget a difference is `Undecidable`.
-- `Include`/`Exclude` globs (`**` spans folders) apply to both sides and to the baseline.
+- Otherwise it hashes in parallel (`HashConcurrency`) within `MaxHashedFiles`/`MaxHashedBytes`, taken for
+  both sides at once. Beyond that budget, or when one file cannot be read, a difference is `Undecidable`;
+  one-way sync leaves such a pair alone while size and time agree. Each side uses a digest its server
+  keeps where it can, so only the other side is downloaded.
+- `Include`/`Exclude` globs (`**` spans folders) apply to both sides and to the baseline. Excluding a folder
+  excludes its contents, as in `.gitignore`.
 - Names that differ only by case are refused on a case-insensitive side (`CaseInsensitivePaths`, or
-  `CaseInsensitive`) rather than letting the last copy win.
-- `LinkHandling` skips links by default.
-- `MaxItems` caps the size of a tree.
+  `CaseInsensitive`) rather than letting the last copy win; one collision fails the whole comparison.
+- `LinkHandling` skips links by default; `Follow` compares what a link inside the connection points to.
+- `MaxItems` (1,000,000 by default) caps the size of a tree.
 
 **Runs.** Transient failures are retried per step (`ItemRetries`). `ContinueOnError = false` stops at the
-first failure. A cancelled run returns its report with `Cancelled` set.
+first failure. A provider or state store that throws fails its step or is reported in
+`report.BaselineError`.
+
+**Cancelling.** Once `ApplySyncAsync` or `SyncAsync` has started applying, cancelling does not throw
+`OperationCanceledException` (4.8.93 did): the result is a success whose `report.Cancelled` is `true`,
+`Results` says what was applied, and steps not started are `NotRun`. A two-way sync with a baseline still
+saves it: completed steps are recorded and every other path keeps its previous entry. A successful result
+therefore does not mean the sync finished; check `report.Cancelled`. Cancelling while planning, or while
+waiting for another apply of the same `SyncId`, still throws.
 
 ### Raw commands and free space
 
@@ -721,11 +799,13 @@ await foreach (var change in media.WatchAsync("incoming", cancellationToken: sto
 Local connections use native file-system notifications (including renames). Every other provider
 is polled: the directory is listed every `PollInterval` (30 s by default) and compared by type, size,
 time, and ETag, so a rename appears as a delete plus a create. A failed poll is retried on the next
-interval rather than reported as deletions. The library's own staging items never appear.
+interval rather than reported as deletions (and passed to `PollFailed`); a failed first listing, or one
+cut short by a folder vanishing mid-poll, is retried rather than reported as mass creates or deletes. The
+library's own staging items never appear.
 Connections from `GetStorage()` watch natively too. If notifications arrive faster than they can be
 buffered, a `StorageChangeKind.Overflow` change for the watched directory is reported: list it again. If
-native watching stops for good (the folder was removed, a network share dropped), `Overflow` is reported
-and watching continues by polling.
+native watching stops for good (the folder was removed, a network share dropped) or cannot start,
+`Overflow` is reported and watching continues by polling.
 
 Polling a large remote tree is cheaper with `Incremental = true`: after the first listing, a poll lists
 only the root and the folders whose modification time changed (entries were added, removed, or renamed
@@ -764,7 +844,7 @@ forces a download.
 
 | Provider | Server digest |
 |---|---|
-| S3 | MD5 from single-part, non-KMS ETags; SHA-256 when stored with the object |
+| S3 | MD5 from single-part ETags of objects without SSE-KMS or SSE-C; SHA-256 when stored with the object |
 | Azure Blob | MD5 (`Content-MD5`) |
 | Google Cloud Storage | MD5 of non-composite objects |
 | Swift | MD5 ETag, except segmented large objects |
@@ -783,7 +863,7 @@ await storage.AddOrUpdateConnectionAsync("backup", new SftpConnectionConfig
     HostKeyFingerprints = ["SHA256:..."]
 });
 
-Result health = await storage.CheckConnectionHealthAsync("backup");
+Result<HealthStatus> health = await storage.CheckConnectionHealthAsync("backup");
 ```
 
 Runtime changes can be persisted to the typed provider JSON section or installed for the process only
@@ -853,9 +933,13 @@ Expected failures use stable `storage.*` error codes such as `storage.not_found`
 `storage.connection_lost`, `storage.server_busy`, `storage.quota_exceeded`, `storage.too_large`, and
 `storage.unsupported`. `StorageErrorInfo.IsTransient` tells whether a failure is worth retrying, and
 `StorageErrorInfo.TryGetDetail` exposes the provider's own code (`ftpReply`, `sftpStatus`, `httpStatus`).
-Incomplete cleanup/source deletion is reported as `storage.partial_failure` with sanitized state and
-error codes. Provider bodies, credentials, and signed query strings are not exposed. Caller
-cancellation propagates as `OperationCanceledException`.
+Incomplete source deletion or restore is reported as `storage.partial_failure` with sanitized state and
+error codes; a failure raised after the destination was written carries `destinationState=complete`
+(`StorageErrorInfo.DestinationCommitted`). Classify errors by code, not by the Core error kind
+(`storage.cancelled` is never transient). Provider bodies, credentials, and signed query strings are not
+exposed. Caller cancellation propagates as `OperationCanceledException` from connection calls and sync
+planning; `StorageLibrary.CopyAsync`/`MoveAsync` report it (`Outcome = Cancelled`), and a sync cancelled
+while applying returns a success with `report.Cancelled = true`.
 
 Migrating from the legacy S3-only package? See [MIGRATION.md](MIGRATION.md).
 

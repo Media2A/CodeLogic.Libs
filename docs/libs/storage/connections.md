@@ -76,8 +76,12 @@ See the [overview](index.md) for the configuration sections and the mount model.
 - **Client certificates** for mutual TLS come from `ClientCertificatePath`, or from
   `ClientCertificateContent` (the PFX bytes, base64 in JSON) when they live in a secret store;
   `ClientCertificatePassword` decrypts either. The certificate is loaded once per connection and disposed
-  with it. On Linux and macOS its key stays in memory; on Windows, SChannel can only use a key in a key
-  container, so it is imported into a temporary one that is deleted when the connection closes.
+  with it. On Linux the private key is held in memory only. macOS does not support in-memory keys, so .NET
+  imports the key into a temporary keychain that it deletes when the certificate is disposed with the
+  connection. On Windows SChannel needs a key container: the key goes into a non-persisted container (the
+  machine key store when the user profile is not loaded) that is deleted when the connection is disposed;
+  a process that crashes can leave that container file behind. A PKCS#12 file without its private key is
+  refused when the connection is registered.
 - **Active mode** behind NAT: `ActivePortMin`/`ActivePortMax` and `ActiveExternalIp`.
 - **Encodings** such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for file
   names on older servers.
@@ -94,11 +98,24 @@ See the [overview](index.md) for the configuration sections and the mount model.
 `BearerToken`, `Digest`, `Ntlm`, `Negotiate`, and `Windows` (current user). HTTPS endpoints support
 `TrustedCertificateSha256` and `TrustedPublicKeySha256` pins, `RequireValidCertificateChain`, and a
 client certificate for mutual TLS (`ClientCertificatePath`, or the PFX bytes in
-`ClientCertificateContent`). `MaxConnectionsPerServer` caps concurrent connections.
+`ClientCertificateContent`). `MaxConnectionsPerServer` caps concurrent connections. A `MOVE` or `COPY` onto an existing
+folder is refused (`storage.conflict`) rather than replacing it; a `207 Multi-Status` answer, where some
+members failed, is `storage.partial_failure` (`destinationState=partial`). WebDAV does not declare
+`AtomicMove`, so the library relays folder moves there.
 
 ## Cloud emulators and compatible services
 
-- **S3-compatible** (MinIO, Ceph, …): set `ServiceUrl` and usually `ForcePathStyle`.
+- **S3-compatible** (MinIO, Ceph, …): set `ServiceUrl` and usually `ForcePathStyle`. Servers differ in
+  which conditional headers they enforce, so `ConditionalRequests` says how far to trust them:
+  - `Auto` (default): conditional uploads (`PutObject`, `CompleteMultipartUpload`) are trusted; whether
+    `CopyObject` honours `If-None-Match`/`If-Match` and `DeleteObject` honours `If-Match` is probed once
+    per connection with two `.cl-storage-probe-*` objects, removed afterwards. AWS S3 enforces all of
+    them; MinIO enforces conditional uploads but ignores the copy and delete conditions, so there a
+    create-only copy is checked just before it runs and reported `CheckedBeforeCommit`.
+  - `Enforced`: trust every condition without probing.
+  - `NotEnforced`: send no conditional headers; the library checks conditions itself just before each
+    write, and the connection stops declaring `ConditionalCreate`/`ConditionalUpdate`/`ConditionalDelete`.
+    Use it for a server that rejects or ignores conditional uploads.
 - **Azure Blob**: a connection string works with Azurite (`UseDevelopmentStorage=true`).
 - **Google Cloud Storage**: `ServiceUrl` plus `AuthenticationMode = Anonymous` targets an emulator such as fake-gcs-server.
 - **Swift**: Keystone, or `AuthenticationMode = TempAuthV1` for SAIO-style servers (`AuthenticationUrl` ending in `/auth/v1.0`).
@@ -145,7 +162,8 @@ retry transient failures automatically. Both are tuned per connection:
 
 - `MaxSessions` caps open sessions, busy or idle, so the library stays under a server's per-user
   connection limit. Callers beyond it wait up to `AcquireTimeoutSeconds`, then receive
-  `storage.server_busy`.
+  `storage.server_busy`. A relayed copy within one FTP connection needs two sessions; with `MaxSessions = 1`
+  it fails at once with `storage.unsupported`.
 - A pooled session idle longer than `ValidateAfterIdleSeconds` is probed (FTP `NOOP`, SFTP `stat`)
   before reuse. Sessions that time out, drop, or fail TLS mid-operation are closed instead of reused.
 - `KeepAliveSeconds` sends FTP `NOOP` or SSH keep-alive packets while a session is open.
@@ -171,7 +189,11 @@ Idle pools are closed when the library stops.
 Listing continuation tokens are tied to the settings rather than the registration id too, so paging
 continues after the same settings are registered again under a new id. A token refers to a listing
 snapshot kept in the process for five minutes after its last use; after that, or in another process, the
-listing is walked again from where the token points.
+listing is walked again from where the token points. A listing of more than 250,000 items is not kept, so
+its token is walked again from where it points in every case.
+
+A pool, once created, keeps a copy of the settings it was created with; changing the configuration object
+afterwards does not change a running pool.
 
 ## Runtime connections and native clients
 

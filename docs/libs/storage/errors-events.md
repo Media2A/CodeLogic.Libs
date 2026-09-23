@@ -5,8 +5,12 @@
 
 ## Error codes
 
-Expected failures come back as a failed `Result` with a stable code; caller cancellation propagates
-as `OperationCanceledException`. Every provider maps its own failures to the same codes:
+Expected failures come back as a failed `Result` with a stable code. Caller cancellation propagates as
+`OperationCanceledException` from connection calls (uploads, downloads, listings, and
+`IStorageService.CopyAsync`/`MoveAsync`) and from sync planning. It is reported instead where a report
+says what was left: `StorageLibrary.CopyAsync`/`MoveAsync` (`Outcome = Cancelled`), the transfer queue's
+`Result` methods, and a sync cancelled while applying (a successful result with `report.Cancelled = true`).
+Every provider maps its own failures to the same codes:
 
 | Code | Meaning | Typical sources |
 |---|---|---|
@@ -26,9 +30,12 @@ as `OperationCanceledException`. Every provider maps its own failures to the sam
 | `storage.quota_exceeded` | out of space or quota | FTP 452/552, HTTP 507, disk full |
 | `storage.timeout` | the operation timed out | read/connect timeouts |
 | `storage.unavailable` | the service is unavailable | provider outages |
-| `storage.partial_failure` | a multi-step operation stopped halfway | restore, staging cleanup, or move-source deletion failed |
+| `storage.partial_failure` | a multi-step operation stopped halfway | restore or move-source deletion failed, a WebDAV `207 Multi-Status` |
 | `storage.cancelled` | the caller cancelled, reported where a report says what was left | a cancelled `CopyAsync`/`MoveAsync` (`Outcome = Cancelled`) |
 | `storage.provider_error` | anything not classified above | carries the exception type (never its message) |
+
+Classify errors by `Code` (or `StorageErrorInfo.IsTransient`), not by the Core error kind:
+`storage.cancelled` is never transient, although it is built as an availability error.
 
 `StorageErrorInfo` (namespace `CL.Storage.Errors`) helps act on them:
 
@@ -42,6 +49,11 @@ if (StorageErrorInfo.IsTransient(result.Error))              // timeout, unavail
 if (StorageErrorInfo.TryGetDetail(result.Error, StorageErrorInfo.FtpReplyKey, out var reply))
     Console.WriteLine($"FTP server replied {reply}");         // also SftpStatusKey, HttpStatusKey
 ```
+
+A failure raised after the destination was already written carries `destinationState=complete`
+(`StorageErrorInfo.DestinationCommitted(error)`), with a `leftBehind=<path>` entry for each object the
+provider could not remove, such as its own backup; treat the destination as committed and clean up, never
+retry blindly. A WebDAV `207` carries `destinationState=partial`.
 
 A rejected SSH host key carries `presentedFingerprint` in `Details`. To rebuild an error stored as its
 code, message, and details (for example from a job store), use `StorageErrors.Create`. Provider response bodies,
@@ -59,13 +71,18 @@ so a transient error you receive has already been retried.
 | `client_certificate_rejected` | the server refused the client certificate: a credential problem | — |
 | `protocol_mismatch` | no TLS version or cipher in common | — |
 | `handshake_failed` | anything else during the handshake | — |
+| `connection_interrupted` | a hint on `storage.connection_lost` (transient): the TLS stream failed after the handshake (OpenSSL unexpected EOF or bad record MAC, SChannel decrypt failure) | — |
 
 The reason comes from the platform's own TLS stack: SChannel status codes on Windows (matched by code,
-since Windows localizes the messages) and OpenSSL alerts on Linux. A TLS 1.3 server refuses a client
-certificate only after the handshake, which Windows reports as a dropped connection; when the server
-asked for a client certificate during that attempt, the failure is still reported as
-`client_certificate_rejected`. FTP and WebDAV add the presented certificate; S3, Azure, Google Cloud, and
-Swift report the reason only.
+since Windows localizes the messages) and OpenSSL alerts on Linux. Only failures during the handshake are
+TLS failures; a stream that breaks later is `storage.connection_lost`, which is transient.
+
+A TLS 1.3 server refuses a client certificate only after the handshake, which the platform reports as a
+dropped connection. It becomes `client_certificate_rejected` only when that same connection was asked for
+a certificate (the server sent acceptable issuers or its certificate request) and failed right after our
+reply. A dropped connection on a server that merely asks for a certificate (optional client
+certificates) stays `connection_lost`, with `tlsReason=client_certificate_rejected` as a hint. FTP and
+WebDAV add the presented certificate; S3, Azure, Google Cloud, and Swift report the reason only.
 
 ```csharp
 if (StorageErrorInfo.TryGetDetail(result.Error, StorageErrorInfo.TlsReasonKey, out var reason)
@@ -96,6 +113,7 @@ All events go to the CodeLogic event bus. Publishing never delays or fails the s
 | `StorageTransferRetryingEvent` | a queue job failed transiently and will run again after a delay |
 | `StorageTransferBlockedEvent` | a queue job needs a person: an untrusted identity or rejected credentials |
 | `StorageTransferNeedsReconciliationEvent` | a queue job left a mixed state that needs checking |
+| `StorageTransferInterruptedEvent` | a queue job found running after a restart may have touched its destination |
 
 ```csharp
 events.Subscribe<StorageConnectionHealthChangedEvent>(e =>
