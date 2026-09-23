@@ -841,7 +841,8 @@ public sealed class NeedsReviewSyncTests
 
         Assert.True(report.Cancelled);
         Assert.Equal(StorageSyncActionOutcome.NotRun, Step(report, "f.txt").Outcome);
-        Assert.Equal(0, StorageSync.ApplyGateCount);
+        // This sync's own lock only: other tests may be applying in parallel.
+        Assert.False(StorageSync.IsApplyGateHeld("b55"));
     }
 
     // ------------------------------------------------------------ B56: undecidable content, and the hashing budget

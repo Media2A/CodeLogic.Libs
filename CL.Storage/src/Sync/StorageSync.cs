@@ -274,14 +274,14 @@ public static class StorageSync
             }
         }
 
-        internal static int Count
+        internal static bool IsHeld(string syncId)
         {
-            get { lock (Gates) return Gates.Count; }
+            lock (Gates) return Gates.ContainsKey(syncId);
         }
     }
 
-    /// <summary>How many syncs hold or wait for the in-process apply lock (for tests).</summary>
-    internal static int ApplyGateCount => ApplyGate.Count;
+    /// <summary>Whether a sync holds or waits for the in-process apply lock (for tests).</summary>
+    internal static bool IsApplyGateHeld(string syncId) => ApplyGate.IsHeld(syncId);
 
     /// <summary>
     /// Plans and applies in one call. With <see cref="StorageSyncOptions.DryRun"/> the plan is returned and
