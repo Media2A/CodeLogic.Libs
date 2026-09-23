@@ -207,8 +207,8 @@ public sealed class ReviewTransferTests
     }
 }
 
-/// <summary>Passes every call to an inner backend and runs a hook after each copy.</summary>
-internal sealed class HookedBackend(IStorageBackend inner, Func<string, string, Task> afterCopy) : IStorageBackend
+/// <summary>Passes every call to an inner backend, runs a hook after each copy, and can answer uploads itself.</summary>
+internal sealed class HookedBackend(IStorageBackend inner, Func<string, string, Task> afterCopy, Func<string, Result<StorageItem>?>? upload = null) : IStorageBackend
 {
     public string ConnectionId => inner.ConnectionId;
     public StorageProvider Provider => inner.Provider;
@@ -223,7 +223,8 @@ internal sealed class HookedBackend(IStorageBackend inner, Func<string, string, 
     public Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default) => inner.ExistsAsync(path, cancellationToken);
     public Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default) => inner.ListAsync(path, options, cancellationToken);
     public Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default) => inner.CreateDirectoryAsync(path, cancellationToken);
-    public Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default) => inner.UploadAsync(path, source, options, cancellationToken);
+    public Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default) =>
+        upload?.Invoke(path) is { } answered ? Task.FromResult(answered) : inner.UploadAsync(path, source, options, cancellationToken);
     public Task<Result<StorageItem>> UploadBytesAsync(string path, byte[] content, StorageUploadOptions? options = null, CancellationToken cancellationToken = default) => inner.UploadBytesAsync(path, content, options, cancellationToken);
     public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) => inner.DownloadAsync(path, options, cancellationToken);
     public Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) => inner.DownloadBytesAsync(path, options, cancellationToken);

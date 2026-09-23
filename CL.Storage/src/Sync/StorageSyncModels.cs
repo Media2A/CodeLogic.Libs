@@ -49,25 +49,25 @@ public enum StorageSyncConflictKind
     DeleteVersusModify
 }
 
-/// <summary>What a sync does to one path.</summary>
+/// <summary>What a sync does to one path. The numbers are stable: kinds are only ever added at the end.</summary>
 public enum StorageSyncActionKind
 {
     /// <summary>Copies from source to destination.</summary>
-    CopyToDestination,
+    CopyToDestination = 0,
     /// <summary>Copies from destination to source.</summary>
-    CopyToSource,
-    /// <summary>Deletes from the destination.</summary>
-    DeleteFromDestination,
-    /// <summary>Deletes from the source (a two-way sync carrying a destination-side deletion).</summary>
-    DeleteFromSource,
+    CopyToSource = 1,
+    /// <summary>Deletes a file, or an empty directory, from the destination.</summary>
+    DeleteFromDestination = 2,
     /// <summary>Creates a directory at the destination.</summary>
-    CreateDirectory,
+    CreateDirectory = 3,
+    /// <summary>Deletes a file, or an empty directory, from the source (a two-way sync carrying a destination-side deletion).</summary>
+    DeleteFromSource = 4,
     /// <summary>Creates a directory at the source.</summary>
-    CreateDirectoryAtSource,
+    CreateDirectoryAtSource = 5,
     /// <summary>Renames the destination's version to <see cref="StorageSyncAction.TargetPath"/> (a kept conflict copy).</summary>
-    RenameAtDestination,
+    RenameAtDestination = 6,
     /// <summary>A conflict left for a person; nothing is changed.</summary>
-    Conflict
+    Conflict = 7
 }
 
 /// <summary>How one planned step turned out.</summary>
@@ -120,9 +120,10 @@ public sealed record StorageSyncIdentity(long? Size, DateTimeOffset? Modified, s
 }
 
 /// <summary>What the last completed sync saw on each side of one path.</summary>
-/// <param name="Source">The source's version, or null when absent there.</param>
-/// <param name="Destination">The destination's version, or null when absent there.</param>
-public sealed record StorageSyncBaselineEntry(StorageSyncIdentity? Source, StorageSyncIdentity? Destination);
+/// <param name="Source">The source's version of a file, or null when absent there (or a directory).</param>
+/// <param name="Destination">The destination's version of a file, or null when absent there (or a directory).</param>
+/// <param name="IsDirectory">Whether the path was a directory on both sides.</param>
+public sealed record StorageSyncBaselineEntry(StorageSyncIdentity? Source, StorageSyncIdentity? Destination, bool IsDirectory = false);
 
 /// <summary>The state after the last sync: per path, the version each side had. Its generation grows with every save.</summary>
 /// <param name="Generation">Grows by one with every saved run; a plan made against an older generation is refused.</param>
@@ -233,8 +234,13 @@ public sealed record StorageSyncOptions
 /// <summary>One planned sync step, with the versions it was planned against.</summary>
 public sealed record StorageSyncAction
 {
-    /// <summary>Gets the path relative to the synced directories.</summary>
+    /// <summary>Gets the path relative to the synced directories, as the source spells it.</summary>
     public required string RelativePath { get; init; }
+    /// <summary>
+    /// Gets the destination's spelling of the path when it differs from <see cref="RelativePath"/> only by case
+    /// (one side ignores case); null when both sides spell it the same.
+    /// </summary>
+    public string? DestinationRelativePath { get; init; }
     /// <summary>Gets what is done.</summary>
     public required StorageSyncActionKind Kind { get; init; }
     /// <summary>Gets why, from the comparison.</summary>
@@ -278,6 +284,12 @@ public sealed record StorageSyncPlan
     public IReadOnlyList<StorageSyncAction> Actions { get; init; } = [];
     /// <summary>Gets the files that already matched.</summary>
     public int Unchanged { get; init; }
+    /// <summary>
+    /// Gets, for a two-way sync with a baseline, the paths both sides agreed on when the plan was made, with the
+    /// versions seen then. The baseline saved after the run records these and what the run's copies wrote —
+    /// never what happens to be there afterwards, so an edit made during the run is still seen next time.
+    /// </summary>
+    public IReadOnlyDictionary<string, StorageSyncBaselineEntry> Agreed { get; init; } = new Dictionary<string, StorageSyncBaselineEntry>();
     /// <summary>Gets notes for a person, such as why deletions are withheld.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
     /// <summary>Gets when the plan was made.</summary>

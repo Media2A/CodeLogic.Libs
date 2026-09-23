@@ -98,6 +98,8 @@ public sealed record StorageCompareOptions
         if (TimeTolerance < TimeSpan.Zero) return Result.Failure(StorageErrors.InvalidContent("TimeTolerance cannot be negative."));
         if (HashConcurrency is < 1 or > 64) return Result.Failure(StorageErrors.InvalidContent("HashConcurrency must be between 1 and 64."));
         if (MaxItems < 1) return Result.Failure(StorageErrors.InvalidContent("MaxItems must be positive."));
+        if (LinkHandling == StorageLinkHandling.Recreate)
+            return Result.Failure(StorageErrors.InvalidContent("Comparisons and syncs cannot recreate links; use Skip, Follow, or Reject."));
         return Enum.IsDefined(LinkHandling) ? Result.Success() : Result.Failure(StorageErrors.InvalidContent("LinkHandling is invalid."));
     }
 }
@@ -115,6 +117,12 @@ public sealed record StorageDiffEntry(
     StorageItem? Source,
     StorageItem? Destination)
 {
+    /// <summary>
+    /// Gets the destination's spelling of the path when it differs from <see cref="RelativePath"/> only by case
+    /// (a case-insensitive comparison); null when both sides spell it the same.
+    /// </summary>
+    public string? DestinationRelativePath { get; init; }
+
     /// <summary>Gets whether this entry is a directory on either side.</summary>
     public bool IsDirectory => (Source ?? Destination)?.ItemType == StorageItemType.Directory;
 }
@@ -184,6 +192,7 @@ public static class StorageCompare
 
         var entries = new List<StorageDiffEntry>();
         var pairs = new List<(string Path, StorageItem Left, StorageItem Right)>();
+        var spelling = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var key in left.Value!.Keys.Union(right.Value!.Keys, StringComparer.Ordinal))
         {
             left.Value.TryGetValue(key, out var a);
@@ -192,6 +201,7 @@ public static class StorageCompare
             if (a is null) { entries.Add(new StorageDiffEntry(path, StorageDiffKind.OnlyInDestination, StorageDiffReason.None, null, b!.Item)); continue; }
             if (b is null) { entries.Add(new StorageDiffEntry(path, StorageDiffKind.OnlyInSource, StorageDiffReason.None, a.Item, null)); continue; }
             pairs.Add((path, a.Item, b.Item));
+            if (!string.Equals(a.Relative, b.Relative, StringComparison.Ordinal)) spelling[path] = b.Relative;
         }
 
         var reasons = await CompareFilesAsync(source, destination, pairs, options, cancellationToken).ConfigureAwait(false);
@@ -199,7 +209,10 @@ public static class StorageCompare
         foreach (var (path, a, b) in pairs)
         {
             var reason = reasons.Value![path];
-            entries.Add(new StorageDiffEntry(path, reason == StorageDiffReason.None ? StorageDiffKind.Same : StorageDiffKind.Different, reason, a, b));
+            entries.Add(new StorageDiffEntry(path, reason == StorageDiffReason.None ? StorageDiffKind.Same : StorageDiffKind.Different, reason, a, b)
+            {
+                DestinationRelativePath = spelling.GetValueOrDefault(path)
+            });
         }
         entries.Sort((x, y) => string.CompareOrdinal(x.RelativePath, y.RelativePath));
         return Result<StorageDiff>.Success(new StorageDiff(entries)
@@ -210,12 +223,18 @@ public static class StorageCompare
         });
     }
 
-    /// <summary>The effective modification time: the source time kept in metadata on stores that cannot set times.</summary>
-    internal static DateTimeOffset? EffectiveModified(StorageItem item) =>
-        item.Metadata.TryGetValue(StorageCompareOptions.ModifiedMetadataKey, out var kept) &&
-        DateTimeOffset.TryParse(kept, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
-            ? parsed
-            : item.LastModified;
+    /// <summary>
+    /// The effective modification time: the source time kept in metadata on stores that cannot set times. The
+    /// kept time is trusted only when it is not later than the object itself (plus a minute of clock skew): a
+    /// copy is always written after its source was modified, so a later value is not one this library wrote.
+    /// </summary>
+    internal static DateTimeOffset? EffectiveModified(StorageItem item)
+    {
+        if (!item.Metadata.TryGetValue(StorageCompareOptions.ModifiedMetadataKey, out var kept) ||
+            !DateTimeOffset.TryParse(kept, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
+            return item.LastModified;
+        return item.LastModified is { } written && parsed > written + TimeSpan.FromMinutes(1) ? item.LastModified : parsed;
+    }
 
     private sealed record Keyed(string Relative, StorageItem Item);
 

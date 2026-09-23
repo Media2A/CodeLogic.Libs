@@ -89,7 +89,10 @@ public sealed class SyncTests
 
         var report = (await a.SyncAsync("", b, "", new StorageSyncOptions { Direction = StorageSyncDirection.Mirror, DeleteExtraneous = true })).Value!;
 
-        Assert.Equal(2, report.Deleted); // the directory once, not each file in it
+        // Each file is checked and deleted on its own, then the emptied folders (deepest first).
+        Assert.Equal(4, report.Deleted);
+        Assert.Equal(["stale-dir/deep/x.txt", "stale-dir/deep", "stale-dir", "stale.txt"],
+            report.Results.Where(result => result.Action.Kind == StorageSyncActionKind.DeleteFromDestination).Select(result => result.Action.RelativePath));
         Assert.True((await a.CompareAsync("", b, "")).Value!.Identical);
     }
 
