@@ -66,7 +66,7 @@ public sealed class NeedsReviewTransferApiTests
 
         Assert.NotNull(stopped);
         Assert.IsAssignableFrom<IOException>(stopped);
-        Assert.Equal(StorageErrors.ServerBusyCode, stopped!.Error?.Code);
+        Assert.True(StorageErrors.ServerBusyCode == stopped!.Error?.Code, stopped.ToString());
         await writer.DisposeAsync();
     }
 }

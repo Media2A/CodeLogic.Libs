@@ -452,6 +452,43 @@ public sealed class NeedsReviewTransferTests
         Assert.Equal([9, 9], (await local.DownloadBytesAsync("t.bin")).Value!);
     }
 
+    [Fact] // needs-review A11, B18
+    public async Task A_native_move_whose_source_stayed_or_that_stopped_part_way_needs_reconciliation()
+    {
+        var (library, directory, _, b) = await TwoConnectionsAsync();
+        using var _l = library; using var _d = directory;
+        var local = Local(b);
+        // The provider copied, then could not delete the source: it names the source, which is not a leftover.
+        Assert.True(library.RegisterBackend("Kept", new InterceptBackend(local)
+        {
+            Move = async (from, to, options, token) =>
+            {
+                var copied = await local.CopyAsync(from, to, options with { SourceVersionId = null, ExpectedSourceETag = null }, token);
+                return copied.IsFailure ? copied : Result.Failure(StorageErrors.PartialFailure("The source could not be deleted.",
+                    $"sourceDeleteError=storage.permission_denied;{StorageErrorInfo.DestinationStateKey}=complete;{StorageErrorInfo.LeftBehindKey}={from}"));
+            }
+        }.Named("Kept")).IsSuccess);
+        // A WebDAV collection move answered 207: some members moved, some did not.
+        Assert.True(library.RegisterBackend("Partial", new InterceptBackend(local)
+        {
+            Move = (_, _, _, _) => Task.FromResult(Result.Failure(StorageErrors.PartialFailure("Multi-status.",
+                $"{StorageErrorInfo.HttpStatusKey}=207;{StorageErrorInfo.DestinationStateKey}=partial")))
+        }.Named("Partial")).IsSuccess);
+        await local.UploadBytesAsync("a.bin", [1]);
+        await local.UploadBytesAsync("c.bin", [2]);
+
+        var kept = await library.MoveAsync("Kept", "a.bin", "Kept", "b.bin");
+        var partial = await library.MoveAsync("Partial", "c.bin", "Partial", "d.bin");
+
+        Assert.Equal(StorageTransferOutcome.NeedsReconciliation, kept.Outcome);
+        Assert.True(kept.DestinationCommitted);
+        Assert.False(kept.SourceDeleted);
+        Assert.Null(kept.StagingLeftBehind);
+        Assert.Null(kept.BackupLeftBehind);
+        Assert.Equal(StorageTransferOutcome.NeedsReconciliation, partial.Outcome);
+        Assert.Equal(StorageErrors.PartialFailureCode, partial.Error?.Code);
+    }
+
     [Fact] // needs-review A11
     public async Task Staged_uploads_and_streamed_writes_treat_a_provider_error_after_the_commit_as_committed()
     {
@@ -719,7 +756,9 @@ public sealed class NeedsReviewTransferTests
 
         Assert.True(uploaded.IsSuccess, uploaded.Error?.ToString());
         Assert.True(committed.IsSuccess, committed.Error?.ToString());
-        Assert.Equal([seen.ETag, after.ETag], conditions.Select(c => c?.ExpectedETag));
+        // Local cannot enforce a condition in its move (storage.unsupported), so each promote offers it first and
+        // then, having checked it just before, moves without it.
+        Assert.Equal([seen.ETag, null, after.ETag, null], conditions.Select(c => c?.ExpectedETag));
     }
 
     // ---------------------------------------------------------------- B10

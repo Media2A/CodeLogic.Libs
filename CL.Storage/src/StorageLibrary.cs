@@ -1130,14 +1130,19 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     }
                     else if (!nativeCommitted)
                     {
-                        return Fail(native.Error!);
+                        // A provider that stopped part-way (a WebDAV 207 multi-status) left a mixed state to reconcile.
+                        return native.Error!.Code == StorageErrors.PartialFailureCode
+                            ? report with { Outcome = StorageTransferOutcome.NeedsReconciliation, Error = native.Error, SourceDeleted = move ? false : null }
+                            : Fail(native.Error!);
                     }
                     else
                     {
                         // Committed. The report is built first and only then completed, with reads that ignore the
                         // caller's cancel, so a cancel now cannot turn a finished copy or move into "Cancelled".
                         usedNativeOperation = true;
-                        var leftBehind = StagedWriter.LeftBehind(native.Error);
+                        // A move whose source delete failed names the source itself; that is not an internal leftover.
+                        var leftBehind = StagedWriter.LeftBehind(native.Error)
+                            .Where(path => !string.Equals(path, normalizedSource.Value, StringComparison.Ordinal)).ToList();
                         report = report with
                         {
                             Outcome = StorageTransferOutcome.Completed,

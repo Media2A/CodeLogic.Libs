@@ -103,12 +103,10 @@ public sealed class StorageWriteStream : Stream
         if (flush.IsCompleted || flush.IsCanceled)
         {
             BeginAbort();
+            // The upload stopped reading; it may still be removing its staging object before it reports why.
             Error? error = null;
-            if (_upload.IsCompleted)
-            {
-                try { error = (await _upload.ConfigureAwait(false)).Error; }
-                catch (Exception) { }
-            }
+            try { error = (await _upload.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false)).Error; }
+            catch (Exception) { }
             throw new StorageWriteException("The destination stopped accepting data.", error);
         }
     }
