@@ -42,10 +42,31 @@ if (StorageErrorInfo.TryGetDetail(result.Error, StorageErrorInfo.FtpReplyKey, ou
     Console.WriteLine($"FTP server replied {reply}");         // also SftpStatusKey, HttpStatusKey
 ```
 
-A rejected SSH host key carries `presentedFingerprint` in `Details`. Provider response bodies,
+A rejected SSH host key carries `presentedFingerprint` in `Details`. To rebuild an error stored as its
+code, message, and details (for example from a job store), use `StorageErrors.Create`. Provider response bodies,
 credentials, and signed query strings are never included. FTP, SFTP, and WebDAV already retry
 transient failures themselves (see [Connections](connections.md#sessions-retries-and-keep-alive)),
 so a transient error you receive has already been retried.
+
+### TLS failures
+
+`storage.tls_failure` carries a `tlsReason` detail (`StorageErrorInfo.TlsReasonKey`) that says what to do:
+
+| `tlsReason` | Meaning | Extra details |
+|---|---|---|
+| `server_certificate_rejected` | the server's certificate is not trusted or not pinned | `presentedCertificateSha256` and `presentedPublicKeySha256`, ready to pin |
+| `client_certificate_rejected` | the server refused the client certificate: a credential problem | — |
+| `protocol_mismatch` | no TLS version or cipher in common | — |
+| `handshake_failed` | anything else during the handshake | — |
+
+```csharp
+if (StorageErrorInfo.TryGetDetail(result.Error, StorageErrorInfo.TlsReasonKey, out var reason)
+    && reason == "server_certificate_rejected"
+    && StorageErrorInfo.TryGetDetail(result.Error, StorageErrorInfo.PresentedPublicKeyKey, out var key))
+{
+    // Ask the user, then pin: settings.TrustedPublicKeySha256 = [key];
+}
+```
 
 ## Events
 
@@ -63,7 +84,10 @@ All events go to the CodeLogic event bus. Publishing never delays or fails the s
 | `StorageConnectionRetryEvent` | a transient failure is being retried (attempt, delay, code) |
 | `StorageConnectionHealthChangedEvent` | a health check found a connection in a new state (and on its first check) |
 | `StorageOperationFailedEvent` | any service operation failed (operation, path, code) |
-| `StorageTransferStartedEvent` / `CompletedEvent` / `FailedEvent` | a transfer-queue job changed state |
+| `StorageTransferStartedEvent` / `CompletedEvent` / `FailedEvent` / `CancelledEvent` | a transfer-queue job started or finished |
+| `StorageTransferRetryingEvent` | a queue job failed transiently and will run again after a delay |
+| `StorageTransferBlockedEvent` | a queue job needs a person: an untrusted identity or rejected credentials |
+| `StorageTransferNeedsReconciliationEvent` | a queue job left a mixed state that needs checking |
 
 ```csharp
 events.Subscribe<StorageConnectionHealthChangedEvent>(e =>

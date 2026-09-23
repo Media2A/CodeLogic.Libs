@@ -18,7 +18,7 @@ connection cannot do it. Check `Capabilities` first when you need to know in adv
 | `LinkTarget` | FTP listings, local |
 | `Created`, `LastAccessed` | local, SFTP (`LastAccessed`) |
 | `IsHidden` | dot-files; local hidden attribute |
-| `ETag`, `VersionId`, `ContentType`, metadata | object stores, WebDAV |
+| `ETag`, `VersionId`, `ContentType`, metadata | object stores, WebDAV; local files get an ETag from their time and size |
 
 ## Permissions, ownership, timestamps, and links
 

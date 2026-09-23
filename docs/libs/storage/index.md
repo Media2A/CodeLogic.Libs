@@ -16,11 +16,12 @@ This overview covers loading, the mount model, configuration, and the everyday A
 four sub-pages:
 
 - **[Connections](connections.md)** — SFTP authentication, host keys, and jump hosts; FTP/FTPS and
-  WebDAV options; proxies; session pools, retries, and keep-alive; runtime connections; testing
-  settings and diagnosing a live connection.
-- **[Transfers & Sync](transfers.md)** — safe copies and moves between connections, conflict
-  policies, resume and append, progress and speed limits, the transfer queue, compare and sync,
-  watching for changes, and links in transfers.
+  WebDAV options; proxies; session pools shared across registrations, retries, and keep-alive; runtime
+  connections and runtime-only mode; testing settings and diagnosing a live connection.
+- **[Transfers & Sync](transfers.md)** — safe copies and moves with transfer reports, guaranteed and
+  verified transfers, streamed writes, conflict policies, staged resume and append, progress and speed
+  limits, the durable transfer queue, compare and three-way sync with approved plans, watching for
+  changes, and links in transfers.
 - **[Files & Attributes](files.md)** — permissions, ownership, timestamps, links, server-side
   checksums, metadata/tags/versions/signed URLs, raw commands, and free space.
 - **[Errors & Events](errors-events.md)** — the `storage.*` error codes, transient-failure helpers,
@@ -158,12 +159,15 @@ if (files.Capabilities.Supports(StorageFeature.Permissions))
 Optional features return `storage.unsupported` on connections that lack them. Flags include
 `MetadataWrite`, `Tags`, `Versioning`, `SignedReadUrls`, `SignedWriteUrls`, `Permissions`, `Ownership`, `SetTimestamps`,
 `CreateLinks`, `ReadLinks`, `Checksums`, `Append`, `ResumableUpload`, `AtomicMove`, `RawCommands`,
-`SpaceInfo`, and `ChangeNotifications`.
+`SpaceInfo`, `ChangeNotifications`, `ConditionalCreate`, and `CaseInsensitivePaths`.
 
 ## Migration
 
 The legacy `CodeLogic.StorageS3` package accepted a bucket on every operation. `CodeLogic.Storage`
 mounts a bucket/prefix per connection and uses relative paths. This release also renames several
-error codes, adds `ConflictPolicy`, and extends `StorageItem` and `StorageConnectionInfo`. See the
+error codes, adds `ConflictPolicy`, extends `StorageItem` and `StorageConnectionInfo`, returns
+`StorageTransferReport` from copies and moves, replaces `CreateTransferQueue` with
+`OpenTransferQueueAsync`, makes two-way sync without a baseline report conflicts, and shares FTP/SFTP
+session pools between registrations with identical settings. See the
 package [`MIGRATION.md`](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/CL.Storage/MIGRATION.md)
 for every mapping.

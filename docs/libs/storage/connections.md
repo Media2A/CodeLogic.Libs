@@ -71,7 +71,11 @@ See the [overview](index.md) for the configuration sections and the mount model.
 - **Pins**: `TrustedCertificateSha256` pins the whole certificate; `TrustedPublicKeySha256` pins only
   its public key, so it keeps working across renewals that keep the key. Pinned self-signed
   certificates are accepted unless `RequireValidCertificateChain` is set. Without pins, normal
-  validation applies. TLS problems report `storage.tls_failure`.
+  validation applies. TLS problems report `storage.tls_failure` with a `tlsReason` detail (see
+  [Errors & Events](errors-events.md#tls-failures)).
+- **Client certificates** for mutual TLS come from `ClientCertificatePath`, or from
+  `ClientCertificateContent` (the PFX bytes, base64 in JSON) when they live in a secret store;
+  `ClientCertificatePassword` decrypts either.
 - **Active mode** behind NAT: `ActivePortMin`/`ActivePortMax` and `ActiveExternalIp`.
 - **Encodings** such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for file
   names on older servers.
@@ -87,7 +91,8 @@ See the [overview](index.md) for the configuration sections and the mount model.
 `AuthenticationMode` accepts `None`, `Basic` (sent up front, saving a challenge round trip),
 `BearerToken`, `Digest`, `Ntlm`, `Negotiate`, and `Windows` (current user). HTTPS endpoints support
 `TrustedCertificateSha256` and `TrustedPublicKeySha256` pins, `RequireValidCertificateChain`, and a
-PFX `ClientCertificatePath` for mutual TLS. `MaxConnectionsPerServer` caps concurrent connections.
+client certificate for mutual TLS (`ClientCertificatePath`, or the PFX bytes in
+`ClientCertificateContent`). `MaxConnectionsPerServer` caps concurrent connections.
 
 ## Cloud emulators and compatible services
 
@@ -124,7 +129,8 @@ retry transient failures automatically. Both are tuned per connection:
     "IdleLifetimeSeconds": 120,
     "AcquireTimeoutSeconds": 30,
     "ValidateAfterIdleSeconds": 15,
-    "KeepAliveSeconds": 60
+    "KeepAliveSeconds": 60,
+    "LingerSeconds": 0
   },
   "Retry": {
     "RetryCount": 3,
@@ -147,6 +153,20 @@ retry transient failures automatically. Both are tuned per connection:
   never leave a partial file. Deletes and moves retry only with `RetryNonIdempotent`, because the
   first attempt may already have succeeded.
 - Set `RetryCount` to `0` for single-attempt behavior.
+
+### Shared sessions across registrations
+
+Registrations with identical settings share one session pool while they coexist, whatever their ids, so
+`MaxSessions` applies to all of them together. An application that retires idle registrations and adds
+them again under new ids therefore keeps its warm sessions while any registration with those settings is
+alive.
+
+When the last one is removed, its sessions close at once. With `LingerSeconds` (0 to 3600, default 0) they
+stay open that long instead, and a registration added again with the same settings picks them up. Leave
+it at 0 for servers with a strict per-user connection limit, since lingering sessions count against it.
+
+Listing continuation tokens are tied to the settings rather than the registration id too, so paging
+continues after the same settings are registered again under a new id.
 
 ## Runtime connections and native clients
 
@@ -182,6 +202,20 @@ if (opened.IsSuccess)
 ```
 
 Do not dispose reusable clients returned by `GetNativeClient`; dispose session leases.
+
+### Runtime-only mode
+
+Applications that manage connections themselves can run the library without configuration files:
+
+```csharp
+var storage = new StorageLibrary(new StorageLibraryOptions { RuntimeOnly = true });
+// after the CodeLogic lifecycle has started it:
+await storage.AddOrUpdateConnectionAsync("partner", sftpSettings);
+```
+
+No `config.storage*.json` section is registered, read, or written, and no default connection is
+required. `persist` only updates the in-memory copy. Pass library-wide settings as
+`StorageLibraryOptions.Settings`.
 
 ## Testing settings before saving them
 
