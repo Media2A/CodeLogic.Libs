@@ -64,12 +64,23 @@ public sealed class S3CopyLiveTests
         Assert.True((await storage.UploadBytesAsync("large.bin", new byte[7 * MiB])).IsSuccess);
 
         Assert.True((await storage.UploadBytesAsync("empty.bin", [])).IsSuccess);
+        // needs-review A10: copies below the single-request limit are one CopyObject, whose If-None-Match some
+        // servers (MinIO) ignore; the connection reports that honestly, and only there the race is not refused.
+        var singleRequest = await ((CL.Storage.Abstractions.IStorageConditionEnforcementSource)storage)
+            .GetEnforcementAsync(CL.Storage.Abstractions.StorageConditionKind.CreateOnly, serverSideCopy: true, default);
 
         foreach (var source in new[] { "small.bin", "large.bin", "empty.bin" })
         {
             var copied = await storage.CopyAsync(source, "target.bin", new StorageTransferOptions { Overwrite = false });
-            Assert.True(copied.Error?.Code == StorageErrors.ConflictCode, $"{source}: {copied.Error}");
-            Assert.Equal([7, 7, 7], (await storage.DownloadBytesAsync("target.bin")).Value!);
+            if (source == "large.bin" || singleRequest == StorageConditionEnforcement.Atomic)
+            {
+                Assert.True(copied.Error?.Code == StorageErrors.ConflictCode, $"{source}: {copied.Error}");
+                Assert.Equal([7, 7, 7], (await storage.DownloadBytesAsync("target.bin")).Value!);
+            }
+            else
+            {
+                Assert.Equal(StorageConditionEnforcement.CheckedBeforeCommit, singleRequest);
+            }
             Assert.True((await storage.DeleteAsync("target.bin")).IsSuccess);
         }
     }
