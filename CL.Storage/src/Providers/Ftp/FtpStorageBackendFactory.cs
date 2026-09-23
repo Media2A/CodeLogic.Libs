@@ -48,7 +48,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
         };
     }
 
-    private static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
+    internal static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
     {
         var config = new FtpConfig
         {

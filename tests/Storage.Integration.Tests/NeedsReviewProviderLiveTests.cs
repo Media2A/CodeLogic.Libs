@@ -450,4 +450,91 @@ public sealed class NeedsReviewProviderLiveTests
             await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
         }
     }
+
+    private static CL.Storage.Providers.Ftp.FtpStorageBackend FtpWith(Action<FluentFTP.AsyncFtpClient>? configure = null, Func<FluentFTP.AsyncFtpClient, string, Task>? beforeBackupDelete = null)
+    {
+        var config = LiveServers.Ftp();
+        return new CL.Storage.Providers.Ftp.FtpStorageBackend(
+            "live-ftp-hooked",
+            () =>
+            {
+                var client = CL.Storage.Providers.Ftp.FtpStorageBackendFactory.CreateClient(config);
+                configure?.Invoke(client);
+                return client;
+            },
+            config.Root,
+            64L << 20,
+            config.Session,
+            config.Retry,
+            observer: null)
+        {
+            BeforeBackupDelete = beforeBackupDelete
+        };
+    }
+
+    // needs-review A11: an FTP replacement that committed but left its backup reports both
+    [FtpFact]
+    public async Task An_FTP_replace_whose_backup_cannot_be_removed_reports_the_destination_committed_and_the_backup()
+    {
+        await using var storage = FtpWith(beforeBackupDelete: async (client, backup) =>
+        {
+            await client.DeleteFile(backup);
+            await client.CreateDirectory(backup + "/inside", true);
+        });
+        var dir = $"ftpbackup-{Guid.NewGuid():N}";
+        try
+        {
+            await storage.UploadBytesAsync($"{dir}/f.txt", [1]);
+
+            var replaced = await storage.UploadBytesAsync($"{dir}/f.txt", [2]);
+
+            Assert.True(StorageErrorInfo.DestinationCommitted(replaced.Error), replaced.Error?.ToString());
+            Assert.True(StorageErrorInfo.TryGetDetail(replaced.Error, StorageErrorInfo.LeftBehindKey, out var left));
+            Assert.StartsWith($"{dir}/.cl-storage-backup-", left, StringComparison.Ordinal);
+            Assert.Equal([2], (await storage.DownloadBytesAsync($"{dir}/f.txt")).Value!);
+            Assert.IsAssignableFrom<CL.Storage.Providers.IStorageRestoringReplace>(storage);
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
+    // needs-review B62: a hidden name is found without listing its folder, and a staged upload lists nothing
+    [FtpFact]
+    public async Task FTP_hidden_names_are_found_without_listing_the_folder()
+    {
+        var listings = 0;
+        await using var storage = FtpWith(client => client.LegacyLogger = (_, message) =>
+        {
+            if (message.Contains("LIST", StringComparison.Ordinal) || message.Contains("MLSD", StringComparison.Ordinal))
+                Interlocked.Increment(ref listings);
+        });
+        var dir = $"ftphidden-{Guid.NewGuid():N}";
+        try
+        {
+            await storage.UploadBytesAsync($"{dir}/.hidden.txt", [1, 2, 3]);
+            await storage.UploadBytesAsync($"{dir}/visible.txt", [4]);
+            Interlocked.Exchange(ref listings, 0);
+
+            // What a staged transfer does: probe a staging name, write it, and move it over the destination.
+            var staging = $"{dir}/.cl-storage-transfer-{Guid.NewGuid():N}";
+            var missing = await storage.GetInfoAsync(staging);
+            var hidden = await storage.GetInfoAsync($"{dir}/.hidden.txt");
+            var staged = await storage.UploadBytesAsync(staging, [5], new StorageUploadOptions { Overwrite = false });
+            var promoted = await storage.MoveAsync(staging, $"{dir}/visible.txt", new StorageTransferOptions { Overwrite = true });
+
+            Assert.Equal(StorageErrors.NotFoundCode, missing.Error?.Code);
+            Assert.True(hidden.IsSuccess, hidden.Error?.ToString());
+            Assert.Equal(3, hidden.Value!.Size);
+            Assert.True(staged.IsSuccess, staged.Error?.ToString());
+            Assert.True(promoted.IsSuccess, promoted.Error?.ToString());
+            Assert.Equal([5], (await storage.DownloadBytesAsync($"{dir}/visible.txt")).Value!);
+            Assert.Equal(0, listings);
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
 }
