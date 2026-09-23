@@ -14,6 +14,20 @@ public sealed class ProxyTheoryAttribute : TheoryAttribute
         if (LiveServers.Env("CL_STORAGE_TEST_PROXY_HOST") is null)
             Skip = "Set CL_STORAGE_TEST_PROXY_HOST (and start the compose proxy) to run proxy tests.";
     }
+
+    /// <summary>A further variable the provider behind the proxy needs; the test skips without it.</summary>
+    public string? Requires
+    {
+        get => _requires;
+        init
+        {
+            _requires = value;
+            if (Skip is null && value is not null && LiveServers.Env(value) is null)
+                Skip = $"Set {value} to run this proxy test.";
+        }
+    }
+
+    private readonly string? _requires;
 }
 
 /// <summary>
@@ -92,7 +106,7 @@ public sealed class ProxyLiveTests
         await WriteReadDeleteAsync(storage);
     }
 
-    [ProxyTheory]
+    [ProxyTheory(Requires = "CL_STORAGE_TEST_S3_URL")]
     [MemberData(nameof(ProxyTypes))]
     public async Task S3_through_proxy(StorageProxyType type)
     {
@@ -105,7 +119,7 @@ public sealed class ProxyLiveTests
         await WriteReadDeleteAsync(storage);
     }
 
-    [ProxyTheory]
+    [ProxyTheory(Requires = "CL_STORAGE_TEST_AZURE_CONNECTION_STRING")]
     [MemberData(nameof(ProxyTypes))]
     public async Task Azure_through_proxy(StorageProxyType type)
     {
@@ -122,7 +136,7 @@ public sealed class ProxyLiveTests
         await WriteReadDeleteAsync(storage);
     }
 
-    [ProxyTheory]
+    [ProxyTheory(Requires = "CL_STORAGE_TEST_GCS_URL")]
     [MemberData(nameof(ProxyTypes))]
     public async Task Gcs_through_proxy(StorageProxyType type)
     {
@@ -143,7 +157,7 @@ public sealed class ProxyLiveTests
         await WriteReadDeleteAsync(storage);
     }
 
-    [ProxyTheory]
+    [ProxyTheory(Requires = "CL_STORAGE_TEST_SWIFT_AUTH_URL")]
     [MemberData(nameof(ProxyTypes))]
     public async Task Swift_through_proxy(StorageProxyType type)
     {
