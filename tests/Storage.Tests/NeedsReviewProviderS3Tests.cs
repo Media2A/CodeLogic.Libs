@@ -398,4 +398,27 @@ public sealed class NeedsReviewProviderS3Tests
         Assert.Equal(StorageErrors.UnsupportedCode, secret.Error?.Code);
         Assert.True(plain.IsSuccess);
     }
+
+    // needs-review (coordinator, implicit folders): a folder marker ending a page does not bring its folder back on the next
+    [Fact]
+    public async Task A_folder_marker_that_ends_a_page_is_reported_once()
+    {
+        var fake = ProviderFakeS3.Create();
+        fake.Put("a/b/", []);
+        fake.Put("a/b/c.txt", [1]);
+        fake.Put("a/d.txt", [2]);
+        await using var backend = Backend(fake);
+
+        var paths = new List<string>();
+        string? token = null;
+        do
+        {
+            var page = await backend.ListAsync("", new StorageListOptions { Recursive = true, PageSize = 1, ContinuationToken = token });
+            Assert.True(page.IsSuccess, page.Error?.ToString());
+            paths.AddRange(page.Value!.Items.Select(item => item.Path));
+            token = page.Value.ContinuationToken;
+        } while (token is not null);
+
+        Assert.Equal(["a", "a/b", "a/b/c.txt", "a/d.txt"], paths.Order(StringComparer.Ordinal));
+    }
 }

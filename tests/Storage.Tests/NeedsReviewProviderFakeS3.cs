@@ -294,8 +294,17 @@ public class ProviderFakeS3 : DispatchProxy
         var prefix = request.Prefix ?? "";
         var keys = Objects.Keys.Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).OrderBy(key => key, StringComparer.Ordinal).ToList();
         var response = new ListObjectsV2Response { S3Objects = [], CommonPrefixes = [] };
-        foreach (var key in keys)
+        var skip = int.TryParse(request.ContinuationToken, out var start) ? start : 0;
+        var taken = 0;
+        foreach (var key in keys.Skip(skip))
         {
+            if (request.MaxKeys is > 0 and var max && taken == max)
+            {
+                response.NextContinuationToken = (skip + taken).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                response.IsTruncated = true;
+                break;
+            }
+            taken++;
             var rest = key[prefix.Length..];
             if (request.Delimiter == "/" && rest.IndexOf('/') is var slash and >= 0)
             {

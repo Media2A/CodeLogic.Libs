@@ -177,9 +177,11 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                 nativeToken,
                 cancellationToken).ConfigureAwait(false);
             if (page.IsFailure) return Result<StoragePage>.Failure(page.Error!);
+            var keys = new Dictionary<string, string>(StringComparer.Ordinal);
             var items = page.Value!.Items.Select(item =>
             {
                 var providerPath = item.Subdirectory ?? item.Name!;
+                keys[FromKey(providerPath).TrimEnd('/')] = FromKey(providerPath);
                 var relative = FromKey(providerPath).TrimEnd('/');
                 return relative.Length == 0
                     ? null
@@ -202,7 +204,8 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                 foreach (var item in items)
                 {
                     ImplicitDirectories.AddParents(withFolders, item.Path, normalized.Value!, previous, DirectoryItem);
-                    previous = item.Path;
+                    // The key itself, so a folder marker ("a/b/") that ends a page still covers "a/b" on the next.
+                    previous = keys.GetValueOrDefault(item.Path, item.Path);
                     withFolders.Add(item);
                 }
                 items = [.. withFolders.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())

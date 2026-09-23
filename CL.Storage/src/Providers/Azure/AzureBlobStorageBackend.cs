@@ -164,10 +164,12 @@ public sealed class AzureBlobStorageBackend :
                     cancellationToken).AsPages(nativeToken, options.PageSize).ConfigureAwait(false))
                 {
                     var items = new List<StorageItem>();
-                    foreach (var item in page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>())
+                    foreach (var blob in page.Values)
                     {
+                        if (ToItem(blob) is not { } item) continue;
                         ImplicitDirectories.AddParents(items, item.Path, normalized.Value!, previous, DirectoryItem);
-                        previous = item.Path;
+                        // The key itself, so a folder marker ("a/b/") that ends a page still covers "a/b" on the next.
+                        previous = FromKey(blob.Name);
                         items.Add(item);
                     }
                     var unique = items.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())

@@ -223,7 +223,8 @@ public sealed class S3StorageBackend :
                 if (options.Recursive)
                 {
                     ImplicitDirectories.AddParents(items, relative, normalized.Value!, previous, DirectoryItem);
-                    previous = relative.TrimEnd('/');
+                    // The key itself, so a folder marker ("a/b/") that ends a page still covers "a/b" on the next.
+                    previous = relative;
                 }
                 if (relative.EndsWith('/'))
                     items.Add(DirectoryItem(relative.TrimEnd('/')));

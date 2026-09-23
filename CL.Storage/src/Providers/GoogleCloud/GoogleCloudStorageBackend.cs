@@ -195,7 +195,8 @@ public sealed class GoogleCloudStorageBackend :
                     var parents = new List<StorageItem>();
                     ImplicitDirectories.AddParents(parents, pathValue, listingPath, previous, DirectoryItem);
                     foreach (var parent in parents) items[parent.Path] = parent;
-                    previous = pathValue.TrimEnd('/');
+                    // The key itself, so a folder marker ("a/b/") that ends a page still covers "a/b" on the next.
+                    previous = pathValue;
                     if (pathValue.EndsWith('/')) items[pathValue.TrimEnd('/')] = DirectoryItem(pathValue.TrimEnd('/'));
                     else items[pathValue] = ToItem(pathValue, item);
                 }
