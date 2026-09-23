@@ -35,7 +35,9 @@ public enum StorageSkipReason
     /// <summary><see cref="StorageConflictPolicy.OverwriteIfNewerOrSizeDiffers"/>: neither newer nor a different size.</summary>
     Unchanged = 3,
     /// <summary><see cref="StorageConflictPolicy.Resume"/>: the destination is already complete.</summary>
-    AlreadyComplete = 4
+    AlreadyComplete = 4,
+    /// <summary><see cref="StorageLinkHandling.Skip"/>: the source is a link, which stays where it is (also on a move).</summary>
+    Link = 5
 }
 
 /// <summary>How firmly a destination condition (create-new, or replace-only-this-version) was enforced.</summary>
@@ -135,5 +137,7 @@ public sealed record StorageTransferReport
 
     /// <summary>Converts the report to a plain result.</summary>
     /// <returns>Success, or the report's error.</returns>
-    public Result ToResult() => IsSuccess ? Result.Success() : Result.Failure(Error!);
+    public Result ToResult() => IsSuccess
+        ? Result.Success()
+        : Result.Failure(Error ?? Errors.StorageErrors.ProviderError($"The transfer ended {Outcome}."));
 }
