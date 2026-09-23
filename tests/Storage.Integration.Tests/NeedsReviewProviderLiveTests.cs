@@ -113,16 +113,16 @@ public sealed class NeedsReviewProviderLiveTests
     // needs-review A2 / B23 (contract C2) on Azure Blob and Google Cloud Storage
     [AzureFact]
     public async Task An_Azure_copy_pinned_to_an_old_ETag_is_refused_and_a_move_keeps_nothing_behind() =>
-        await PinnedCopyAndMoveAsync(await CloudEmulators.CreateAsync(CloudEmulators.Azure()));
+        await PinnedCopyAndMoveAsync(await CloudEmulators.CreateAsync(CloudEmulators.Azure()), disposeAfter: true);
 
     // needs-review A2 / B23 (contract C2)
     [GcsFact]
     public async Task A_GCS_copy_pinned_to_an_old_ETag_is_refused_and_a_move_keeps_nothing_behind() =>
-        await PinnedCopyAndMoveAsync(await CloudEmulators.CreateAsync(CloudEmulators.Gcs()));
+        await PinnedCopyAndMoveAsync(await CloudEmulators.CreateAsync(CloudEmulators.Gcs()), disposeAfter: true);
 
-    private static async Task PinnedCopyAndMoveAsync(IStorageBackend backend)
+    private static async Task PinnedCopyAndMoveAsync(IStorageBackend storage, bool destinationConditions = true, bool disposeAfter = false)
     {
-        await using var storage = backend;
+        await using var owned = disposeAfter ? storage : null;
         var dir = $"pin-{Guid.NewGuid():N}";
         var first = (await storage.UploadBytesAsync($"{dir}/a.txt", Encoding.UTF8.GetBytes("one"))).Value!;
         var second = (await storage.UploadBytesAsync($"{dir}/a.txt", Encoding.UTF8.GetBytes("two"))).Value!;
@@ -138,7 +138,7 @@ public sealed class NeedsReviewProviderLiveTests
 
             Assert.Equal(StorageErrors.ConflictCode, stale.Error?.Code);
             Assert.False((await storage.ExistsAsync($"{dir}/b.txt")).Value);
-            Assert.Equal(StorageErrors.ConflictCode, wrongDestination.Error?.Code);
+            Assert.Equal(destinationConditions ? StorageErrors.ConflictCode : StorageErrors.UnsupportedCode, wrongDestination.Error?.Code);
             Assert.Equal("other", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/other.txt")).Value!));
             Assert.True(moved.IsSuccess, moved.Error?.ToString());
             Assert.False((await storage.ExistsAsync($"{dir}/a.txt")).Value);
@@ -148,5 +148,144 @@ public sealed class NeedsReviewProviderLiveTests
         {
             await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
         }
+    }
+
+    // needs-review A26 (acceptance R3-9): Swift ignores If-Match on PUT, so the library must check it
+    [SwiftFact]
+    public async Task R3_9_a_Swift_upload_with_a_wrong_If_Match_is_refused_and_the_file_kept()
+    {
+        await using var live = await LiveLibrary.StartAsync(("swift", CloudEmulators.Swift()));
+        var swift = live.Library.GetStorage("swift");
+        var name = $"accept-{Guid.NewGuid():N}.txt";
+        try
+        {
+            var first = await swift.UploadBytesAsync(name, Encoding.UTF8.GetBytes("original"));
+            await using var replacement = new MemoryStream(Encoding.UTF8.GetBytes("replacement"));
+            var conditional = await swift.UploadAsync(name, replacement, new StorageUploadOptions
+            {
+                Condition = new StorageMutationCondition { ExpectedETag = "\"00000000000000000000000000000000\"" }
+            });
+            var now = await swift.DownloadBytesAsync(name);
+
+            Assert.True(first.IsSuccess, first.Error?.ToString());
+            Assert.True(conditional.IsFailure);
+            Assert.Equal(StorageErrors.ConflictCode, conditional.Error!.Code);
+            Assert.Equal("original", Encoding.UTF8.GetString(now.Value!));
+            Assert.False(swift.Capabilities.Supports(StorageFeature.ConditionalUpdate));
+            Assert.False(swift.Capabilities.Supports(StorageFeature.ConditionalDelete));
+        }
+        finally
+        {
+            await swift.DeleteAsync(name, new StorageDeleteOptions { IgnoreMissing = true });
+        }
+    }
+
+    // needs-review A26: the backend's own upload checks the condition too
+    [SwiftFact]
+    public async Task A_Swift_upload_with_a_condition_is_checked_by_the_backend_itself()
+    {
+        await using var storage = await CloudEmulators.CreateAsync(CloudEmulators.Swift());
+        var name = $"cond-{Guid.NewGuid():N}.txt";
+        var first = (await storage.UploadBytesAsync(name, Encoding.UTF8.GetBytes("original"))).Value!;
+        try
+        {
+            var wrong = await storage.UploadBytesAsync(name, Encoding.UTF8.GetBytes("x"), new StorageUploadOptions
+            {
+                Condition = new StorageMutationCondition { ExpectedETag = "0123" },
+                PipelineApplied = true
+            });
+            var right = await storage.UploadBytesAsync(name, Encoding.UTF8.GetBytes("y"), new StorageUploadOptions
+            {
+                Condition = new StorageMutationCondition { ExpectedETag = first.ETag },
+                PipelineApplied = true
+            });
+
+            Assert.Equal(StorageErrors.ConflictCode, wrong.Error?.Code);
+            Assert.True(right.IsSuccess, right.Error?.ToString());
+            Assert.Equal("y", Encoding.UTF8.GetString((await storage.DownloadBytesAsync(name)).Value!));
+        }
+        finally
+        {
+            await storage.DeleteAsync(name, new StorageDeleteOptions { IgnoreMissing = true });
+        }
+    }
+
+    // needs-review A2 (contract C2), and a create-only COPY that used to fail with 304
+    [SwiftFact]
+    public async Task A_Swift_copy_is_pinned_to_the_source_read_and_a_create_only_copy_works()
+    {
+        await using var storage = await CloudEmulators.CreateAsync(CloudEmulators.Swift());
+        var enforcement = (IStorageConditionEnforcementSource)storage;
+        await PinnedCopyAndMoveAsync(storage, destinationConditions: false);
+        var dir = $"create-{Guid.NewGuid():N}";
+        await storage.UploadBytesAsync($"{dir}/a.txt", [1]);
+        try
+        {
+            var created = await storage.CopyAsync($"{dir}/a.txt", $"{dir}/b.txt", new StorageTransferOptions { Overwrite = false });
+            var again = await storage.CopyAsync($"{dir}/a.txt", $"{dir}/b.txt", new StorageTransferOptions { Overwrite = false });
+
+            Assert.True(created.IsSuccess, created.Error?.ToString());
+            Assert.Equal(StorageErrors.ConflictCode, again.Error?.Code);
+            Assert.Equal(StorageConditionEnforcement.CheckedBeforeCommit, await enforcement.GetEnforcementAsync(StorageConditionKind.CreateOnly, true, default));
+            Assert.Equal(StorageConditionEnforcement.Atomic, await enforcement.GetEnforcementAsync(StorageConditionKind.CreateOnly, false, default));
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
+
+    // needs-review B19: versioned Swift containers: items carry VersionId, so reads by version must work
+    [SwiftFact]
+    public async Task A_versioned_Swift_container_serves_sync_copies_and_cross_connection_moves()
+    {
+        var container = "cl-test-versioned";
+        await EnableSwiftVersioningAsync(container);
+        var local = Path.Combine(Path.GetTempPath(), "cl-storage-live", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(local);
+        await using var live = await LiveLibrary.StartAsync(
+            ("swift", CloudEmulators.Swift(c => c.Container = container)),
+            ("local", new LocalConnectionConfig { RootPath = local }));
+        var swift = live.Library.GetStorage("swift");
+        var dir = $"versioned-{Guid.NewGuid():N}";
+        try
+        {
+            await swift.UploadBytesAsync($"{dir}/a.txt", Encoding.UTF8.GetBytes("one"));
+            var second = (await swift.UploadBytesAsync($"{dir}/a.txt", Encoding.UTF8.GetBytes("two"))).Value!;
+            await swift.UploadBytesAsync($"{dir}/b.txt", Encoding.UTF8.GetBytes("bee"));
+            Assert.NotNull(second.VersionId);
+
+            var synced = await live.Library.SyncAsync("swift", dir, "local", "synced", new CL.Storage.Sync.StorageSyncOptions { Direction = CL.Storage.Sync.StorageSyncDirection.Update });
+            var moved = await live.Library.MoveAsync("swift", $"{dir}/b.txt", "local", "moved/b.txt");
+            var old = await swift.DownloadBytesAsync($"{dir}/a.txt", new StorageDownloadOptions { VersionId = second.VersionId });
+
+            Assert.True(synced.IsSuccess, synced.Error?.ToString());
+            Assert.Empty(synced.Value!.Failed);
+            Assert.Equal("two", File.ReadAllText(Path.Combine(local, "synced", "a.txt")));
+            Assert.Equal(StorageTransferOutcome.Completed, moved.Outcome);
+            Assert.Equal("bee", File.ReadAllText(Path.Combine(local, "moved", "b.txt")));
+            Assert.Equal("two", Encoding.UTF8.GetString(old.Value!));
+        }
+        finally
+        {
+            await swift.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+            try { Directory.Delete(local, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static async Task EnableSwiftVersioningAsync(string container)
+    {
+        var config = CloudEmulators.Swift();
+        using var http = new HttpClient();
+        using var auth = new HttpRequestMessage(HttpMethod.Get, config.AuthenticationUrl);
+        auth.Headers.Add("X-Auth-User", config.Username);
+        auth.Headers.Add("X-Auth-Key", config.Password);
+        using var authResponse = await http.SendAsync(auth);
+        authResponse.EnsureSuccessStatusCode();
+        using var put = new HttpRequestMessage(HttpMethod.Put, $"{authResponse.Headers.GetValues("X-Storage-Url").First().TrimEnd('/')}/{container}");
+        put.Headers.Add("X-Auth-Token", authResponse.Headers.GetValues("X-Auth-Token").First());
+        put.Headers.Add("X-Versions-Enabled", "true");
+        using var response = await http.SendAsync(put);
+        response.EnsureSuccessStatusCode();
     }
 }
