@@ -27,7 +27,8 @@ as on a `Result`. The report says what happened:
 - `Completed`;
 - `Skipped`, with a `SkipReason`;
 - `Failed`, when nothing was committed;
-- `NeedsReconciliation`, when the transfer left a mixed state.
+- `NeedsReconciliation`, when the transfer left a mixed state;
+- `Cancelled`, when the caller cancelled before anything was committed.
 
 For a single file it also gives:
 
@@ -82,17 +83,29 @@ var report = await storage.CopyAsync("sftp", "in/report.pdf", "s3", "archive/rep
   and digest are checked there.
 - **Verification.** A verified copy is confirmed on the destination before it is promoted: by the
   server's SHA-256 where the server keeps one, otherwise by reading it back. `VerifiedBy` says which.
+  After promotion the destination is confirmed again by its length and, where the server keeps one,
+  its SHA-256.
 - **Destination condition.** `DestinationCondition` is checked before the copy starts and again just
   before promotion. `ConditionEnforcement` reports how it was enforced:
   - `Atomic` when the provider enforces it in the same operation. This is the create-new case:
-    `Overwrite = false` on a connection with `ConditionalCreate`.
+    `Overwrite = false` on a connection with `ConditionalCreate`. On S3 the promote completes a
+    part-by-part copy with `If-None-Match`, which S3 and MinIO enforce.
   - `CheckedBeforeCommit` otherwise.
+
+  When the condition fails at promotion, the destination is left exactly as the other writer left it.
+- **Pinned version.** `SourceVersionId` reads that version, and its length, ETag, and a move's source
+  deletion refer to it. Moving an older version does not delete the source, because the current object
+  is another version (`NeedsReconciliation`).
 - **Pinned source.** A source pinned by ETag is read again after streaming. If it changed in between,
   the transfer fails with `storage.conflict` and nothing is committed.
 - **Moves.** A move deletes its source only while it is still the version that was copied, using a
   conditional delete where the provider has one. Otherwise the report is `NeedsReconciliation` with
   `SourceDeleted = false`.
-- **Local files** carry an ETag (last-write time and size), so conditions work on them too.
+- **Local files** carry an ETag (last-write time and size), so conditions work on them too, checked right
+  before the file is replaced.
+- **Cancellation** is reported, not thrown: the report's `Outcome` is `Cancelled` (error
+  `storage.cancelled`), staging and backup objects are removed, and a resumable transfer's `ResumeToken`
+  continues it.
 
 `StorageUploadOptions` has the matching `ExpectedLength`, `Verify`, and `ExpectedSha256` for uploads.
 
@@ -108,6 +121,9 @@ Result<StorageItem> committed = await writer.CommitAsync(); // or AbortAsync(); 
 ```
 
 The content is staged and checked like any other upload, and the destination appears only on commit.
+With `Verify`, the committed item carries the content's `Sha256`, as verified uploads do. Disposing
+without committing aborts without waiting; `DisposeAsync` and `AbortAsync` wait until the staging object
+is gone.
 
 ## When the destination already exists
 
@@ -149,14 +165,19 @@ destination is replaced only once that object is complete, so it is never half-w
 
 - **Continuing after a failure.** The staged bytes stay when an attempt fails. The next attempt reads
   only the missing tail and appends it (FTP `APPE`, SFTP append, local files), provided it has the same
-  destination and the same source. The source is identified by length, modification time, ETag, or
-  version.
-- **Seekable uploads.** Uploads need a seekable stream and use `SourceLastModified` as part of the
-  source's identity. Copies and moves identify the source themselves.
-- **Across restarts.** A failed copy's report carries a `ResumeToken`. Store it and pass it back in
-  `StorageTransferOptions.ResumeToken`; this works from another process after a restart too.
+  destination and the same source.
+- **The same source only.** Staged bytes are keyed by the source's identity, so a different source of the
+  same length never continues them. Uploads need a seekable stream and `SourceIdentity` (a stable name for
+  the content) or `SourceLastModified`; `UploadFileAsync` sets both. Copies and moves identify the source
+  by its ETag, time, or version, and do not resume a source that has none of them.
+- **Across restarts.** A failed or cancelled copy's report carries a `ResumeToken`. Store it and pass it
+  back in `StorageTransferOptions.ResumeToken`; this works from another process after a restart too. A
+  token is followed only for exactly the same source.
+- **Integrity.** With `Verify`, the part staged earlier is read again from the source and must match
+  before the rest is appended, so the digest covers the whole file.
+- **Already complete.** A destination counts as complete only when both sides report the same digest; an
+  equal size is not enough. A resumed move whose destination is complete deletes its source.
 - **Object stores** cannot append, so the staging object is rewritten from the start.
-- **Integrity.** Combine with `Verify` to hash the whole file, including the part staged earlier.
 
 ```csharp
 await files.UploadFileAsync("big/image.iso", @"D:\image.iso",
@@ -237,9 +258,14 @@ await queue.WaitForIdleAsync();
 
 **A durable, shared store.** `IStorageTransferJobStore` holds every job; it is in memory by default.
 
-- A worker claims a job with a lease that carries a fencing token, and renews the lease while it runs.
+- Every record has a `Revision`, and saves are compare-and-swap on it: a stale copy never overwrites a
+  newer state, so a job finished in another process cannot be re-queued here.
+- A worker claims a job at the revision it read, with a lease that carries a fencing token, and renews the
+  lease while it runs. The store owns the lease fields.
 - A save with a stale lease is refused, so a worker that lost its lease never records an outcome.
 - As a result, two processes never run the same job.
+- A failing store does not wedge the queue: a failed claim is tried again a moment later, renewals are
+  retried while the lease holds, and a job whose outcome could not be recorded is recovered later.
 
 **Restarts.** A transfer records its phase as it goes. When a new process finds a job that was running
 in an earlier one:
@@ -247,6 +273,10 @@ in an earlier one:
 - if the destination was never touched, the job goes straight back to the queue, and a resumable
   transfer continues from its staged bytes;
 - otherwise the job becomes `Interrupted`, for a person to decide.
+
+A process restarted with the same `WorkerId` takes back its own leases at once, so give every running
+queue its own `WorkerId`. A transfer that succeeded is recorded `Completed` even if it was being paused,
+cancelled, or shut down as it finished.
 
 **States.**
 
@@ -265,15 +295,16 @@ Only transient failures are retried, with exponential backoff and jitter that ho
 
 - Pause or resume the whole queue with `Pause`/`Resume`, or one job with `PauseJobAsync`/`ResumeJobAsync`.
   A running resumable transfer keeps its staged data while paused.
-- `CancelAsync`, `RetryAsync`, and `RemoveAsync` act on one job.
-- Priorities are integers, higher first. Change them with `SetPriorityAsync`, or reorder with
+- `CancelAsync`, `RetryAsync`, and `RemoveAsync` act on one job. `RetryAsync` also resets `Attempts`, so
+  backoff starts from the base delay again.
+- Priorities are integers, higher first. Change a waiting job's with `SetPriorityAsync`, or reorder with
   `MoveUpAsync`/`MoveDownAsync`.
 
 **History and events.**
 
 - `MaxFinishedJobs` caps history, and `ClearAsync(states)` clears jobs by state.
 - Progress events are throttled by `ProgressInterval`.
-- `EventContext` raises `JobChanged`/`ProgressChanged` on a UI thread.
+- `EventContext` raises `JobChanged`, `ProgressChanged`, and `JobRemoved` on a UI thread.
 - The event bus receives started, completed, failed, cancelled, retrying, blocked, and
   needs-reconciliation events.
 
@@ -312,21 +343,30 @@ var report = await storage.ApplySyncAsync("sftp", "site", "s3", "backup/site", p
 
 | Direction | Behavior |
 |---|---|
-| `Update` (default) | copy new and changed files; never delete; never replace a newer destination of the same size |
-| `Mirror` | make the destination match the source; delete extra items with `DeleteExtraneous` |
-| `TwoWay` | change both sides (see below) |
+| `Update` (default) | copy new and changed files; never delete; never replace a newer destination with an older source |
+| `Mirror` | make the destination match the source; delete extra items with `DeleteExtraneous`; leave a newer destination alone |
+| `TwoWay` | change both sides, folders included (see below) |
 
 With a baseline (`StateStore` + `SyncId`), `TwoWay` is a three-way sync. An edit or deletion on one side
 is carried to the other (`PropagateDeletes`). Changes on both sides are conflicts: `BothModified`,
-`BothCreated`, or `DeleteVersusModify`. Without a baseline, missing files are copied and files that
+`BothCreated`, or `DeleteVersusModify`. A folder removed on one side is removed on the other only once
+everything inside it goes too. Without a baseline, missing files and folders are copied and files that
 differ are conflicts.
+
+- A path that is a file on one side and a folder on the other is left alone, with everything below it.
+- Where one side ignores case, a name spelled differently on each side (`Readme.TXT` / `readme.txt`) is
+  one item, and each side keeps its own spelling.
+- The baseline saved after a run records the versions both sides agreed on when the plan was made and the
+  versions the run itself wrote, never a listing taken afterwards. A file edited during or just after a run
+  is still seen as changed next time, and a step that did not complete is tried again. Neither side having
+  changed while their content differs is a conflict, not "in sync".
 
 ### Conflict policies
 
 | Policy | Behavior |
 |---|---|
 | `Block` (default) | plan the conflict; the plan cannot be applied until it is resolved, unless `ApplyWithConflicts` is set |
-| `KeepBoth` | the source's version keeps the name; the destination's version is kept on both sides as `name (conflict xxxxxxxx).ext` |
+| `KeepBoth` | the source's version keeps the name; the destination's version is kept on both sides as `name (conflict xxxxxxxx).ext` (`… 2`, `… 3` when that name is taken) |
 | `NewerWins` | the newer side wins; a modification beats a deletion |
 
 ### Plan, then apply
@@ -348,8 +388,9 @@ Deletions are withheld, and listed in `plan.Warnings` and `report.Withheld`, whe
   `AllowEmptySide` is set);
 - any other step failed in the same run.
 
-A listing that fails part-way fails the plan. A folder is deleted as a whole only when the filters
-excluded nothing inside it; otherwise only its included items are deleted.
+A listing that fails part-way fails the plan. Folders are never deleted recursively: their files are
+deleted one by one, each checked at apply time, and then the emptied folders. A folder that gained items
+after the plan, or holds items the filters left out, is kept.
 
 ### Copies and comparison
 
@@ -384,7 +425,8 @@ await foreach (var change in files.WatchAsync("incoming", cancellationToken: sto
 Local connections use native file-system notifications, including renames; this also works for
 connections from `GetStorage()`. If notifications arrive faster than they can be buffered, a
 `StorageChangeKind.Overflow` change for the watched directory is reported, and the caller should list
-it again.
+it again. If native watching stops for good (the folder was removed, a network share dropped), `Overflow`
+is reported and watching continues by polling.
 
 Every other provider is polled. The directory is listed every `StorageWatchOptions.PollInterval`
 (30 s by default) and compared by type, size, time, and ETag, so a rename appears as a delete plus a
@@ -397,7 +439,8 @@ Polling a large remote tree is cheaper with `Incremental = true`:
   (entries were added, removed, or renamed in them). The previous listing is reused for the rest.
 - Every `FullRescanEvery` polls (10 by default), the whole tree is listed again. This catches edits to
   existing files, and changes deep inside folders whose own time did not change.
-- Providers without folder times (object stores) always list everything.
+- Where folders have no times (object stores), listing folder by folder would cost more than one
+  recursive listing, so every poll lists everything there.
 
 ```csharp
 var options = new StorageWatchOptions { Recursive = true, Incremental = true, FullRescanEvery = 20 };

@@ -27,6 +27,7 @@ as `OperationCanceledException`. Every provider maps its own failures to the sam
 | `storage.timeout` | the operation timed out | read/connect timeouts |
 | `storage.unavailable` | the service is unavailable | provider outages |
 | `storage.partial_failure` | a multi-step operation stopped halfway | restore, staging cleanup, or move-source deletion failed |
+| `storage.cancelled` | the caller cancelled, reported where a report says what was left | a cancelled `CopyAsync`/`MoveAsync` (`Outcome = Cancelled`) |
 | `storage.provider_error` | anything not classified above | carries the exception type (never its message) |
 
 `StorageErrorInfo` (namespace `CL.Storage.Errors`) helps act on them:
@@ -58,6 +59,13 @@ so a transient error you receive has already been retried.
 | `client_certificate_rejected` | the server refused the client certificate: a credential problem | — |
 | `protocol_mismatch` | no TLS version or cipher in common | — |
 | `handshake_failed` | anything else during the handshake | — |
+
+The reason comes from the platform's own TLS stack: SChannel status codes on Windows (matched by code,
+since Windows localizes the messages) and OpenSSL alerts on Linux. A TLS 1.3 server refuses a client
+certificate only after the handshake, which Windows reports as a dropped connection; when the server
+asked for a client certificate during that attempt, the failure is still reported as
+`client_certificate_rejected`. FTP and WebDAV add the presented certificate; S3, Azure, Google Cloud, and
+Swift report the reason only.
 
 ```csharp
 if (StorageErrorInfo.TryGetDetail(result.Error, StorageErrorInfo.TlsReasonKey, out var reason)

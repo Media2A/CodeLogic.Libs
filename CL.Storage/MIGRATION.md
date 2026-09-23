@@ -178,9 +178,46 @@ as before. Handle the new states `Paused`, `Blocked`, `NeedsReconciliation`, and
 - Two-way sync without a baseline now reports differing files as conflicts and, with the default
   `ConflictPolicy = Block`, refuses to apply the plan. Set `ConflictPolicy = NewerWins` for the previous
   newer-wins behaviour, or add `StateStore` and `SyncId` for a real three-way sync.
-- Read step outcomes from `report.Results` (each has `Outcome` and `Error`); `report.Failed`, `Copied`,
-  and `Deleted` still work. Deletions a safety rule held back are in `report.Withheld`.
+- Read step outcomes from `report.Results` (each has `Outcome` and `Error`). `report.Failed` is now a list
+  of `StorageSyncActionResult` (the action is in `.Action`, the error in `.Error`) instead of actions with
+  an `Error`. `Copied` and `Deleted` still work; deletions a safety rule held back are in `report.Withheld`.
 - Construct `StorageSyncAction` with named properties if you build them yourself.
+- `StorageSyncActionKind` values stored as integers keep their meaning: 0–3 are as before
+  (`CopyToDestination`, `CopyToSource`, `DeleteFromDestination`, `CreateDirectory`), and the new kinds are
+  numbered after them. Kinds are only ever added at the end.
+- `Mirror` with `DeleteExtraneous` now deletes an extra folder's files one by one and then the emptied
+  folders, so `report.Deleted` counts each of them; a folder that gained files after planning is kept.
+- `Update` and `Mirror` leave a newer destination alone even when its size differs (it used to be
+  replaced); the plan warns about it.
+- `StorageCompareOptions.LinkHandling = Recreate` is refused by sync and compare; use `Skip` or `Follow`.
+
+### Cancellation, resume, and verification (2026-09-23)
+
+- `StorageLibrary.CopyAsync` and `MoveAsync` no longer throw `OperationCanceledException`: check
+  `report.Outcome == StorageTransferOutcome.Cancelled` (error code `storage.cancelled`). A cancelled
+  resumable transfer carries its `ResumeToken`. Exhaustive switches over `StorageTransferOutcome` need the
+  new case.
+- Resuming an upload needs a source identity: set `SourceIdentity` (any stable name for the content, such
+  as a path or content id) or `SourceLastModified`. `UploadFileAsync` sets both for you.
+- `StorageWriteStream.Dispose()` returns at once; await `DisposeAsync()` or `AbortAsync()` when you need
+  the staging object to be gone before continuing.
+- Local uploads with a `Condition` now succeed or fail with `storage.conflict` instead of returning
+  `storage.unsupported`.
+
+### Transfer queue stores (2026-09-23)
+
+Custom `IStorageTransferJobStore` implementations follow the new contract:
+
+| Before | Now |
+|---|---|
+| `AddAsync` returns `bool` | returns the stored record (revision 1), or null when the id exists |
+| `TryClaimAsync(jobId, workerId, duration)` | `TryClaimAsync(jobId, workerId, expectedRevision, duration)`; refuses a changed job; the same worker may reclaim its own live lease |
+| `SaveAsync(record, lease)` returns `bool` | `SaveAsync(record, lease, releaseLease)` returns the stored record at the next revision, or null; refuses a record whose `Revision` is not the stored one |
+| lease fields in saved records were honoured | `LeaseOwner`, `LeaseExpiresAt`, and `FencingToken` belong to the store and are ignored on save |
+
+Store `Revision` and `SchemaVersion` with each record. `JobRemoved` now reports removals (previously a
+`JobChanged` with `Cancelled`), `SetPriorityAsync` works on waiting jobs only, and `RetryAsync` resets
+`Attempts`.
 
 ### Shared sessions (2026-09-23)
 

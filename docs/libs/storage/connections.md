@@ -75,7 +75,9 @@ See the [overview](index.md) for the configuration sections and the mount model.
   [Errors & Events](errors-events.md#tls-failures)).
 - **Client certificates** for mutual TLS come from `ClientCertificatePath`, or from
   `ClientCertificateContent` (the PFX bytes, base64 in JSON) when they live in a secret store;
-  `ClientCertificatePassword` decrypts either.
+  `ClientCertificatePassword` decrypts either. The certificate is loaded once per connection and disposed
+  with it. On Linux and macOS its key stays in memory; on Windows, SChannel can only use a key in a key
+  container, so it is imported into a temporary one that is deleted when the connection closes.
 - **Active mode** behind NAT: `ActivePortMin`/`ActivePortMax` and `ActiveExternalIp`.
 - **Encodings** such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for file
   names on older servers.
@@ -164,9 +166,12 @@ alive.
 When the last one is removed, its sessions close at once. With `LingerSeconds` (0 to 3600, default 0) they
 stay open that long instead, and a registration added again with the same settings picks them up. Leave
 it at 0 for servers with a strict per-user connection limit, since lingering sessions count against it.
+Idle pools are closed when the library stops.
 
 Listing continuation tokens are tied to the settings rather than the registration id too, so paging
-continues after the same settings are registered again under a new id.
+continues after the same settings are registered again under a new id. A token refers to a listing
+snapshot kept in the process for five minutes after its last use; after that, or in another process, the
+listing is walked again from where the token points.
 
 ## Runtime connections and native clients
 
