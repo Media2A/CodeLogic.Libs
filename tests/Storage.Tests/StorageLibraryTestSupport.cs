@@ -104,6 +104,7 @@ internal sealed class FakeStorageBackend :
     private readonly Func<string, CancellationToken, Task<Result<StorageItem>>>? _upload;
     private readonly Func<string, Stream, StorageUploadOptions?, CancellationToken, Task<Result<StorageItem>>>? _uploadStream;
     private readonly Func<string, CancellationToken, Task<Result<Stream>>>? _download;
+    private readonly Func<string, StorageDownloadOptions?, CancellationToken, Task<Result<Stream>>>? _downloadWithOptions;
     private readonly Func<string, CancellationToken, Task<Result>>? _delete;
     private readonly Func<string, string, CancellationToken, Task<Result>>? _copy;
     private readonly Func<string, string, CancellationToken, Task<Result>>? _move;
@@ -143,8 +144,10 @@ internal sealed class FakeStorageBackend :
         Func<string, StorageVersionListOptions?, CancellationToken, Task<Result<StorageVersionPage>>>? listVersions = null,
         Func<string, string, CancellationToken, Task<Result>>? deleteVersion = null,
         Func<string, CancellationToken, Task<Result<IReadOnlyDictionary<string, string>>>>? getTags = null,
-        Func<string, IReadOnlyDictionary<string, string>, StorageTagUpdateOptions?, CancellationToken, Task<Result<StorageItem>>>? setTags = null)
+        Func<string, IReadOnlyDictionary<string, string>, StorageTagUpdateOptions?, CancellationToken, Task<Result<StorageItem>>>? setTags = null,
+        Func<string, StorageDownloadOptions?, CancellationToken, Task<Result<Stream>>>? downloadWithOptions = null)
     {
+        _downloadWithOptions = downloadWithOptions;
         _connectionId = connectionId;
         _connectionIdGetter = connectionIdGetter;
         Provider = provider;
@@ -203,6 +206,7 @@ internal sealed class FakeStorageBackend :
         UploadCoreAsync(path, cancellationToken);
 
     public Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        _downloadWithOptions?.Invoke(path, options, cancellationToken) ??
         _download?.Invoke(path, cancellationToken) ?? Task.FromResult(Result<Stream>.Success(new MemoryStream()));
 
     public Task<Result<byte[]>> DownloadBytesAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>

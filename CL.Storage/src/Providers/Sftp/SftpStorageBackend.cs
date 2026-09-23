@@ -626,8 +626,12 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            await using (var target = await client.OpenAsync(resolved.Value!.RemotePath, FileMode.Append, FileAccess.Write, cancellationToken).ConfigureAwait(false))
+            // SSH.NET's Append mode does not create a missing file; open-or-create and write at the end instead.
+            await using (var target = await client.OpenAsync(resolved.Value!.RemotePath, FileMode.OpenOrCreate, FileAccess.Write, cancellationToken).ConfigureAwait(false))
+            {
+                target.Seek(0, SeekOrigin.End);
                 await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+            }
             var attributes = await client.GetAttributesAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
             return Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, attributes));
         }

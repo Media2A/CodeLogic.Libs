@@ -144,12 +144,12 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// <summary>Queues a copy between (or within) connections.</summary>
     public StorageTransferJob EnqueueCopy(string sourceConnectionId, string sourcePath, string destinationConnectionId, string destinationPath, StorageTransferOptions? options = null, StorageTransferPriority priority = StorageTransferPriority.Normal) =>
         Add(StorageTransferKind.Copy, priority, $"{sourceConnectionId}:{sourcePath}", $"{destinationConnectionId}:{destinationPath}", [sourceConnectionId, destinationConnectionId],
-            (progress, token) => _library.CopyAsync(sourceConnectionId, sourcePath, destinationConnectionId, destinationPath, (options ?? new()) with { Progress = progress }, token));
+            async (progress, token) => (await _library.CopyAsync(sourceConnectionId, sourcePath, destinationConnectionId, destinationPath, (options ?? new()) with { Progress = progress }, token).ConfigureAwait(false)).ToResult());
 
     /// <summary>Queues a move between (or within) connections.</summary>
     public StorageTransferJob EnqueueMove(string sourceConnectionId, string sourcePath, string destinationConnectionId, string destinationPath, StorageTransferOptions? options = null, StorageTransferPriority priority = StorageTransferPriority.Normal) =>
         Add(StorageTransferKind.Move, priority, $"{sourceConnectionId}:{sourcePath}", $"{destinationConnectionId}:{destinationPath}", [sourceConnectionId, destinationConnectionId],
-            (progress, token) => _library.MoveAsync(sourceConnectionId, sourcePath, destinationConnectionId, destinationPath, (options ?? new()) with { Progress = progress }, token));
+            async (progress, token) => (await _library.MoveAsync(sourceConnectionId, sourcePath, destinationConnectionId, destinationPath, (options ?? new()) with { Progress = progress }, token).ConfigureAwait(false)).ToResult());
 
     /// <summary>Queues an upload of a local file.</summary>
     public StorageTransferJob EnqueueUpload(string localFilePath, string destinationConnectionId, string destinationPath, StorageUploadOptions? options = null, StorageTransferPriority priority = StorageTransferPriority.Normal) =>

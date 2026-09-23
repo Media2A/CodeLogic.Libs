@@ -96,7 +96,13 @@ public sealed record StorageTransferProgress(
     bool IsCompleted,
     double BytesPerSecond = 0,
     TimeSpan? EstimatedRemaining = null,
-    string? ItemPath = null);
+    string? ItemPath = null)
+{
+    /// <summary>Gets the files finished so far in a directory transfer.</summary>
+    public long? FilesCompleted { get; init; }
+    /// <summary>Gets the files in a directory transfer, when known (a single file, or <see cref="StorageTransferOptions.PreScan"/>).</summary>
+    public long? FilesTotal { get; init; }
+}
 
 /// <summary>Controls one provider page of versions for an exact object path.</summary>
 public sealed record StorageVersionListOptions

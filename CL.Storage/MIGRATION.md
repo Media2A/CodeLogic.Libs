@@ -149,6 +149,16 @@ positional members are unchanged. Use `TestConnectionAsync` to check settings be
   configured ones can construct `new StorageLibrary(new StorageLibraryOptions { RuntimeOnly = true })`
   instead; no `config.storage*.json` file is created.
 
+### Transfer reports and staged resume (2026-09-23)
+
+- `StorageLibrary.CopyAsync` and `MoveAsync` return `StorageTransferReport`. Code that only checked the
+  result keeps working with `report.IsSuccess`/`report.Error`, or call `report.ToResult()`.
+- `ConflictPolicy.Resume` now resumes through staging: the destination is replaced only when complete.
+  A partial destination left by the old in-place resume is not continued; it is replaced once the staged
+  copy completes. On object stores `Resume` now succeeds by rewriting instead of returning
+  `storage.unsupported`.
+- Local items now have an `ETag`. Code that treated a null ETag as "local" should check `Provider`.
+
 ## Recommended rollout
 
 1. Add `CodeLogic.Storage` beside the legacy package.

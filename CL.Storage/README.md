@@ -262,7 +262,7 @@ and move operations.
 The library can copy or move files and complete directory trees between any two mounted connections:
 
 ```csharp
-Result copied = await storage.CopyAsync(
+StorageTransferReport copied = await storage.CopyAsync(
     "primary", "exports/2026",
     "archive", "yearly/2026",
     new StorageTransferOptions
@@ -271,10 +271,18 @@ Result copied = await storage.CopyAsync(
         MetadataPreservation = StorageMetadataPreservation.BestEffort
     });
 
-Result moved = await storage.MoveAsync(
+StorageTransferReport moved = await storage.MoveAsync(
     "incoming", "ready/item.bin",
     "processed", "item.bin");
 ```
+
+`CopyAsync` and `MoveAsync` return a `StorageTransferReport` (`IsSuccess`, `Error`, and `ToResult()`
+work as on a `Result`). It says what happened — `Completed`, `Skipped` (with `SkipReason`), `Failed`
+(nothing committed), or `NeedsReconciliation` (a mixed state) — and, for a single file, the path
+actually written (`WrittenPath`, which differs after `Rename`), the bytes, the SHA-256 when verified,
+and the destination's new `DestinationETag`/`DestinationVersionId`. When a transfer does not finish, the
+state fields say exactly what it left: `DestinationCommitted`, `SourceDeleted`, `StagingLeftBehind`,
+`BackupRestored`, `BackupLeftBehind`, and a `ResumeToken`.
 
 Cross-provider data uses a `System.IO.Pipelines` relay capped at 1 MiB. Each destination file is
 uploaded to a unique staging name and committed only after the complete source stream succeeds.
@@ -297,6 +305,49 @@ Result<StorageDirectoryTransferReport> download = await storage.DownloadDirector
 
 Links/reparse points in a local upload are rejected rather than followed. Reports contain file,
 directory, and byte counts.
+
+### Guaranteed transfers
+
+For a single file, a transfer can be made to promise exactly what was planned:
+
+```csharp
+var report = await storage.CopyAsync("sftp", "in/report.pdf", "s3", "archive/report.pdf", new StorageTransferOptions
+{
+    DestinationCondition = new StorageMutationCondition { ExpectedETag = seenDestination.ETag }, // replace only this version
+    ExpectedSourceETag = plannedSource.ETag,        // or SourceVersionId, to read an exact version
+    ExpectedSourceLength = plannedSource.Size,      // shorter or longer fails without committing
+    Verify = true,                                  // SHA-256 during the copy, then the destination confirmed
+    ExpectedSha256 = knownDigest                    // optional
+});
+```
+
+- Content always goes to a staging object beside the destination first. Length and digest are checked,
+  and a verified copy is confirmed on the destination (by the server's SHA-256 where it keeps one,
+  otherwise by reading it back) before it is promoted. `VerifiedBy` says which.
+- `DestinationCondition` is checked before the copy starts and again right before promotion.
+  `ConditionEnforcement` reports how: `Atomic` when the provider enforces it in the same operation
+  (create-new with `Overwrite = false` on connections with `ConditionalCreate`), otherwise
+  `CheckedBeforeCommit`.
+- A source pinned by ETag is read again after streaming; a change in between fails with
+  `storage.conflict` and nothing is committed.
+- A move deletes its source only while it is still the version that was copied — with a conditional delete
+  where the provider has one — otherwise the report is `NeedsReconciliation` with `SourceDeleted = false`.
+- Local files now carry an ETag (last-write time and size), so conditions work on local connections too.
+
+### Streamed writes
+
+`OpenWriteAsync` returns a stream to write a file's content into, for push-style producers:
+
+```csharp
+var opened = await files.OpenWriteAsync("exports/data.csv", new StorageUploadOptions { Verify = true });
+await using var writer = opened.Value!;
+await writer.WriteAsync(chunk);
+Result<StorageItem> committed = await writer.CommitAsync(); // or AbortAsync(); disposing without commit aborts
+```
+
+Nothing appears at the destination until `CommitAsync` succeeds. At most 1 MiB is buffered, so a slow
+destination slows the writer down. Conflict policies, `Condition`, `ExpectedLength`, `Verify`, and
+`ExpectedSha256` apply as for uploads; conflict decisions happen before the first byte is written.
 
 ## File, text, JSON, progress, and integrity helpers
 
@@ -428,18 +479,26 @@ Console.WriteLine($"{report.Value!.Files} uploaded, {report.Value.SkippedFiles} 
 
 ### Resume and append
 
-`ConflictPolicy = Resume` continues an interrupted upload by appending only what the destination is
-missing (FTP `APPE`, SFTP append mode, local files); a complete destination is left alone. The
-source must be seekable, and resumed bytes are written in place rather than staged, so check a
-checksum afterwards when integrity matters. `DownloadToFileAsync(..., conflictPolicy: Resume)`
-continues a partial local file with a ranged download. `AppendAsync` appends to a file directly,
-for example a log, and `CleanupStaleStagingAsync` removes staging leftovers of crashed transfers.
+`ConflictPolicy = Resume` writes through a resumable staging object (`.cl-storage-part-…`) and replaces
+the destination only once it is complete, so the destination is never half-written. If an attempt fails,
+the staged bytes stay; the next attempt for the same destination and the same source (same length,
+modification time, ETag, or version) reads only the missing tail and appends it (FTP `APPE`, SFTP append,
+local files). Uploads need a seekable stream and use `SourceLastModified` as part of the source's identity;
+copies and moves identify the source themselves. A failed copy's report carries a `ResumeToken` that can
+be stored and passed back in `StorageTransferOptions.ResumeToken`, even from another process after a
+restart. Where the destination cannot append (object stores), the staging object is rewritten from the
+start. Combine with `Verify` to hash the whole file, including the part staged earlier.
+`DownloadToFileAsync(..., conflictPolicy: Resume)` continues a partial local file with a ranged download.
+`AppendAsync` appends to a file directly, for example a log, and `CleanupStaleStagingAsync` removes
+staging leftovers.
 
 ### Progress and speed limits
 
 Upload, download, and transfer options take a `Progress` sink. Reports arrive at most every 250 ms and
 carry `BytesTransferred`, `TotalBytes`, `BytesPerSecond`, `EstimatedRemaining`, and, for directory
-transfers, the `ItemPath` of the current file; directory transfers accumulate bytes across files.
+transfers, the `ItemPath` of the current file plus `FilesCompleted`/`FilesTotal`; directory transfers
+accumulate bytes across files. Set `StorageTransferOptions.PreScan` to list a directory first so its
+reports carry totals and a time estimate. A server-side copy or move reports its start and its end.
 
 ```csharp
 var progress = new Progress<StorageTransferProgress>(p =>

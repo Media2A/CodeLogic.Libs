@@ -603,7 +603,8 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
             Created = new DateTimeOffset(info.CreationTimeUtc),
             LastAccessed = new DateTimeOffset(info.LastAccessTimeUtc),
             ContentType = type == StorageItemType.File ? GetContentType(info.Extension) : null,
-            ETag = null,
+            // Like a web server's weak validator: it changes whenever the content is rewritten or resized.
+            ETag = type == StorageItemType.File ? $"\"{info.LastWriteTimeUtc.Ticks:x}-{((FileInfo)info).Length:x}\"" : null,
             UnixMode = OperatingSystem.IsWindows() ? null : (int)info.UnixFileMode,
             LinkTarget = type == StorageItemType.Link ? info.LinkTarget : null,
             IsHidden = (attributes & FileAttributes.Hidden) != 0 || name.StartsWith('.')

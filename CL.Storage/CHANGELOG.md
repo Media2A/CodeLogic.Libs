@@ -15,6 +15,9 @@
 - Connections from `GetStorage()` never watched natively, because the service proxy did not pass native
   change notifications through, so local connections always polled.
 - The native watcher dropped changes silently when its buffer overflowed.
+- FTP could not find files whose names start with a dot on servers without MLST that hide dot-files from
+  LIST (vsftpd); they are now found by listing the parent with hidden files.
+- SFTP `AppendAsync` failed on a missing file instead of creating it.
 
 ### Added
 
@@ -28,8 +31,27 @@
 - Download progress carries `TotalBytes` even without a `Length`: the item's size is looked up once.
 - `StorageChangeKind.Overflow`, reported when native watching lost changes and the caller should rescan.
 
+- Guaranteed single-file transfers: `DestinationCondition`, `SourceVersionId`, `ExpectedSourceETag`,
+  `ExpectedSourceLength`, `Verify`, and `ExpectedSha256` on `StorageTransferOptions`; `ExpectedLength`,
+  `Verify`, and `ExpectedSha256` on `StorageUploadOptions`. Content is staged, checked, confirmed, and
+  then promoted; the destination condition is re-checked right before promotion.
+- `StorageTransferReport` from `CopyAsync`/`MoveAsync`: outcome, skip reason, written path, digest,
+  destination ETag/version, how a condition was enforced, and on failure exactly what state was left
+  (`DestinationCommitted`, `SourceDeleted`, `StagingLeftBehind`, `BackupRestored`, `BackupLeftBehind`).
+- Resumable transfers: staged resume with a `StorageResumeToken` that survives restarts.
+- `OpenWriteAsync`: a push-style write stream with `CommitAsync` and `AbortAsync`.
+- `StorageTransferOptions.PreScan` for directory totals; progress carries `FilesCompleted`/`FilesTotal`;
+  server-side copies report start and end.
+- A move deletes its source only while it is still the version that was copied.
+- Local files carry an ETag (last-write time and size).
+
 ### Changed (breaking)
 
+- `StorageLibrary.CopyAsync` and `MoveAsync` return `StorageTransferReport` instead of `Result`; it has
+  `IsSuccess`, `IsFailure`, `Error`, and `ToResult()`.
+- `StorageConflictPolicy.Resume` no longer appends to the destination in place: it resumes a staging
+  object and promotes it when complete. Without `Append` on the destination it rewrites from the start
+  instead of failing with `storage.unsupported`.
 - `StorageChangeKind` gained `Overflow`; exhaustive switches over it need a new case.
 - `Mirror` sync no longer replaces a destination that is newer and the same size.
 

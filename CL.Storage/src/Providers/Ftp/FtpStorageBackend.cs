@@ -160,7 +160,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            var item = await client.GetObjectInfo(resolved.Value.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            var item = await FindAsync(client, resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
             return item is null
                 ? Result<StorageItem>.Failure(StorageErrors.NotFound($"FTP item '{resolved.Value.StoragePath}' was not found."))
                 : Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, item));
@@ -297,7 +297,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
                 await client.CreateDirectory(parent, true, cancellationToken).ConfigureAwait(false);
             else if (!await client.DirectoryExists(parent, cancellationToken).ConfigureAwait(false))
                 return Result<StorageItem>.Failure(StorageErrors.NotFound("The FTP destination parent directory was not found."));
-            var existing = await client.GetObjectInfo(resolved.Value.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            var existing = await FindAsync(client, resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
             if (existing?.Type == FtpObjectType.Directory)
                 return Result<StorageItem>.Failure(StorageErrors.Conflict("The FTP upload destination is a directory."));
             if (existing is not null && !options.Overwrite)
@@ -328,7 +328,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             if (committed.IsFailure)
                 return Result<StorageItem>.Failure(committed.Error!);
             stagingPath = null;
-            var item = await client.GetObjectInfo(resolved.Value.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            var item = await FindAsync(client, resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
             return item is null
                 ? Result<StorageItem>.Success(FileItem(resolved.Value.StoragePath, source.CanSeek ? source.Length : null))
                 : Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, item));
@@ -374,7 +374,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            var item = await client.GetObjectInfo(resolved.Value!.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            var item = await FindAsync(client, resolved.Value!.RemotePath, cancellationToken).ConfigureAwait(false);
             if (item is null) return Result<Stream>.Failure(StorageErrors.NotFound($"FTP file '{resolved.Value.StoragePath}' was not found."));
             if (item.Type == FtpObjectType.Directory) return Result<Stream>.Failure(StorageErrors.Conflict("An FTP directory cannot be downloaded as a file."));
             if (item.Size >= 0 && options.Offset > item.Size)
@@ -437,7 +437,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            var item = await client.GetObjectInfo(resolved.Value!.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            var item = await FindAsync(client, resolved.Value!.RemotePath, cancellationToken).ConfigureAwait(false);
             if (item is null) return options.IgnoreMissing
                 ? Result.Success()
                 : Result.Failure(StorageErrors.NotFound($"FTP item '{resolved.Value.StoragePath}' was not found."));
@@ -522,7 +522,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            var item = await client.GetObjectInfo(source.Value!.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            var item = await FindAsync(client, source.Value!.RemotePath, cancellationToken).ConfigureAwait(false);
             if (item is null) return Result.Failure(StorageErrors.NotFound($"FTP item '{source.Value.StoragePath}' was not found."));
             if (item.Type == FtpObjectType.Directory)
             {
@@ -694,7 +694,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             var status = await client.UploadStream(new ForwardOnlyStream(source), resolved.Value!.RemotePath, FtpRemoteExists.AddToEnd, createRemoteDir: true, progress: null, cancellationToken).ConfigureAwait(false);
             if (status != FtpStatus.Success)
                 return Result<StorageItem>.Failure(StorageErrors.ProviderError("The FTP server did not accept the append."));
-            var item = await client.GetObjectInfo(resolved.Value.RemotePath, true, cancellationToken).ConfigureAwait(false);
+            var item = await FindAsync(client, resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
             return item is null
                 ? Result<StorageItem>.Failure(StorageErrors.NotFound("The appended FTP file was not found."))
                 : Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, item));
@@ -744,6 +744,23 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
 
+    /// <summary>
+    /// Looks up one item. Servers without MLST answer through LIST, and many (vsftpd, for one) hide names
+    /// starting with a dot from it, including the library's own staging files; those are found by listing the
+    /// parent with hidden files included.
+    /// </summary>
+    private static async Task<FtpListItem?> FindAsync(AsyncFtpClient client, string remotePath, CancellationToken cancellationToken)
+    {
+        var item = await client.GetObjectInfo(remotePath, true, cancellationToken).ConfigureAwait(false);
+        if (item is not null) return item;
+        var name = remotePath.TrimEnd('/');
+        var slash = name.LastIndexOf('/');
+        if (slash < 0 || !name[(slash + 1)..].StartsWith('.')) return null;
+        var parent = slash == 0 ? "/" : name[..slash];
+        var listing = await client.GetListing(parent, FtpListOption.Auto | FtpListOption.AllFiles, cancellationToken).ConfigureAwait(false);
+        return listing.FirstOrDefault(entry => string.Equals(entry.FullName.TrimEnd('/'), name, StringComparison.Ordinal));
+    }
+
     private StorageLinkInfo LinkInfo(string rawTarget, string linkParent)
     {
         var absolute = rawTarget.StartsWith('/') ? rawTarget : RemotePathResolver.Combine(linkParent, rawTarget);
@@ -783,7 +800,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         bool overwrite,
         CancellationToken cancellationToken)
     {
-        var destination = await client.GetObjectInfo(destinationPath, true, cancellationToken).ConfigureAwait(false);
+        var destination = await FindAsync(client, destinationPath, cancellationToken).ConfigureAwait(false);
         if (destination is null)
         {
             var moved = await MovePathAsync(
@@ -885,7 +902,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         for (var attempt = 0; attempt < 8; attempt++)
         {
             var candidate = parent.TrimEnd('/') + $"/.cl-storage-{purpose}-{Guid.NewGuid():N}.tmp";
-            if (await client.GetObjectInfo(candidate, true, cancellationToken).ConfigureAwait(false) is null)
+            if (await FindAsync(client, candidate, cancellationToken).ConfigureAwait(false) is null)
                 return Result<string>.Success(candidate);
         }
         return Result<string>.Failure(StorageErrors.Conflict(
@@ -899,8 +916,8 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     {
         try
         {
-            var source = await client.GetObjectInfo(sourcePath, true, CancellationToken.None).ConfigureAwait(false);
-            var destination = await client.GetObjectInfo(destinationPath, true, CancellationToken.None).ConfigureAwait(false);
+            var source = await FindAsync(client, sourcePath, CancellationToken.None).ConfigureAwait(false);
+            var destination = await FindAsync(client, destinationPath, CancellationToken.None).ConfigureAwait(false);
             return source is null && destination is not null;
         }
         catch
@@ -917,7 +934,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     {
         try
         {
-            if (await client.GetObjectInfo(destinationPath, true, CancellationToken.None).ConfigureAwait(false) is not null)
+            if (await FindAsync(client, destinationPath, CancellationToken.None).ConfigureAwait(false) is not null)
                 return false;
             return await MovePathAsync(
                 client,
@@ -957,7 +974,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     {
         try
         {
-            var item = await client.GetObjectInfo(path, true, CancellationToken.None).ConfigureAwait(false);
+            var item = await FindAsync(client, path, CancellationToken.None).ConfigureAwait(false);
             if (item is null)
                 return;
             if (item.Type == FtpObjectType.Directory)

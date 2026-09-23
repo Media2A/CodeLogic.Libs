@@ -115,23 +115,23 @@ internal sealed class StorageServiceProxy :
             (connectionId, provider, normalized) => new StorageItemDeletedEvent(
                 connectionId, provider, normalized, DateTimeOffset.UtcNow));
 
-    public Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
-        _library.CopyAsync(
+    public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
+        (await _library.CopyAsync(
             _connectionId,
             sourcePath,
             _connectionId,
             destinationPath,
             options,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false)).ToResult();
 
-    public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
-        _library.MoveAsync(
+    public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
+        (await _library.MoveAsync(
             _connectionId,
             sourcePath,
             _connectionId,
             destinationPath,
             options,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false)).ToResult();
 
     public Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
