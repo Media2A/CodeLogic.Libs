@@ -118,6 +118,12 @@ public sealed class S3StorageBackend :
     public string ConnectionId { get; }
     /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.S3;
+
+    /// <summary>Objects larger than this are copied part by part: S3 copies at most 5 GiB in one request.</summary>
+    internal long MultipartCopyThresholdBytes { get; init; } = 5L * 1024 * 1024 * 1024;
+
+    /// <summary>Runs between the existence check and a create-only copy, so a test can show the server enforces it.</summary>
+    internal Func<Task>? BeforeConditionalCopy { get; init; }
     /// <inheritdoc />
     public string Root { get; }
     /// <inheritdoc />
@@ -441,14 +447,20 @@ public sealed class S3StorageBackend :
             var exists = await ExistsAsync(destination.Value!, cancellationToken).ConfigureAwait(false);
             if (exists.IsFailure) return Result.Failure(exists.Error!);
             if (exists.Value) return Result.Failure(StorageErrors.Conflict("The S3 destination already exists."));
+            if (BeforeConditionalCopy is { } hook) await hook().ConfigureAwait(false);
         }
         try
         {
-            await CopyObjectAsync(
-                ToKey(source.Value!),
-                ToKey(destination.Value!),
-                options.Overwrite,
-                cancellationToken).ConfigureAwait(false);
+            // The existence check is a courtesy. A create-only copy is made atomic on the server by completing a
+            // multipart copy with If-None-Match, which S3 and compatible servers enforce; CopyObject's own
+            // If-None-Match is not enforced everywhere (MinIO ignores it).
+            var size = sourceInfo.Value.Size ?? 0;
+            if (!options.Overwrite && size == 0)
+                await PutEmptyIfAbsentAsync(ToKey(source.Value!), ToKey(destination.Value!), cancellationToken).ConfigureAwait(false);
+            else if (!options.Overwrite || size > MultipartCopyThresholdBytes)
+                await CopyMultipartAsync(ToKey(source.Value!), ToKey(destination.Value!), size, options.Overwrite, cancellationToken).ConfigureAwait(false);
+            else
+                await CopyObjectAsync(ToKey(source.Value!), ToKey(destination.Value!), overwrite: true, cancellationToken).ConfigureAwait(false);
             return Result.Success();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -1008,6 +1020,79 @@ public sealed class S3StorageBackend :
             count += read;
         }
         return new S3PartRead(count, EndOfStream: false);
+    }
+
+    /// <summary>Creates an empty object only when absent (a create-only copy of an empty source), keeping its type and metadata.</summary>
+    private async Task PutEmptyIfAbsentAsync(string sourceKey, string destinationKey, CancellationToken cancellationToken)
+    {
+        var head = await _client.GetObjectMetadataAsync(new GetObjectMetadataRequest { BucketName = _bucket, Key = sourceKey }, cancellationToken).ConfigureAwait(false);
+        var put = new PutObjectRequest
+        {
+            BucketName = _bucket,
+            Key = destinationKey,
+            InputStream = new MemoryStream([]),
+            ContentType = head.Headers.ContentType,
+            IfNoneMatch = "*",
+            DisablePayloadSigning = _disablePayloadSigning
+        };
+        foreach (var key in head.Metadata.Keys)
+            put.Metadata.Add(key, head.Metadata[key]);
+        await _client.PutObjectAsync(put, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Copies an object part by part (UploadPartCopy), keeping its content type and user metadata: objects too
+    /// large for one CopyObject request, and create-only copies, which complete with If-None-Match. A failed
+    /// copy is aborted.
+    /// </summary>
+    private async Task CopyMultipartAsync(string sourceKey, string destinationKey, long size, bool overwrite, CancellationToken cancellationToken)
+    {
+        var head = await _client.GetObjectMetadataAsync(new GetObjectMetadataRequest { BucketName = _bucket, Key = sourceKey }, cancellationToken).ConfigureAwait(false);
+        var initiate = new InitiateMultipartUploadRequest { BucketName = _bucket, Key = destinationKey, ContentType = head.Headers.ContentType };
+        foreach (var key in head.Metadata.Keys)
+            initiate.Metadata.Add(key, head.Metadata[key]);
+        var initiated = await _client.InitiateMultipartUploadAsync(initiate, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // At most 10,000 parts: large objects use larger parts.
+            var partSize = Math.Max(_multipartPartSizeBytes, (size + 9_999) / 10_000);
+            var parts = new List<PartETag>();
+            var number = 1;
+            for (long first = 0; first < size; first += partSize, number++)
+            {
+                var copied = await _client.CopyPartAsync(new CopyPartRequest
+                {
+                    SourceBucket = _bucket,
+                    SourceKey = sourceKey,
+                    DestinationBucket = _bucket,
+                    DestinationKey = destinationKey,
+                    UploadId = initiated.UploadId,
+                    PartNumber = number,
+                    FirstByte = first,
+                    LastByte = Math.Min(first + partSize, size) - 1
+                }, cancellationToken).ConfigureAwait(false);
+                parts.Add(new PartETag(number, copied.ETag));
+            }
+            var complete = new CompleteMultipartUploadRequest
+            {
+                BucketName = _bucket,
+                Key = destinationKey,
+                UploadId = initiated.UploadId,
+                PartETags = parts
+            };
+            if (!overwrite)
+                complete.IfNoneMatch = "*";
+            await _client.CompleteMultipartUploadAsync(complete, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            try
+            {
+                await _client.AbortMultipartUploadAsync(new AbortMultipartUploadRequest { BucketName = _bucket, Key = destinationKey, UploadId = initiated.UploadId }, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception) { /* The bucket's lifecycle rules remove abandoned uploads. */ }
+            throw;
+        }
     }
 
     private Task<CopyObjectResponse> CopyObjectAsync(

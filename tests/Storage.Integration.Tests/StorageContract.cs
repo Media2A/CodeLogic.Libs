@@ -125,7 +125,7 @@ internal static class StorageContract
         try
         {
             Assert.True((await storage.UploadBytesAsync($"{dir}/big.bin", full[..1234])).IsSuccess);
-            var resumed = await storage.UploadAsync($"{dir}/big.bin", new MemoryStream(full), new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume });
+            var resumed = await storage.UploadAsync($"{dir}/big.bin", new MemoryStream(full), new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "contract-big" });
             Assert.True(resumed.IsSuccess, resumed.Error?.ToString());
             Assert.Equal(full, (await storage.DownloadBytesAsync($"{dir}/big.bin")).Value);
 
