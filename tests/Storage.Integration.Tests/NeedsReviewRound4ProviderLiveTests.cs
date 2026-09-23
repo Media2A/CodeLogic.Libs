@@ -24,6 +24,21 @@ public sealed class NeedsReviewRound4ProviderLiveTests
     public async Task A_non_recursive_WebDAV_folder_delete_keeps_a_folder_holding_a_hidden_file() =>
         await NonRecursiveDeleteKeepsContentsAsync(LiveServers.Create(LiveServers.WebDav()));
 
+    // A recursive FTP delete removes hidden files too; FluentFTP's own listing skipped them, so the final RMD failed.
+    [FtpFact]
+    public async Task A_recursive_FTP_folder_delete_removes_hidden_files_too()
+    {
+        await using var storage = LiveServers.Create(LiveServers.Ftp());
+        var dir = $"r4ftp-{Guid.NewGuid():N}";
+        Assert.True((await storage.UploadBytesAsync($"{dir}/sub/.hidden", [1])).IsSuccess);
+        Assert.True((await storage.UploadBytesAsync($"{dir}/visible.txt", [2])).IsSuccess);
+
+        var deleted = await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true });
+
+        Assert.True(deleted.IsSuccess, deleted.Error?.ToString());
+        Assert.False((await storage.ExistsAsync(dir)).Value);
+    }
+
     private static async Task NonRecursiveDeleteKeepsContentsAsync(IStorageBackend backend)
     {
         await using var storage = backend;

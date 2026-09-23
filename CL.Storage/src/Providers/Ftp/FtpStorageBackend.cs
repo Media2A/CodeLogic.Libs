@@ -481,7 +481,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
                     return await RemoveEmptyDirectoryAsync(client, resolved.Value, cancellationToken).ConfigureAwait(false);
                 else
                 {
-                    await client.DeleteDirectory(resolved.Value.RemotePath, FtpListOption.Recursive, cancellationToken).ConfigureAwait(false);
+                    await client.DeleteDirectory(resolved.Value.RemotePath, FtpListOption.Recursive | FtpListOption.AllFiles, cancellationToken).ConfigureAwait(false);
                 }
             }
             else
@@ -1092,7 +1092,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             if (item is null)
                 return;
             if (item.Type == FtpObjectType.Directory)
-                await client.DeleteDirectory(path, FtpListOption.Recursive, CancellationToken.None).ConfigureAwait(false);
+                await client.DeleteDirectory(path, FtpListOption.Recursive | FtpListOption.AllFiles, CancellationToken.None).ConfigureAwait(false);
             else
                 await client.DeleteFile(path, CancellationToken.None).ConfigureAwait(false);
         }
