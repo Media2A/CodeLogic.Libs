@@ -34,20 +34,47 @@ public sealed class TransferQueueTests
         Assert.All(queue.Jobs, job => Assert.NotNull(job.LastReport));
     }
 
+    // needs-review E: three connections allow six jobs under the per-connection limit, so the global limit of four is what binds.
     [Fact]
     public async Task Concurrency_never_exceeds_the_configured_limits()
     {
         await using var fixture = await Fixture.CreateAsync();
-        StorageTransferPipeline.SetLimits(fixture.Destination, uploadBytesPerSecond: 400_000, downloadBytesPerSecond: null);
-        for (var i = 0; i < 6; i++) await fixture.Source.UploadBytesAsync($"f{i}.bin", new byte[60_000]);
-        await using var queue = await fixture.OpenAsync(new StorageTransferQueueOptions { MaxConcurrentTransfers = 4, MaxTransfersPerConnection = 2 });
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var running = 0;
         var peak = 0;
-        queue.JobChanged += _ => { lock (queue) peak = Math.Max(peak, queue.Jobs.Count(job => job.State == StorageTransferState.Running)); };
+        var perConnection = new Dictionary<string, int>();
+        var perConnectionPeak = 0;
+        for (var c = 0; c < 3; c++)
+        {
+            var id = $"C{c}";
+            var backend = new FakeStorageBackend(
+                id,
+                capabilities: new StorageCapabilities(StorageFeature.FileCopy | StorageFeature.ServerSideCopy),
+                getInfo: (path, _) => Task.FromResult(Result<StorageItem>.Success(new StorageItem { Path = path, Name = path, ItemType = StorageItemType.File, Size = 1 })),
+                copy: async (_, _, token) =>
+                {
+                    lock (perConnection)
+                    {
+                        peak = Math.Max(peak, ++running);
+                        perConnection[id] = perConnection.GetValueOrDefault(id) + 1;
+                        perConnectionPeak = Math.Max(perConnectionPeak, perConnection[id]);
+                    }
+                    try { await gate.Task.WaitAsync(token); }
+                    finally { lock (perConnection) { running--; perConnection[id]--; } }
+                    return Result.Success();
+                });
+            Assert.True(fixture.Library.RegisterBackend(id, backend).IsSuccess);
+        }
+        await using var queue = await fixture.OpenAsync(new StorageTransferQueueOptions { MaxConcurrentTransfers = 4, MaxTransfersPerConnection = 2 });
 
-        for (var i = 0; i < 6; i++) await queue.EnqueueCopyAsync("Source", $"f{i}.bin", "Destination", $"copy/f{i}.bin");
+        for (var i = 0; i < 9; i++) await queue.EnqueueCopyAsync($"C{i % 3}", "a.bin", $"C{i % 3}", $"copy/{i}.bin");
+        await Eventually(() => { lock (perConnection) return running == 4; });
+        await Task.Delay(100);
+        lock (perConnection) Assert.Equal((4, 4), (running, peak));
+        gate.TrySetResult();
         await queue.WaitForIdleAsync().WaitAsync(Wait);
 
-        Assert.InRange(peak, 1, 2);
+        lock (perConnection) Assert.Equal((4, 2), (peak, perConnectionPeak));
         Assert.All(queue.Jobs, job => Assert.Equal(StorageTransferState.Completed, job.State));
     }
 
@@ -70,7 +97,7 @@ public sealed class TransferQueueTests
         await queue.WaitForIdleAsync().WaitAsync(Wait);
 
         lock (starts)
-            Assert.Equal(["Destination:urgent.bin", "Destination:second.bin", "Destination:first.bin", "Destination:low.bin"], starts.Distinct());
+            Assert.Equal(["Destination:urgent.bin", "Destination:second.bin", "Destination:first.bin", "Destination:low.bin"], starts);
     }
 
     [Fact]
@@ -173,11 +200,12 @@ public sealed class TransferQueueTests
     public async Task A_move_whose_source_cannot_be_deleted_needs_reconciliation()
     {
         await using var fixture = await Fixture.CreateAsync();
+        var deletable = false;
         var fake = new FakeStorageBackend(
             "Sticky",
             getInfo: (path, _) => Task.FromResult(Result<StorageItem>.Success(new StorageItem { Path = path, Name = path, ItemType = StorageItemType.File, Size = 1 })),
             downloadWithOptions: (_, _, _) => Task.FromResult(Result<Stream>.Success(new MemoryStream([1]))),
-            delete: (_, _) => Task.FromResult(Result.Failure(StorageErrors.PermissionDenied("locked"))));
+            delete: (_, _) => Task.FromResult(Volatile.Read(ref deletable) ? Result.Success() : Result.Failure(StorageErrors.PermissionDenied("locked"))));
         Assert.True(fixture.Library.RegisterBackend("Sticky", fake).IsSuccess);
         await using var queue = await fixture.OpenAsync();
 
@@ -187,7 +215,14 @@ public sealed class TransferQueueTests
         var job = Assert.Single(queue.Jobs);
         Assert.Equal(StorageTransferState.NeedsReconciliation, job.State);
         Assert.True(job.LastReport!.DestinationCommitted);
+
+        // needs-review E: the retried job runs, and with the source deletable now the move completes.
+        Volatile.Write(ref deletable, true);
         Assert.True((await queue.RetryAsync(job.Id)).IsSuccess);
+        await queue.WaitForIdleAsync().WaitAsync(Wait);
+        var retried = Assert.Single(queue.Jobs);
+        Assert.Equal(StorageTransferState.Completed, retried.State);
+        Assert.True(retried.LastReport!.SourceDeleted);
     }
 
     [Fact]
@@ -296,9 +331,15 @@ public sealed class TransferQueueTests
         var lease = await store.TryClaimAsync("shared", "other-worker", revision, TimeSpan.FromMinutes(5), default);
         Assert.NotNull(lease);
 
-        await using var second = await fixture.OpenAsync(new StorageTransferQueueOptions { Store = store });
-        await Task.Delay(300);
+        // needs-review E: no fixed delay; a job leased elsewhere leaves the queue idle without starting it.
+        var starts = 0;
+        await using var second = await fixture.OpenAsync(new StorageTransferQueueOptions { Store = store, StartPaused = true });
+        second.JobChanged += job => { if (job.State == StorageTransferState.Running) Interlocked.Increment(ref starts); };
+        second.Resume();
+        await second.WaitForIdleAsync().WaitAsync(Wait);
 
+        Assert.Equal(0, Volatile.Read(ref starts));
+        Assert.Equal(StorageTransferState.Queued, second.Get("shared")!.State);
         Assert.False((await fixture.Destination.ExistsAsync("b.bin")).Value);
         Assert.Null(await store.TryClaimAsync("shared", "second", revision, TimeSpan.FromMinutes(1), default));
         // A worker that lost its lease cannot record an outcome.
@@ -336,15 +377,22 @@ public sealed class TransferQueueTests
     {
         await using var fixture = await Fixture.CreateAsync();
         await fixture.Source.UploadBytesAsync("a.bin", [1]);
-        await using var queue = await fixture.OpenAsync(new StorageTransferQueueOptions { MaxFinishedJobs = 2, MaxConcurrentTransfers = 1 });
+        var store = new InMemoryStorageTransferJobStore();
+        await using var queue = await fixture.OpenAsync(new StorageTransferQueueOptions { Store = store, MaxFinishedJobs = 2, MaxConcurrentTransfers = 1 });
+        var removed = new List<string>();
+        queue.JobRemoved += job => { lock (removed) removed.Add(job.Id); };
 
         for (var i = 0; i < 4; i++)
         {
-            await queue.EnqueueCopyAsync("Source", "a.bin", "Destination", $"{i}.bin");
+            await queue.EnqueueCopyAsync("Source", "a.bin", "Destination", $"{i}.bin", jobId: $"j{i}");
             await queue.WaitForIdleAsync().WaitAsync(Wait);
         }
 
-        Assert.Equal(2, queue.Jobs.Count);
+        // needs-review E: the oldest two leave the store too, each announced once.
+        await Eventually(() => { lock (removed) return removed.Count == 2; });
+        Assert.Equal(["j2", "j3"], queue.Jobs.Select(job => job.Id).Order());
+        Assert.Equal(["j2", "j3"], (await store.LoadAsync(default)).Select(record => record.Id).Order());
+        lock (removed) Assert.Equal(["j0", "j1"], removed.Order());
     }
 
     [Fact]
@@ -359,6 +407,19 @@ public sealed class TransferQueueTests
         await queue.WaitForIdleAsync().WaitAsync(Wait);
 
         Assert.Equal(4, queue.ConcurrencyLimit);
+
+        // needs-review E: a transient failure halves the limit.
+        var busy = new FakeStorageBackend(
+            "Busy",
+            capabilities: new StorageCapabilities(StorageFeature.FileCopy | StorageFeature.ServerSideCopy),
+            getInfo: (path, _) => Task.FromResult(Result<StorageItem>.Success(new StorageItem { Path = path, Name = path, ItemType = StorageItemType.File, Size = 1 })),
+            copy: (_, _, _) => Task.FromResult(Result.Failure(StorageErrors.ServerBusy("busy"))));
+        Assert.True(fixture.Library.RegisterBackend("Busy", busy).IsSuccess);
+        var retrying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        queue.JobChanged += job => { if (job.Id == "busy" && job.State == StorageTransferState.Queued && job.Attempts == 1) retrying.TrySetResult(); };
+        await queue.EnqueueCopyAsync("Busy", "a.bin", "Busy", "b.bin", jobId: "busy");
+        await retrying.Task.WaitAsync(Wait);
+        Assert.Equal(2, queue.ConcurrencyLimit);
     }
 
     [Fact]

@@ -33,7 +33,11 @@ public sealed class ReviewQueueTests
         // The previous process of this worker crashed while holding a lease that has not expired yet.
         Assert.NotNull(await store.TryClaimAsync("mine", "worker-1", added.Revision, TimeSpan.FromMinutes(10), default));
 
-        await using var queue = await fixture.OpenAsync(new StorageTransferQueueOptions { Store = store, WorkerId = "worker-1" });
+        // needs-review E: opened paused, so only the recovery in LoadAsync can have put the job back in the queue.
+        await using var queue = await fixture.OpenAsync(new StorageTransferQueueOptions { Store = store, WorkerId = "worker-1", StartPaused = true });
+        Assert.Equal(StorageTransferState.Queued, queue.Get("mine")!.State);
+        Assert.Null((await store.GetAsync("mine", default))!.LeaseOwner);
+        queue.Resume();
         await queue.WaitForIdleAsync().WaitAsync(Wait);
 
         Assert.Equal(StorageTransferState.Completed, queue.Get("mine")!.State);
@@ -106,10 +110,13 @@ public sealed class ReviewQueueTests
         await queue.WaitForIdleAsync().WaitAsync(Wait);
         Assert.Equal(StorageTransferState.Completed, queue.Get("claim")!.State);
 
-        store.FailNextFinalSave = true;   // the outcome cannot be recorded: the job is recovered, not lost
+        // needs-review B29, E: a failed final save is tried again while the lease holds, so a copy that
+        // succeeded stays Completed instead of becoming Interrupted.
+        store.FailNextFinalSave = true;
         await queue.EnqueueCopyAsync("Source", "a.bin", "Destination", "final.bin", jobId: "final");
         await queue.WaitForIdleAsync().WaitAsync(Wait);
-        Assert.Equal(StorageTransferState.Interrupted, queue.Get("final")!.State);
+        Assert.Equal(StorageTransferState.Completed, queue.Get("final")!.State);
+        Assert.Equal(StorageTransferState.Completed, (await store.GetAsync("final", default))!.State);
         Assert.True((await fixture.Destination.ExistsAsync("final.bin")).Value);
     }
 
@@ -170,7 +177,8 @@ public sealed class ReviewQueueTests
         public Task<StorageTransferJobRecord?> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken) => _inner.AddAsync(record, cancellationToken);
         public Task<StorageTransferJobRecord?> GetAsync(string jobId, CancellationToken cancellationToken) => _inner.GetAsync(jobId, cancellationToken);
         public Task<StorageTransferLease?> RenewAsync(StorageTransferLease lease, TimeSpan duration, CancellationToken cancellationToken) => _inner.RenewAsync(lease, duration, cancellationToken);
-        public Task RemoveAsync(string jobId, CancellationToken cancellationToken) => _inner.RemoveAsync(jobId, cancellationToken);
+        public Task<bool> ReleaseAsync(StorageTransferLease lease, CancellationToken cancellationToken) => _inner.ReleaseAsync(lease, cancellationToken);
+        public Task<bool> RemoveAsync(string jobId, long expectedRevision, StorageTransferLease? lease, CancellationToken cancellationToken) => _inner.RemoveAsync(jobId, expectedRevision, lease, cancellationToken);
 
         public Task<StorageTransferLease?> TryClaimAsync(string jobId, string workerId, long expectedRevision, TimeSpan duration, CancellationToken cancellationToken)
         {

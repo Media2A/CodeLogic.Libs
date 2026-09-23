@@ -315,3 +315,21 @@ public sealed record StorageTransferNeedsReconciliationEvent(
     string Destination,
     string ErrorCode,
     DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>
+/// Published when a queued transfer job becomes <see cref="StorageTransferState.Interrupted"/>: it was running
+/// when its queue or process stopped, and it may have changed its destination (or requeueing is turned off).
+/// </summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job does.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="Phase">How far the interrupted attempt got.</param>
+/// <param name="Timestamp">UTC time.</param>
+public sealed record StorageTransferInterruptedEvent(
+    string JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
+    StorageTransferPhase Phase,
+    DateTimeOffset Timestamp) : IEvent;
