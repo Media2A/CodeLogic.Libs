@@ -235,7 +235,7 @@ public sealed class GoogleCloudStorageBackend :
                     ? null
                     : EncodeContinuationToken(new GcsContinuationToken(providerPage.NextPageToken, 0, previous));
             }
-            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(pageItems, options), nextToken));
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(pageItems, options, listingPath), nextToken));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Google Cloud objects")); }

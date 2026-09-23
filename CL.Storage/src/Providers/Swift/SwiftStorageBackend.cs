@@ -213,7 +213,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                     .OrderBy(item => item.Path, StringComparer.Ordinal)];
             }
             var next = options.Recursive ? ImplicitDirectories.Wrap(page.Value.NextMarker, previous) : page.Value.NextMarker;
-            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), next));
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options, normalized.Value!), next));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Swift objects")); }

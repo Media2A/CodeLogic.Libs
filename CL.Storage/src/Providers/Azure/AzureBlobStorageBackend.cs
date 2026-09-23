@@ -176,7 +176,7 @@ public sealed class AzureBlobStorageBackend :
                     var unique = items.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
                         .OrderBy(item => item.Path, StringComparer.Ordinal).ToArray();
                     return Result<StoragePage>.Success(new StoragePage(
-                        StorageListFilter.Apply(unique, options),
+                        StorageListFilter.Apply(unique, options, normalized.Value!),
                         ImplicitDirectories.Wrap(page.ContinuationToken, previous)));
                 }
             }
