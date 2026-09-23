@@ -133,7 +133,7 @@ public sealed class NeedsReviewTransferTests
     // ---------------------------------------------------------------- A2
 
     [Fact] // needs-review A2
-    public async Task A_native_move_that_copies_and_deletes_is_pinned_to_the_version_read_and_relays_when_it_cannot_be()
+    public async Task A_native_move_that_copies_and_deletes_is_pinned_to_the_version_read_and_checked_just_before_when_it_cannot_be()
     {
         var (library, directory, _, _) = await TwoConnectionsAsync();
         using var _l = library; using var _d = directory;
@@ -141,6 +141,7 @@ public sealed class NeedsReviewTransferTests
         await local.UploadBytesAsync("f.bin", [1, 2, 3]);
         var seen = (await local.GetInfoAsync("f.bin")).Value!;
         StorageTransferOptions? native = null;
+        var unpinned = 0;
         var store = new InterceptBackend(local)
         {
             // An object store: its move is a copy and a delete, not an atomic rename.
@@ -148,6 +149,11 @@ public sealed class NeedsReviewTransferTests
             Move = (from, to, options, token) =>
             {
                 if (from != "f.bin") return local.MoveAsync(from, to, options, token);
+                if (options?.ExpectedSourceETag is null)
+                {
+                    unpinned++;
+                    return local.MoveAsync(from, to, options, token);
+                }
                 native = options;
                 return Task.FromResult(Result.Failure(StorageErrors.Unsupported("This connection cannot pin a move to a version.")));
             }
@@ -157,6 +163,9 @@ public sealed class NeedsReviewTransferTests
         var report = await library.MoveAsync("Obj", "f.bin", "Obj", "g.bin");
 
         Assert.Equal(seen.ETag, native?.ExpectedSourceETag);
+        // needs-review R4-A1: refused the pin, the source is compared just before the server's own move (no relay).
+        Assert.Equal(1, unpinned);
+        Assert.Equal(StorageConditionEnforcement.CheckedBeforeCommit, report.ConditionEnforcement);
         Assert.True(report.IsSuccess, report.Error?.ToString());
         Assert.True(report.SourceDeleted);
         Assert.Equal([1, 2, 3], (await local.DownloadBytesAsync("g.bin")).Value!);
@@ -360,7 +369,10 @@ public sealed class NeedsReviewTransferTests
         Assert.Equal(StorageTransferOutcome.NeedsReconciliation, report.Outcome);
         Assert.True(report.DestinationCommitted);
         Assert.Equal([7, 7, 7, 7], (await local.DownloadBytesAsync("target.bin")).Value!);
-        Assert.Equal(["target.bin"], await ListAllAsync(local));
+        // needs-review R4-A4: the previous version is kept and named, never deleted.
+        Assert.NotNull(report.BackupLeftBehind);
+        Assert.Equal([1], (await local.DownloadBytesAsync(report.BackupLeftBehind!)).Value!);
+        Assert.Equal([report.BackupLeftBehind!, "target.bin"], await ListAllAsync(local));
     }
 
     [Fact] // needs-review A8
@@ -898,13 +910,15 @@ public sealed class NeedsReviewTransferTests
             CapabilitiesMap = capabilities => new StorageCapabilities(capabilities.Features & ~StorageFeature.Append),
             Upload = async (path, source, options, token) =>
             {
-                await local.UploadAsync(path, source, options, token);
+                var stored = await local.UploadAsync(path, source, options, token);
+                // The part file's lock marker is written as usual; the part file's upload is answered "busy".
+                if (path.EndsWith(".lock", StringComparison.Ordinal)) return stored;
                 return Result<StorageItem>.Failure(StorageErrors.ServerBusy("Slow down.", $"{StorageErrorInfo.RetryAfterKey}=5000"));
             }
         };
 
         var uploaded = await StorageTransferPipeline.StagedUploadAsync(busy, "u.bin", new MemoryStream(Content(1000)),
-            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "u" }, CancellationToken.None);
+            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "u", SourceIdentityIsContentVersion = true }, CancellationToken.None);
 
         Assert.Equal(StorageErrors.ServerBusyCode, uploaded.Error?.Code);
         Assert.True(StorageErrorInfo.TryGetRetryAfter(uploaded.Error, out var delay));
@@ -924,7 +938,7 @@ public sealed class NeedsReviewTransferTests
         var progress = new RecordingProgress();
 
         var uploaded = await storage.UploadAsync("d.bin", new MemoryStream(content),
-            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "d", Progress = progress });
+            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "d", SourceIdentityIsContentVersion = true, Progress = progress });
 
         Assert.True(uploaded.IsSuccess, uploaded.Error?.ToString());
         Assert.Empty(progress.Reports);

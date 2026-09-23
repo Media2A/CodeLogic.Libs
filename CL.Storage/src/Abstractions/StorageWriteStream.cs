@@ -127,7 +127,13 @@ public sealed class StorageWriteStream : Stream
     /// otherwise checked immediately before.
     /// </summary>
     /// <param name="cancellationToken">Token used to cancel the commit.</param>
-    /// <returns>The committed item, or why it was not committed; nothing is left at the destination on failure.</returns>
+    /// <returns>
+    /// The committed item, or why it was not committed. On failure the destination is as it was, unless the error
+    /// carries <c>destinationState=complete</c>: the content was committed, but either it does not read back as
+    /// written (another writer may have replaced it) or the provider left an internal object behind. Every
+    /// internal object still there (a staging object that could not be removed, a provider's own backup) is
+    /// named by a <c>leftBehind</c> entry in the error's details.
+    /// </returns>
     public Task<Result<StorageItem>> CommitAsync(CancellationToken cancellationToken = default)
     {
         if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
@@ -149,12 +155,14 @@ public sealed class StorageWriteStream : Stream
         var written = await _upload.ConfigureAwait(false);
         if (written.Cancelled) cancellationToken.ThrowIfCancellationRequested();
         if (!written.IsSuccess)
-            return Result<StorageItem>.Failure(written.Error!);
+            return Result<StorageItem>.Failure(written.StagingLeft is { } left
+                ? StagedWriter.AppendDetails(written.Error!, $"{StorageErrorInfo.LeftBehindKey}={left}")
+                : written.Error!);
         var staging = written.Content!.StagingPath;
-        Result promoted;
+        PromoteOutcome promoted;
         try
         {
-            (promoted, _) = await StagedWriter.PromoteAsync(
+            promoted = await StagedWriter.PromoteCoreAsync(
                 _destination, staging, _path, _overwrite, _options.Condition, _options.CreateParents, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -162,13 +170,16 @@ public sealed class StorageWriteStream : Stream
             await StagedWriter.DeleteAsync(_destination, staging).ConfigureAwait(false);
             throw;
         }
-        if (promoted.IsFailure)
+        if (promoted.Result.IsFailure)
         {
-            await StagedWriter.DeleteAsync(_destination, staging).ConfigureAwait(false);
-            return Result<StorageItem>.Failure(promoted.Error!);
+            var removed = await StagedWriter.DeleteAsync(_destination, staging).ConfigureAwait(false);
+            return Result<StorageItem>.Failure(removed.IsFailure
+                ? StagedWriter.AppendDetails(promoted.Result.Error!, $"{StorageErrorInfo.LeftBehindKey}={staging}")
+                : promoted.Result.Error!);
         }
-        // Committed: report the result even if the caller cancels now.
-        return await StagedWriter.ConfirmPromotedAsync(_destination, _path, written.Content, CancellationToken.None).ConfigureAwait(false);
+        // Committed: report the result even if the caller cancels now, and what the provider left behind.
+        var confirmed = await StagedWriter.ConfirmPromotedAsync(_destination, _path, written.Content, CancellationToken.None).ConfigureAwait(false);
+        return await StagedWriter.ReportLeftBehindAsync(_destination, _path, confirmed, promoted.LeftBehind).ConfigureAwait(false);
     }
 
     /// <summary>Discards everything written; the destination is left as it was.</summary>
