@@ -37,7 +37,10 @@ public enum StorageDiffReason
     Checksum = 8,
     /// <summary>One side is a file and the other a directory.</summary>
     Type = 16,
-    /// <summary>A checksum was needed but the hashing budget ran out, so equality is unknown.</summary>
+    /// <summary>
+    /// A checksum was needed but could not be had — the hashing budget ran out, or one side's file could not
+    /// be read (locked, deleted after listing, no permission) — so equality is unknown.
+    /// </summary>
     Undecidable = 32
 }
 
@@ -56,16 +59,26 @@ public enum StorageCompareBy
 /// <summary>Controls a directory comparison.</summary>
 public sealed record StorageCompareOptions
 {
-    /// <summary>The metadata key that keeps a file's source modification time on stores that cannot set times.</summary>
+    /// <summary>
+    /// The metadata key that keeps a file's source modification time on stores that cannot set times. The value
+    /// is an ISO 8601 time; one written without an offset is read as UTC.
+    /// </summary>
     public const string ModifiedMetadataKey = "cl-mtime";
 
     /// <summary>Gets the criteria; size and time by default, like FileZilla's directory comparison.</summary>
     public StorageCompareBy CompareBy { get; init; } = StorageCompareBy.Size | StorageCompareBy.Time;
     /// <summary>Gets the slack allowed between modification times; FAT and many FTP servers store two-second or whole-second times.</summary>
     public TimeSpan TimeTolerance { get; init; } = TimeSpan.FromSeconds(2);
-    /// <summary>Gets the checksum algorithm used with <see cref="StorageCompareBy.Checksum"/>.</summary>
+    /// <summary>
+    /// Gets the preferred checksum algorithm for <see cref="StorageCompareBy.Checksum"/>. Where the two sides keep
+    /// different server checksums (MD5 on one, SHA-256 on the other), the one a side already has is used, so only
+    /// the other side is downloaded.
+    /// </summary>
     public StorageChecksumAlgorithm ChecksumAlgorithm { get; init; } = StorageChecksumAlgorithm.Md5;
-    /// <summary>Gets whether hidden items (dot-files) take part.</summary>
+    /// <summary>
+    /// Gets whether hidden items (dot-files, and items the provider marks hidden) take part. A hidden folder is
+    /// left out with everything inside it.
+    /// </summary>
     public bool IncludeHidden { get; init; } = true;
     /// <summary>Gets an optional <c>*</c>/<c>?</c> file-name filter; directories are always walked.</summary>
     public string? NamePattern { get; init; }
@@ -74,21 +87,25 @@ public sealed record StorageCompareOptions
     /// one name, matched against the path relative to the compared folder, case-insensitively). Empty means all.
     /// </summary>
     public IReadOnlyList<string> Include { get; init; } = [];
-    /// <summary>Gets path globs to leave out entirely; a folder matching <c>folder/**</c> is left out with its contents.</summary>
+    /// <summary>
+    /// Gets path globs to leave out entirely. A folder that matches (<c>**/node_modules</c>, <c>build/**</c>) is
+    /// left out with everything inside it, as in <c>.gitignore</c>.
+    /// </summary>
     public IReadOnlyList<string> Exclude { get; init; } = [];
     /// <summary>Gets how many files are hashed at once.</summary>
     public int HashConcurrency { get; init; } = 4;
     /// <summary>Gets the most files downloaded to hash in one comparison; beyond it a difference is <see cref="StorageDiffReason.Undecidable"/>.</summary>
     public int? MaxHashedFiles { get; init; }
-    /// <summary>Gets the most bytes downloaded to hash in one comparison.</summary>
+    /// <summary>Gets the most bytes downloaded to hash in one comparison; a file of unknown size is not hashed when set.</summary>
     public long? MaxHashedBytes { get; init; }
     /// <summary>
     /// Gets whether names differing only by case are one item. Null decides from the connections
     /// (<see cref="StorageFeature.CaseInsensitivePaths"/> on either side). When true, two such names on one side
-    /// fail the comparison with <c>storage.conflict</c>.
+    /// fail the comparison with <c>storage.conflict</c>, and names are also matched across Unicode
+    /// normalization forms (NFC and NFD).
     /// </summary>
     public bool? CaseInsensitive { get; init; }
-    /// <summary>Gets how links are treated: skipped by default.</summary>
+    /// <summary>Gets how links are treated: skipped by default. A skipped link to a folder is left out with its contents.</summary>
     public StorageLinkHandling LinkHandling { get; init; } = StorageLinkHandling.Skip;
     /// <summary>Gets the most items one side may hold; a larger tree fails instead of exhausting memory.</summary>
     public int MaxItems { get; init; } = 1_000_000;
@@ -105,7 +122,10 @@ public sealed record StorageCompareOptions
 }
 
 /// <summary>One path compared on both sides.</summary>
-/// <param name="RelativePath">Path relative to the compared directories (the source's spelling when case-insensitive).</param>
+/// <param name="RelativePath">
+/// Path relative to the compared directories, as the source spells it. When case is ignored and the item exists
+/// only at the destination, its folders take the source's spelling where the source has them.
+/// </param>
 /// <param name="Kind">How the two sides relate.</param>
 /// <param name="Reasons">Why they differ, for <see cref="StorageDiffKind.Different"/>.</param>
 /// <param name="Source">The source item, when it exists.</param>
@@ -119,7 +139,8 @@ public sealed record StorageDiffEntry(
 {
     /// <summary>
     /// Gets the destination's spelling of the path when it differs from <see cref="RelativePath"/> only by case
-    /// (a case-insensitive comparison); null when both sides spell it the same.
+    /// (a case-insensitive comparison); null when both sides spell it the same. For an item only at the source it
+    /// is where the item belongs at the destination: in the destination's spelling of any folder it already has.
     /// </summary>
     public string? DestinationRelativePath { get; init; }
 
@@ -128,20 +149,82 @@ public sealed record StorageDiffEntry(
 }
 
 /// <summary>The result of comparing two directory trees.</summary>
-/// <param name="Entries">Every compared path, sorted.</param>
+/// <param name="Entries">Every compared path, sorted so that a folder comes right before its contents.</param>
 public sealed record StorageDiff(IReadOnlyList<StorageDiffEntry> Entries)
 {
     /// <summary>Gets whether the trees match by the chosen criteria.</summary>
     public bool Identical => Entries.All(entry => entry.Kind == StorageDiffKind.Same);
 
-    /// <summary>Gets paths left out by the <c>Exclude</c>/<c>Include</c> filters, per side, for safe folder deletes.</summary>
-    internal IReadOnlySet<string> ExcludedSource { get; init; } = new HashSet<string>();
-    internal IReadOnlySet<string> ExcludedDestination { get; init; } = new HashSet<string>();
+    /// <summary>Gets what the filters, hidden rule, and link handling left out, per side, for safe deletes.</summary>
+    internal StorageExclusions SourceExclusions { get; init; } = new();
+    internal StorageExclusions DestinationExclusions { get; init; } = new();
     internal bool CaseInsensitive { get; init; }
 }
 
-/// <summary>A listed tree: included items keyed by path, and the paths the filters left out.</summary>
-internal sealed record StorageTree(Dictionary<string, StorageItem> Items, HashSet<string> Excluded, bool Missing);
+/// <summary>A listed tree: included items keyed by path, what was left out, and whether the root was missing.</summary>
+internal sealed record StorageTree(Dictionary<string, StorageItem> Items, StorageExclusions Exclusions, bool Missing);
+
+/// <summary>
+/// What one side's listing left out, kept small: folders left out with their contents are kept as prefixes, items
+/// left out by a path rule (the same on both sides) only mark their folder, and only items left out for what they
+/// are on this side (a link, an item the provider marks hidden) are kept one by one. Paths compare ignoring case,
+/// which only ever keeps more.
+/// </summary>
+internal sealed class StorageExclusions
+{
+    private readonly HashSet<string> _pruned = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _items = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _keeping = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Gets how many paths are kept, for the item limit.</summary>
+    public int Count => _pruned.Count + _items.Count;
+
+    /// <summary>Leaves out a folder (or a link to one) and everything below it.</summary>
+    public void Prune(string path)
+    {
+        _pruned.Add(path);
+        Keep(Parent(path));
+    }
+
+    /// <summary>Leaves out one item for what it is on this side, so the other side's copy is left alone too.</summary>
+    public void Item(string path)
+    {
+        _items.Add(path);
+        Keep(Parent(path));
+    }
+
+    /// <summary>Records that a folder holds an item a path rule left out.</summary>
+    public void Holds(string path) => Keep(Parent(path));
+
+    /// <summary>Whether a path lies below a folder that was left out.</summary>
+    public bool UnderPruned(string path)
+    {
+        if (_pruned.Count == 0) return false;
+        for (var slash = path.IndexOf('/'); slash > 0; slash = path.IndexOf('/', slash + 1))
+        {
+            if (_pruned.Contains(path[..slash])) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Whether this side left the path out: itself, or a folder above it.</summary>
+    public bool Covers(string path) => _items.Contains(path) || _pruned.Contains(path) || UnderPruned(path);
+
+    /// <summary>Whether a folder (or one below it) holds something that was left out, so it must not be deleted.</summary>
+    public bool Keeps(string folder) => _keeping.Contains(folder);
+
+    private void Keep(string folder)
+    {
+        while (_keeping.Add(folder) && folder.Length > 0)
+            folder = Parent(folder);
+    }
+
+    internal static string Parent(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash < 0 ? string.Empty : path[..slash];
+    }
+}
 
 /// <summary>Compares directory trees across any two storage connections.</summary>
 public static class StorageCompare
@@ -190,6 +273,12 @@ public static class StorageCompare
         var right = Key(destinationTree.Items, insensitive, "destination");
         if (right.IsFailure) return Result<StorageDiff>.Failure(right.Error!);
 
+        // Where case is ignored, a folder may be spelled differently on each side ("Docs" and "docs"). An item
+        // only one side has goes under the other side's spelling of its folders, so a copy lands in the existing
+        // folder instead of making a second one beside it on a store that keeps case.
+        var sourceFolders = insensitive ? FolderSpellings(sourceTree.Items.Keys) : null;
+        var destinationFolders = insensitive ? FolderSpellings(destinationTree.Items.Keys) : null;
+
         var entries = new List<StorageDiffEntry>();
         var pairs = new List<(string Path, StorageItem Left, StorageItem Right)>();
         var spelling = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -197,11 +286,26 @@ public static class StorageCompare
         {
             left.Value.TryGetValue(key, out var a);
             right.Value.TryGetValue(key, out var b);
-            var path = a?.Relative ?? b!.Relative;
-            if (a is null) { entries.Add(new StorageDiffEntry(path, StorageDiffKind.OnlyInDestination, StorageDiffReason.None, null, b!.Item)); continue; }
-            if (b is null) { entries.Add(new StorageDiffEntry(path, StorageDiffKind.OnlyInSource, StorageDiffReason.None, a.Item, null)); continue; }
-            pairs.Add((path, a.Item, b.Item));
-            if (!string.Equals(a.Relative, b.Relative, StringComparison.Ordinal)) spelling[path] = b.Relative;
+            if (a is null)
+            {
+                var path = Respell(b!.Relative, sourceFolders);
+                entries.Add(new StorageDiffEntry(path, StorageDiffKind.OnlyInDestination, StorageDiffReason.None, null, b.Item)
+                {
+                    DestinationRelativePath = string.Equals(path, b.Relative, StringComparison.Ordinal) ? null : b.Relative
+                });
+                continue;
+            }
+            if (b is null)
+            {
+                var there = Respell(a.Relative, destinationFolders);
+                entries.Add(new StorageDiffEntry(a.Relative, StorageDiffKind.OnlyInSource, StorageDiffReason.None, a.Item, null)
+                {
+                    DestinationRelativePath = string.Equals(there, a.Relative, StringComparison.Ordinal) ? null : there
+                });
+                continue;
+            }
+            pairs.Add((a.Relative, a.Item, b.Item));
+            if (!string.Equals(a.Relative, b.Relative, StringComparison.Ordinal)) spelling[a.Relative] = b.Relative;
         }
 
         var reasons = await CompareFilesAsync(source, destination, pairs, options, cancellationToken).ConfigureAwait(false);
@@ -214,36 +318,80 @@ public static class StorageCompare
                 DestinationRelativePath = spelling.GetValueOrDefault(path)
             });
         }
-        entries.Sort((x, y) => string.CompareOrdinal(x.RelativePath, y.RelativePath));
+        entries.Sort((x, y) => ComparePaths(x.RelativePath, y.RelativePath));
         return Result<StorageDiff>.Success(new StorageDiff(entries)
         {
-            ExcludedSource = sourceTree.Excluded,
-            ExcludedDestination = destinationTree.Excluded,
+            SourceExclusions = sourceTree.Exclusions,
+            DestinationExclusions = destinationTree.Exclusions,
             CaseInsensitive = insensitive
         });
     }
 
+    /// <summary>Orders paths so a folder comes right before everything inside it ("a", "a/b", "a-b").</summary>
+    internal static int ComparePaths(string x, string y)
+    {
+        var length = Math.Min(x.Length, y.Length);
+        for (var i = 0; i < length; i++)
+        {
+            if (x[i] == y[i]) continue;
+            if (x[i] == '/') return -1;
+            if (y[i] == '/') return 1;
+            return x[i].CompareTo(y[i]);
+        }
+        return x.Length.CompareTo(y.Length);
+    }
+
+    /// <summary>Every folder on one side, by its case-insensitive key, as that side spells it.</summary>
+    private static Dictionary<string, string> FolderSpellings(IEnumerable<string> paths)
+    {
+        var folders = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var path in paths)
+        {
+            // Walking up stops at the first folder already known: its own parents were added with it.
+            for (var parent = StorageExclusions.Parent(path); parent.Length > 0; parent = StorageExclusions.Parent(parent))
+            {
+                if (!folders.TryAdd(KeyOf(parent, insensitive: true), parent)) break;
+            }
+        }
+        return folders;
+    }
+
+    /// <summary>Spells a path's folders the way the other side does, for the deepest folder it already has.</summary>
+    private static string Respell(string path, Dictionary<string, string>? folders)
+    {
+        if (folders is null) return path;
+        for (var slash = path.LastIndexOf('/'); slash > 0; slash = path.LastIndexOf('/', slash - 1))
+        {
+            if (folders.TryGetValue(KeyOf(path[..slash], insensitive: true), out var spelled))
+                return spelled + path[slash..];
+        }
+        return path;
+    }
+
     /// <summary>
-    /// The effective modification time: the source time kept in metadata on stores that cannot set times. The
-    /// kept time is trusted only when it is not later than the object itself (plus a minute of clock skew): a
-    /// copy is always written after its source was modified, so a later value is not one this library wrote.
+    /// The effective modification time: the source time kept in metadata on stores that cannot set times, read
+    /// as UTC when it carries no offset; otherwise the item's own time.
     /// </summary>
     internal static DateTimeOffset? EffectiveModified(StorageItem item)
     {
         if (!item.Metadata.TryGetValue(StorageCompareOptions.ModifiedMetadataKey, out var kept) ||
-            !DateTimeOffset.TryParse(kept, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
+            !DateTimeOffset.TryParse(kept, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
             return item.LastModified;
-        return item.LastModified is { } written && parsed > written + TimeSpan.FromMinutes(1) ? item.LastModified : parsed;
+        return parsed;
     }
 
     private sealed record Keyed(string Relative, StorageItem Item);
+
+    /// <summary>The key a path is matched by: itself, or upper-cased in composed (NFC) form where case is ignored.</summary>
+    internal static string KeyOf(string path, bool insensitive) =>
+        insensitive ? path.Normalize(NormalizationForm.FormC).ToUpperInvariant() : path;
 
     private static Result<Dictionary<string, Keyed>> Key(Dictionary<string, StorageItem> items, bool insensitive, string side)
     {
         var keyed = new Dictionary<string, Keyed>(StringComparer.Ordinal);
         foreach (var (relative, item) in items)
         {
-            var key = insensitive ? relative.ToUpperInvariant() : relative;
+            var key = KeyOf(relative, insensitive);
             if (keyed.TryGetValue(key, out var existing))
                 return Result<Dictionary<string, Keyed>>.Failure(StorageErrors.Conflict(
                     $"The {side} has '{existing.Relative}' and '{relative}', which are the same name where case is ignored.",
@@ -289,23 +437,35 @@ public static class StorageCompare
             (reasons[pair.Path] & (StorageDiffReason.Size | StorageDiffReason.Type)) == 0).ToList();
         var budget = new HashBudget(options.MaxHashedFiles, options.MaxHashedBytes);
         Error? failure = null;
-        await Parallel.ForEachAsync(candidates, new ParallelOptions { MaxDegreeOfParallelism = options.HashConcurrency, CancellationToken = cancellationToken }, async (pair, token) =>
+        // A failure that concerns the connection stops the other pairs at once; one unreadable file does not.
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try
         {
-            var a = await DigestAsync(source, pair.Left, options, budget, token).ConfigureAwait(false);
-            var b = await DigestAsync(destination, pair.Right, options, budget, token).ConfigureAwait(false);
-            lock (reasons)
+            await Parallel.ForEachAsync(candidates, new ParallelOptions { MaxDegreeOfParallelism = options.HashConcurrency, CancellationToken = stop.Token }, async (pair, token) =>
             {
-                if (a.IsFailure || b.IsFailure) { failure ??= (a.Error ?? b.Error); return; }
-                var current = reasons[pair.Path];
-                if (a.Value is null || b.Value is null)
-                    reasons[pair.Path] = current | StorageDiffReason.Undecidable;
-                else if (!string.Equals(a.Value, b.Value, StringComparison.OrdinalIgnoreCase))
-                    reasons[pair.Path] = current | StorageDiffReason.Checksum;
-                else
-                    // Equal content wins over differing times: a checksum match means the file needs no copy.
-                    reasons[pair.Path] = current & ~(StorageDiffReason.SourceNewer | StorageDiffReason.DestinationNewer);
-            }
-        }).ConfigureAwait(false);
+                var equal = await SameContentAsync(source, pair.Left, destination, pair.Right, options, budget, token).ConfigureAwait(false);
+                lock (reasons)
+                {
+                    if (equal.IsFailure)
+                    {
+                        failure ??= equal.Error;
+                        stop.Cancel();
+                        return;
+                    }
+                    var current = reasons[pair.Path];
+                    reasons[pair.Path] = equal.Value switch
+                    {
+                        null => current | StorageDiffReason.Undecidable,
+                        false => current | StorageDiffReason.Checksum,
+                        // Equal content wins over differing times: a checksum match means the file needs no copy.
+                        true => current & ~(StorageDiffReason.SourceNewer | StorageDiffReason.DestinationNewer)
+                    };
+                }
+            }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (failure is not null && !cancellationToken.IsCancellationRequested)
+        {
+        }
         return failure is null
             ? Result<Dictionary<string, StorageDiffReason>>.Success(reasons)
             : Result<Dictionary<string, StorageDiffReason>>.Failure(failure);
@@ -336,35 +496,132 @@ public static class StorageCompare
         return reasons;
     }
 
-    /// <summary>A file's digest: the server's when it keeps one, otherwise computed if the budget allows; null when neither.</summary>
-    private static async Task<Result<string?>> DigestAsync(IStorageService storage, StorageItem item, StorageCompareOptions options, HashBudget budget, CancellationToken cancellationToken)
+    /// <summary>
+    /// Whether two files hold the same content: by server checksums both sides keep in one algorithm; else by
+    /// hashing only the side without one in the algorithm the other keeps; else by hashing both. Null when the
+    /// budget does not allow it or a file cannot be read; a failure only for errors about the connection itself.
+    /// </summary>
+    private static async Task<Result<bool?>> SameContentAsync(
+        IStorageService source,
+        StorageItem left,
+        IStorageService destination,
+        StorageItem right,
+        StorageCompareOptions options,
+        HashBudget budget,
+        CancellationToken cancellationToken)
     {
-        var server = await storage.GetServerChecksumAsync(item.Path, options.ChecksumAlgorithm, cancellationToken).ConfigureAwait(false);
-        if (server.IsSuccess) return Result<string?>.Success(server.Value!.HexValue);
-        if (!budget.TryTake(item.Size ?? 0)) return Result<string?>.Success(null);
-        var computed = await storage.ComputeChecksumAsync(item.Path, options.ChecksumAlgorithm, mode: StorageChecksumMode.ComputeOnly, cancellationToken: cancellationToken).ConfigureAwait(false);
-        return computed.IsSuccess ? Result<string?>.Success(computed.Value!.HexValue) : Result<string?>.Failure(computed.Error!);
+        var preferred = options.ChecksumAlgorithm;
+        StorageChecksumAlgorithm[] algorithms = preferred == StorageChecksumAlgorithm.Md5
+            ? [StorageChecksumAlgorithm.Md5, StorageChecksumAlgorithm.Sha256]
+            : preferred == StorageChecksumAlgorithm.Sha256
+                ? [StorageChecksumAlgorithm.Sha256, StorageChecksumAlgorithm.Md5]
+                : [preferred, StorageChecksumAlgorithm.Md5, StorageChecksumAlgorithm.Sha256];
+        var leftKept = new Dictionary<StorageChecksumAlgorithm, string>();
+        var rightKept = new Dictionary<StorageChecksumAlgorithm, string>();
+        foreach (var algorithm in algorithms)
+        {
+            var a = await ServerChecksumAsync(source, left, algorithm, cancellationToken).ConfigureAwait(false);
+            if (a.Fatal is not null) return Result<bool?>.Failure(a.Fatal);
+            if (a.Unreadable) return Result<bool?>.Success(null);
+            var b = await ServerChecksumAsync(destination, right, algorithm, cancellationToken).ConfigureAwait(false);
+            if (b.Fatal is not null) return Result<bool?>.Failure(b.Fatal);
+            if (b.Unreadable) return Result<bool?>.Success(null);
+            if (a.Value is not null && b.Value is not null)
+                return Result<bool?>.Success(string.Equals(a.Value, b.Value, StringComparison.OrdinalIgnoreCase));
+            if (a.Value is not null) leftKept[algorithm] = a.Value;
+            if (b.Value is not null) rightKept[algorithm] = b.Value;
+        }
+
+        // Only one side keeps a checksum: hash the other side in that algorithm.
+        foreach (var algorithm in algorithms)
+        {
+            if (leftKept.TryGetValue(algorithm, out var kept))
+                return await CompareComputedAsync(destination, right, algorithm, kept, budget, cancellationToken).ConfigureAwait(false);
+            if (rightKept.TryGetValue(algorithm, out kept))
+                return await CompareComputedAsync(source, left, algorithm, kept, budget, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Neither side keeps one: both are hashed, and the budget is taken for both at once or not at all.
+        if (!budget.TryTake(2, [left.Size, right.Size])) return Result<bool?>.Success(null);
+        var leftHash = await ComputeAsync(source, left, preferred, cancellationToken).ConfigureAwait(false);
+        if (leftHash.Fatal is not null) return Result<bool?>.Failure(leftHash.Fatal);
+        if (leftHash.Value is null) return Result<bool?>.Success(null);
+        var rightHash = await ComputeAsync(destination, right, preferred, cancellationToken).ConfigureAwait(false);
+        if (rightHash.Fatal is not null) return Result<bool?>.Failure(rightHash.Fatal);
+        if (rightHash.Value is null) return Result<bool?>.Success(null);
+        return Result<bool?>.Success(string.Equals(leftHash.Value, rightHash.Value, StringComparison.OrdinalIgnoreCase));
     }
+
+    private static async Task<Result<bool?>> CompareComputedAsync(
+        IStorageService storage,
+        StorageItem item,
+        StorageChecksumAlgorithm algorithm,
+        string expected,
+        HashBudget budget,
+        CancellationToken cancellationToken)
+    {
+        if (!budget.TryTake(1, [item.Size])) return Result<bool?>.Success(null);
+        var computed = await ComputeAsync(storage, item, algorithm, cancellationToken).ConfigureAwait(false);
+        if (computed.Fatal is not null) return Result<bool?>.Failure(computed.Fatal);
+        return Result<bool?>.Success(computed.Value is null ? null : string.Equals(computed.Value, expected, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private readonly record struct Digest(string? Value, bool Unreadable, Error? Fatal);
+
+    /// <summary>A server checksum; a missing algorithm is no value, a file that cannot be read is unreadable.</summary>
+    private static async Task<Digest> ServerChecksumAsync(IStorageService storage, StorageItem item, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken)
+    {
+        var server = await storage.GetServerChecksumAsync(item.Path, algorithm, cancellationToken).ConfigureAwait(false);
+        if (server.IsSuccess) return new Digest(server.Value!.HexValue, false, null);
+        if (server.Error!.Code == StorageErrors.UnsupportedCode) return new Digest(null, false, null);
+        return IsAboutConnection(server.Error) ? new Digest(null, false, server.Error) : new Digest(null, true, null);
+    }
+
+    private static async Task<Digest> ComputeAsync(IStorageService storage, StorageItem item, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken)
+    {
+        var computed = await storage.ComputeChecksumAsync(item.Path, algorithm, mode: StorageChecksumMode.ComputeOnly, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (computed.IsSuccess) return new Digest(computed.Value!.HexValue, false, null);
+        return IsAboutConnection(computed.Error!) ? new Digest(null, false, computed.Error) : new Digest(null, true, null);
+    }
+
+    /// <summary>
+    /// Whether an error concerns the connection rather than one file: the comparison fails for those, while a
+    /// locked, vanished, or forbidden file only leaves its own pair undecided.
+    /// </summary>
+    private static bool IsAboutConnection(Error error) =>
+        StorageErrorInfo.IsTransient(error) || error.Code is StorageErrors.UnauthorizedCode or StorageErrors.AuthenticationFailedCode
+            or StorageErrors.TlsFailureCode or StorageErrors.HostKeyRejectedCode or StorageErrors.CancelledCode;
 
     private sealed class HashBudget(int? files, long? bytes)
     {
+        private readonly Lock _gate = new();
         private int _files;
         private long _bytes;
 
-        public bool TryTake(long size)
+        /// <summary>Takes room for <paramref name="count"/> files at once, or none; a file of unknown size fits no byte budget.</summary>
+        public bool TryTake(int count, long?[] sizes)
         {
-            lock (this)
+            lock (_gate)
             {
-                if (files is { } maxFiles && _files + 1 > maxFiles) return false;
-                if (bytes is { } maxBytes && _bytes + size > maxBytes) return false;
-                _files++;
-                _bytes += size;
+                if (files is { } maxFiles && _files + count > maxFiles) return false;
+                if (bytes is { } maxBytes)
+                {
+                    if (sizes.Any(size => size is null)) return false;
+                    var total = sizes.Sum(size => size!.Value);
+                    if (_bytes + total > maxBytes) return false;
+                    _bytes += total;
+                }
+                _files += count;
                 return true;
             }
         }
     }
 
-    /// <summary>Lists a tree once, applying hidden/name/include/exclude filters and link handling.</summary>
+    /// <summary>
+    /// Lists a tree once, applying the hidden rule, name/include/exclude filters, and link handling. A folder the
+    /// hidden rule or an exclude pattern leaves out is left out with everything below it, and a skipped link to a
+    /// folder with its contents; what was left out is recorded so deletes never touch it on the other side.
+    /// </summary>
     internal static async Task<Result<StorageTree>> ListTreeAsync(
         IStorageService storage,
         string root,
@@ -374,65 +631,154 @@ public static class StorageCompare
         CancellationToken cancellationToken)
     {
         var items = new Dictionary<string, StorageItem>(StringComparer.Ordinal);
-        var excluded = new HashSet<string>(StringComparer.Ordinal);
+        var exclusions = new StorageExclusions();
         var normalizedRoot = StoragePath.Normalize(root);
         if (normalizedRoot.IsFailure) return Result<StorageTree>.Failure(normalizedRoot.Error!);
-        var listOptions = new StorageListOptions { Recursive = true, IncludeHidden = options.IncludeHidden };
+        // Hidden items are listed and left out here, so they are recorded (and a hidden folder's contents go too).
+        var listOptions = new StorageListOptions { Recursive = true, IncludeHidden = true };
         var pattern = string.IsNullOrEmpty(options.NamePattern) ? null : Providers.StorageListFilter.Glob(options.NamePattern);
         var missing = false;
+        var listed = 0;
         await foreach (var item in storage.EnumerateItemsAsync(normalizedRoot.Value!, listOptions, cancellationToken).ConfigureAwait(false))
         {
             if (item.IsFailure)
             {
                 // A missing destination is empty; any other listing failure makes the tree unusable.
-                if (!required && item.Error!.Code == StorageErrors.NotFoundCode && items.Count == 0) { missing = true; break; }
+                if (!required && item.Error!.Code == StorageErrors.NotFoundCode && listed == 0) { missing = true; break; }
                 return Result<StorageTree>.Failure(item.Error!);
             }
+            listed++;
             var relative = Relative(normalizedRoot.Value!, item.Value!.Path);
-            if (relative is null or { Length: 0 }) continue;
+            // An item outside the listed folder would otherwise vanish from the comparison, and look deleted.
+            if (relative is null)
+                return Result<StorageTree>.Failure(StorageErrors.ProviderError(
+                    $"Listing '{normalizedRoot.Value}' returned '{item.Value.Path}', which is not inside it.",
+                    $"listedPath={item.Value.Path}"));
+            if (relative.Length == 0) continue;
+            if (exclusions.UnderPruned(relative)) continue;
             var current = item.Value;
-            if (filter.Excludes(relative, current.ItemType == StorageItemType.Directory) ||
-                (pattern is not null && current.ItemType == StorageItemType.File && !pattern.IsMatch(current.Name)))
+            var isDirectory = current.ItemType == StorageItemType.Directory;
+
+            if (!options.IncludeHidden && (current.IsHidden || current.Name.StartsWith('.')))
             {
-                excluded.Add(relative);
+                if (isDirectory || current.ItemType == StorageItemType.Link) exclusions.Prune(relative);
+                else if (current.Name.StartsWith('.')) exclusions.Holds(relative);
+                else exclusions.Item(relative);
+                continue;
+            }
+            if (filter.Excludes(relative, isDirectory))
+            {
+                if (isDirectory) exclusions.Prune(relative);
+                else exclusions.Holds(relative);
+                continue;
+            }
+            if (pattern is not null && current.ItemType == StorageItemType.File && !pattern.IsMatch(current.Name))
+            {
+                exclusions.Holds(relative);
                 continue;
             }
             if (current.ItemType == StorageItemType.Link)
             {
                 switch (options.LinkHandling)
                 {
-                    case StorageLinkHandling.Skip:
-                        excluded.Add(relative);
-                        continue;
                     case StorageLinkHandling.Reject:
                         return Result<StorageTree>.Failure(StorageErrors.Unsupported(
                             $"'{current.Path}' is a link. Set LinkHandling to skip, follow, or recreate links."));
                     case StorageLinkHandling.Follow:
-                        var target = await storage.GetInfoAsync(current.Path, cancellationToken).ConfigureAwait(false);
-                        if (target.IsFailure || target.Value!.ItemType != StorageItemType.File) { excluded.Add(relative); continue; }
-                        current = target.Value with { Path = current.Path, Name = current.Name };
+                        var target = await FollowAsync(storage, current, cancellationToken).ConfigureAwait(false);
+                        if (target is null)
+                        {
+                            exclusions.Item(relative);
+                            exclusions.Prune(relative);
+                            continue;
+                        }
+                        current = target with { Path = current.Path, Name = current.Name };
                         break;
+                    default:
+                        // Skipped, with anything a provider lists below a link to a folder.
+                        exclusions.Item(relative);
+                        exclusions.Prune(relative);
+                        continue;
                 }
             }
             items[relative] = current;
-            if (items.Count > options.MaxItems)
+            if (items.Count + exclusions.Count > options.MaxItems)
                 return Result<StorageTree>.Failure(StorageErrors.TooLarge(
                     $"'{normalizedRoot.Value}' holds more than {options.MaxItems} items; raise MaxItems or narrow the filters."));
         }
-        return Result<StorageTree>.Success(new StorageTree(items, excluded, missing));
+        return Result<StorageTree>.Success(new StorageTree(items, exclusions, missing));
     }
 
+    /// <summary>
+    /// What a link points to, as a file or folder of the same connection: the provider's own answer when it
+    /// follows links, otherwise the link's target resolved against its folder (or the connection's root for an
+    /// absolute target inside it). Null when the target is elsewhere, missing, or a chain of links too long.
+    /// </summary>
+    private static async Task<StorageItem?> FollowAsync(IStorageService storage, StorageItem link, CancellationToken cancellationToken)
+    {
+        var current = link;
+        for (var hop = 0; hop < 8; hop++)
+        {
+            var info = await storage.GetInfoAsync(current.Path, cancellationToken).ConfigureAwait(false);
+            if (info.IsSuccess && info.Value!.ItemType is StorageItemType.File or StorageItemType.Directory)
+                return info.Value;
+            var linkTarget = (info.IsSuccess ? info.Value!.LinkTarget : null) ?? current.LinkTarget;
+            if (linkTarget is null || ResolveLinkTarget(storage.Root, current.Path, linkTarget) is not { } targetPath)
+                return null;
+            current = new StorageItem { Path = targetPath, Name = targetPath[(targetPath.LastIndexOf('/') + 1)..], ItemType = StorageItemType.Link };
+        }
+        return null;
+    }
+
+    /// <summary>A link target as a path of the connection, or null when it points outside it.</summary>
+    internal static string? ResolveLinkTarget(string root, string linkPath, string target)
+    {
+        var text = target.Replace('\\', '/');
+        var rooted = text.StartsWith('/') || (text.Length > 1 && text[1] == ':');
+        string combined;
+        if (rooted)
+        {
+            var normalizedRoot = root.Replace('\\', '/').TrimEnd('/');
+            if (normalizedRoot.Length == 0 || !text.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase)) return null;
+            combined = text[(normalizedRoot.Length + 1)..];
+        }
+        else
+        {
+            combined = $"{StorageExclusions.Parent(linkPath)}/{text}";
+        }
+        var parts = new List<string>();
+        foreach (var part in combined.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (part == ".") continue;
+            if (part == "..")
+            {
+                if (parts.Count == 0) return null;
+                parts.RemoveAt(parts.Count - 1);
+                continue;
+            }
+            parts.Add(part);
+        }
+        return parts.Count == 0 ? null : string.Join('/', parts);
+    }
+
+    /// <summary>
+    /// A listed path relative to the listed folder. A provider that answers in the server's spelling of the
+    /// folder ("Docs" for a request of "docs") is matched ignoring case; null for a path outside the folder.
+    /// </summary>
     internal static string? Relative(string root, string path)
     {
         if (root.Length == 0) return path;
-        if (string.Equals(root, path, StringComparison.Ordinal)) return string.Empty;
-        return path.StartsWith(root + "/", StringComparison.Ordinal) ? path[(root.Length + 1)..] : null;
+        if (string.Equals(root, path, StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        return path.Length > root.Length && path[root.Length] == '/' && path.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+            ? path[(root.Length + 1)..]
+            : null;
     }
 }
 
 /// <summary>Include and exclude globs over relative paths: <c>**</c> spans folders, <c>*</c> and <c>?</c> stay in one name.</summary>
 internal sealed class PathFilter
 {
+    private static readonly TimeSpan MatchTimeout = TimeSpan.FromSeconds(1);
     private readonly Regex[] _include;
     private readonly Regex[] _exclude;
 
@@ -442,9 +788,9 @@ internal sealed class PathFilter
         _exclude = [.. options.Exclude.Select(Compile)];
     }
 
+    /// <summary>Whether a path is left out; a folder matching an exclude pattern is left out with its contents.</summary>
     public bool Excludes(string relativePath, bool isDirectory)
     {
-        // A folder is excluded when "folder/**"-style patterns cover it, so its contents go with it.
         if (_exclude.Any(glob => glob.IsMatch(relativePath) || (isDirectory && glob.IsMatch(relativePath + "/"))))
             return true;
         return !isDirectory && _include.Length > 0 && !_include.Any(glob => glob.IsMatch(relativePath));
@@ -467,6 +813,6 @@ internal sealed class PathFilter
             else if (c == '?') pattern.Append("[^/]");
             else pattern.Append(Regex.Escape(c.ToString()));
         }
-        return new Regex(pattern.Append('$').ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return new Regex(pattern.Append('$').ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, MatchTimeout);
     }
 }

@@ -34,7 +34,10 @@ public enum StorageSyncConflictPolicy
     /// a delete against a modify, the modified file is kept.
     /// </summary>
     KeepBoth = 1,
-    /// <summary>The later modification wins; equal or unknown times stay conflicts. A modify beats a delete.</summary>
+    /// <summary>
+    /// The later modification wins. A pair with equal or unknown times is left alone and reported as a
+    /// <see cref="StorageSyncActionKind.Conflict"/>, without holding back the rest of the plan. A modify beats a delete.
+    /// </summary>
     NewerWins = 2
 }
 
@@ -96,7 +99,7 @@ public sealed record StorageSyncIdentity(long? Size, DateTimeOffset? Modified, s
     internal static StorageSyncIdentity? Of(StorageItem? item) =>
         item is null || item.ItemType == StorageItemType.Directory
             ? null
-            : new StorageSyncIdentity(item.Size, StorageCompare.EffectiveModified(item), item.ETag, item.VersionId);
+            : new StorageSyncIdentity(item.Size, StorageCompare.EffectiveModified(item), item.ETag, item.VersionId, item.Sha256);
 
     /// <summary>Whether an item is still this version: by version, else ETag, else size and time.</summary>
     internal bool Matches(StorageItem? item, TimeSpan tolerance)
@@ -190,7 +193,11 @@ public sealed record StorageSyncOptions
     public bool DryRun { get; init; }
     /// <summary>Gets whether copied files keep the source's modification time (set, or kept in metadata on object stores).</summary>
     public bool PreserveTimestamps { get; init; } = true;
-    /// <summary>Gets whether each copy is verified (SHA-256 during the copy, then confirmed on the destination).</summary>
+    /// <summary>
+    /// Gets whether each copy is verified: SHA-256 during the copy, the staged object confirmed before it is
+    /// promoted, and the promoted file confirmed on the destination (its length, and its SHA-256 where the server
+    /// keeps one). The digest is recorded in the baseline (<see cref="StorageSyncIdentity.Sha256"/>).
+    /// </summary>
     public bool Verify { get; init; }
     /// <summary>Gets how many files are copied at once.</summary>
     public int MaxConcurrency { get; init; } = 4;
@@ -209,7 +216,10 @@ public sealed record StorageSyncOptions
     public int ItemRetries { get; init; } = 2;
     /// <summary>Gets whether the run continues after a step fails; otherwise the remaining steps are not run.</summary>
     public bool ContinueOnError { get; init; } = true;
-    /// <summary>Gets whether a plan with blocked conflicts may still apply its other steps.</summary>
+    /// <summary>
+    /// Gets whether a plan with blocked conflicts (<see cref="StorageSyncConflictPolicy.Block"/>) may still apply
+    /// its other steps. It is part of the plan's options digest, so a plan must be made with it to be applied with it.
+    /// </summary>
     public bool ApplyWithConflicts { get; init; }
     /// <summary>Gets an optional progress sink; reports carry the current file.</summary>
     [JsonIgnore]
@@ -221,7 +231,7 @@ public sealed record StorageSyncOptions
             return Result.Failure(StorageErrors.InvalidContent("MaxConcurrency must be between 1 and 64."));
         if (DeleteExtraneous && Direction != StorageSyncDirection.Mirror)
             return Result.Failure(StorageErrors.InvalidContent("DeleteExtraneous only applies to Mirror syncs."));
-        if (MaxDeletes is < 0 || MaxDeletePercent is < 0 or > 100)
+        if (MaxDeletes is < 0 || MaxDeletePercent is { } percent && (double.IsNaN(percent) || percent is < 0 or > 100))
             return Result.Failure(StorageErrors.InvalidContent("MaxDeletes cannot be negative and MaxDeletePercent must be between 0 and 100."));
         if (ItemRetries is < 0 or > 20)
             return Result.Failure(StorageErrors.InvalidContent("ItemRetries must be between 0 and 20."));
@@ -229,6 +239,37 @@ public sealed record StorageSyncOptions
             return Result.Failure(StorageErrors.InvalidContent("StateStore and SyncId are set together."));
         return Compare.Validate();
     }
+
+    /// <summary>
+    /// A digest of every option that shapes what a plan does when applied — direction, deletes, conflicts,
+    /// comparison and time tolerance, safety limits, verification — so a plan is applied only with the options
+    /// it was made (and approved) with. Concurrency, retries, stopping on error, and progress are left out.
+    /// </summary>
+    internal string Fingerprint()
+    {
+        var shape = new
+        {
+            Direction,
+            DeleteExtraneous,
+            PropagateDeletes,
+            ConflictPolicy,
+            SyncId,
+            PreserveTimestamps,
+            Verify,
+            Compare,
+            MaxDeletes,
+            MaxDeletePercent,
+            AllowEmptySide,
+            ApplyWithConflicts
+        };
+        return Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(shape, FingerprintJson)));
+    }
+
+    private static readonly JsonSerializerOptions FingerprintJson = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() },
+        NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+    };
 }
 
 /// <summary>One planned sync step, with the versions it was planned against.</summary>
@@ -268,6 +309,15 @@ public sealed record StorageSyncPlan
         Converters = { new JsonStringEnumConverter() }
     };
 
+    /// <summary>The plan format this library writes; a plan of another format is refused at apply.</summary>
+    public const int CurrentSchemaVersion = 2;
+
+    /// <summary>Gets the plan format; plans without one (older libraries) are refused at apply.</summary>
+    public int SchemaVersion { get; init; }
+    /// <summary>Gets the source connection's id; the plan applies only to the same connections.</summary>
+    public string? SourceConnectionId { get; init; }
+    /// <summary>Gets the destination connection's id.</summary>
+    public string? DestinationConnectionId { get; init; }
     /// <summary>Gets the source directory.</summary>
     public required string SourceRoot { get; init; }
     /// <summary>Gets the destination directory.</summary>
@@ -280,14 +330,20 @@ public sealed record StorageSyncPlan
     public StorageSyncDirection Direction { get; init; }
     /// <summary>Gets the conflict policy.</summary>
     public StorageSyncConflictPolicy ConflictPolicy { get; init; }
+    /// <summary>Gets whether names differing only by case were matched as one item.</summary>
+    public bool CaseInsensitive { get; init; }
+    /// <summary>Gets the digest of the options the plan was made with; the apply must use the same options.</summary>
+    public string? OptionsDigest { get; init; }
     /// <summary>Gets the steps, in the order they run.</summary>
     public IReadOnlyList<StorageSyncAction> Actions { get; init; } = [];
     /// <summary>Gets the files that already matched.</summary>
     public int Unchanged { get; init; }
     /// <summary>
     /// Gets, for a two-way sync with a baseline, the paths both sides agreed on when the plan was made, with the
-    /// versions seen then. The baseline saved after the run records these and what the run's copies wrote —
-    /// never what happens to be there afterwards, so an edit made during the run is still seen next time.
+    /// versions seen then, and the previous entries of paths the plan leaves alone (left out by a filter, hidden,
+    /// a skipped link, under a file/folder clash, or a folder kept by excluded items). The baseline saved after the
+    /// run records these and what the run's copies wrote — never what happens to be there afterwards, so an edit
+    /// made during the run is still seen next time, and a deletion made while a path was left out is not undone.
     /// </summary>
     public IReadOnlyDictionary<string, StorageSyncBaselineEntry> Agreed { get; init; } = new Dictionary<string, StorageSyncBaselineEntry>();
     /// <summary>Gets notes for a person, such as why deletions are withheld.</summary>
@@ -301,9 +357,12 @@ public sealed record StorageSyncPlan
     [JsonIgnore]
     public IReadOnlyList<StorageSyncAction> Conflicts => [.. Actions.Where(action => action.Kind == StorageSyncActionKind.Conflict)];
 
-    /// <summary>Gets whether the plan can be applied without <see cref="StorageSyncOptions.ApplyWithConflicts"/>.</summary>
+    /// <summary>
+    /// Gets whether the plan can be applied without <see cref="StorageSyncOptions.ApplyWithConflicts"/>: it has no
+    /// conflicts, or only those <see cref="StorageSyncConflictPolicy.NewerWins"/> could not decide (left alone).
+    /// </summary>
     [JsonIgnore]
-    public bool IsApprovable => Conflicts.Count == 0;
+    public bool IsApprovable => Conflicts.Count == 0 || ConflictPolicy == StorageSyncConflictPolicy.NewerWins;
 
     /// <summary>Serializes the plan so it can be shown, stored, and approved later.</summary>
     public string ToJson() => JsonSerializer.Serialize(this, Json);
@@ -320,7 +379,11 @@ public sealed record StorageSyncPlan
 /// <summary>How one planned step turned out.</summary>
 /// <param name="Action">The step.</param>
 /// <param name="Outcome">What happened.</param>
-/// <param name="Error">The failure, for failed and stale steps.</param>
+/// <param name="Error">
+/// The failure, for failed and stale steps. An applied step carries one when the destination was committed but
+/// something after it was not done (for example a provider's own staging or backup copy was left behind; see
+/// <see cref="StorageErrorInfo.LeftBehindKey"/>).
+/// </param>
 /// <param name="Attempts">How many times it was tried.</param>
 public sealed record StorageSyncActionResult(StorageSyncAction Action, StorageSyncActionOutcome Outcome, Error? Error = null, int Attempts = 0);
 
@@ -337,6 +400,11 @@ public sealed record StorageSyncReport
     public bool Cancelled { get; init; }
     /// <summary>Gets whether the baseline was saved after the run.</summary>
     public bool BaselineSaved { get; init; }
+    /// <summary>
+    /// Gets why the baseline was not saved: the store failed, or another run saved in between
+    /// (<c>storage.conflict</c>). Null when it was saved or there is no baseline.
+    /// </summary>
+    public Error? BaselineError { get; init; }
 
     /// <summary>Gets the planned steps.</summary>
     public IReadOnlyList<StorageSyncAction> Actions => Plan.Actions;
