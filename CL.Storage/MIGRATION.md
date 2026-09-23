@@ -173,6 +173,15 @@ positional members are unchanged. Use `TestConnectionAsync` to check settings be
 Authentication and trust failures now stop as `Blocked` instead of `Failed`; transient failures are retried
 as before. Handle the new states `Paused`, `Blocked`, `NeedsReconciliation`, and `Interrupted`.
 
+### Sync (2026-09-23)
+
+- Two-way sync without a baseline now reports differing files as conflicts and, with the default
+  `ConflictPolicy = Block`, refuses to apply the plan. Set `ConflictPolicy = NewerWins` for the previous
+  newer-wins behaviour, or add `StateStore` and `SyncId` for a real three-way sync.
+- Read step outcomes from `report.Results` (each has `Outcome` and `Error`); `report.Failed`, `Copied`,
+  and `Deleted` still work. Deletions a safety rule held back are in `report.Withheld`.
+- Construct `StorageSyncAction` with named properties if you build them yourself.
+
 ## Recommended rollout
 
 1. Add `CodeLogic.Storage` beside the legacy package.

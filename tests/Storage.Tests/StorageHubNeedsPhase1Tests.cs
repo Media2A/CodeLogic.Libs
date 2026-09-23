@@ -56,9 +56,10 @@ public sealed class SyncCorrectionTests
 
         var report = (await source.SyncAsync("", destination, "", new StorageSyncOptions { Direction = StorageSyncDirection.Mirror, DeleteExtraneous = true })).Value!;
 
-        Assert.Empty(deleted);
-        var skipped = Assert.Single(report.Actions, action => action.Kind == StorageSyncActionKind.DeleteFromDestination);
-        Assert.Equal(StorageErrors.PartialFailureCode, skipped.Error!.Code);
+        Assert.DoesNotContain("extra.txt", deleted); // only the failed copy's staging object was cleaned up
+        var skipped = Assert.Single(report.Withheld);
+        Assert.Equal(StorageSyncActionKind.DeleteFromDestination, skipped.Action.Kind);
+        Assert.Contains("failed", skipped.Action.WithheldReason);
     }
 }
 

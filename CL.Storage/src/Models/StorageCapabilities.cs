@@ -79,7 +79,12 @@ public enum StorageFeature : ulong
     /// <summary>Raw protocol commands can be sent through <see cref="Abstractions.IStorageCommandService"/>.</summary>
     RawCommands = 1UL << 35,
     /// <summary>Free and used space can be read through <see cref="Abstractions.IStorageSpaceService"/>.</summary>
-    SpaceInfo = 1UL << 36
+    SpaceInfo = 1UL << 36,
+    /// <summary>
+    /// Names that differ only by letter case are the same item (local folders on Windows and macOS). Sync
+    /// refuses to copy two such names into this connection instead of letting the last copy win.
+    /// </summary>
+    CaseInsensitivePaths = 1UL << 37
 }
 
 /// <summary>Optional provider limits. A null value means the provider did not expose a reliable limit.</summary>

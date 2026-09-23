@@ -572,27 +572,76 @@ var diff = await storage.CompareAsync("sftp", "site", "s3", "backup/site");
 foreach (var entry in diff.Value!.Entries.Where(e => e.Kind != StorageDiffKind.Same))
     Console.WriteLine($"{entry.Kind,-18} {entry.Reasons,-12} {entry.RelativePath}");
 
-var report = await storage.SyncAsync("sftp", "site", "s3", "backup/site", new StorageSyncOptions
+var options = new StorageSyncOptions
 {
-    Direction = StorageSyncDirection.Mirror,
-    DeleteExtraneous = true,
-    DryRun = true
-});
+    Direction = StorageSyncDirection.TwoWay,
+    StateStore = baselines, SyncId = "site",          // a baseline makes two-way three-way
+    ConflictPolicy = StorageSyncConflictPolicy.Block,
+    MaxDeletes = 100, MaxDeletePercent = 10,
+    Verify = true,
+    Compare = new StorageCompareOptions { Exclude = ["**/*.tmp", "cache/**"] }
+};
+var plan = (await storage.PlanSyncAsync("sftp", "site", "s3", "backup/site", options)).Value!;
+// show plan.Actions, plan.Conflicts, and plan.Warnings; store plan.ToJson(); approve plan.Digest
+var report = await storage.ApplySyncAsync("sftp", "site", "s3", "backup/site", plan, approvedDigest, options);
 ```
 
-`CompareAsync` and `SyncAsync` also work between any two `IStorageService` instances, such as a
-`LocalStorageBackend` over a local folder. Comparison uses size and modification time by default
-(two-second tolerance) and can add checksums. Sync directions:
+`CompareAsync` and the sync methods also work between any two `IStorageService` instances, such as a
+`LocalStorageBackend` over a local folder.
 
-- `Update` copies new and changed files and never deletes; it will not replace a newer destination
+**Directions.**
+- `Update` copies new and changed files and never deletes. It will not replace a newer destination
   that has the same size.
-- `Mirror` makes the destination match the source, deleting extra items with `DeleteExtraneous`.
-- `TwoWay` copies each file toward the side where it is missing or older, without deletes.
+- `Mirror` makes the destination match the source; it deletes extra items when `DeleteExtraneous` is set.
+- `TwoWay` changes both sides:
+  - With a baseline (`StateStore` + `SyncId`), it is a three-way sync. An edit or deletion on one side is
+    carried to the other (`PropagateDeletes`), and changes on both sides are conflicts: `BothModified`,
+    `BothCreated`, or `DeleteVersusModify`.
+  - Without a baseline, missing files are copied and files that differ are conflicts.
 
-Copied files keep the source's modification time where the destination supports it. On services
-that cannot (S3, Azure, GCS, Swift) a copy is newer than its source, and "changed" means "source
-newer", so repeated syncs stay no-ops. Per-file failures are collected in `Failed`. `DryRun` returns
-the plan without changing anything.
+**Conflict policies.**
+- `Block` (the default) plans a conflict. The plan cannot be applied until the conflict is resolved,
+  unless `ApplyWithConflicts` is set.
+- `KeepBoth` keeps the source's version under the original name, and keeps the destination's version on
+  both sides as `name (conflict xxxxxxxx).ext`, named from its identity.
+- `NewerWins` applies only when you ask for it; a modification beats a deletion.
+
+**Plan, then apply.**
+- The plan lists every step with the versions it depends on. It serializes with `ToJson()`, and
+  `Digest` is a SHA-256 over its content.
+- `ApplySyncAsync` refuses a plan that is not the one approved.
+- It also refuses a plan whose baseline moved on because another run saved in between.
+- Each step first re-checks its items. A step whose item changed since planning is reported `Stale`
+  and not taken.
+- `DryRun` returns the plan without changing anything.
+
+**Deletion safety.** Deletions are withheld, and listed in `plan.Warnings` and `report.Withheld`, when:
+- they would exceed `MaxDeletes` or `MaxDeletePercent`;
+- a side is unexpectedly empty, as when a drive is not mounted or a root is wrong (unless
+  `AllowEmptySide`);
+- any other step failed in the same run.
+
+A listing that fails part-way fails the plan. A folder is deleted as a whole only when the filters
+excluded nothing inside it; otherwise only its included items go.
+
+**Copies.** Each copy goes through a staged write that is conditional on the planned versions (create-new,
+or replace-only-that-version), pinned to the planned source, and optionally verified (`Verify`). Copied
+files keep the source's modification time; on object stores that cannot set times, the time is kept in
+`cl-mtime` metadata and used by later comparisons.
+
+**Comparison.**
+- Size and time are compared by default (two-second tolerance). `CompareBy.Checksum` uses the server's
+  digest where there is one.
+- Otherwise it hashes in parallel (`HashConcurrency`) within `MaxHashedFiles`/`MaxHashedBytes`. Beyond
+  that budget a difference is `Undecidable`.
+- `Include`/`Exclude` globs (`**` spans folders) apply to both sides and to the baseline.
+- Names that differ only by case are refused on a case-insensitive side (`CaseInsensitivePaths`, or
+  `CaseInsensitive`) rather than letting the last copy win.
+- `LinkHandling` skips links by default.
+- `MaxItems` caps the size of a tree.
+
+**Runs.** Transient failures are retried per step (`ItemRetries`). `ContinueOnError = false` stops at the
+first failure. A cancelled run returns its report with `Cancelled` set.
 
 ### Raw commands and free space
 

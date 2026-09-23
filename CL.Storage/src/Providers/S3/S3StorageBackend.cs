@@ -528,7 +528,7 @@ public sealed class S3StorageBackend :
             }
 
             var values = options.Mode == StorageMetadataUpdateMode.Merge
-                ? current.Metadata.Keys.ToDictionary(name => name, name => current.Metadata[name], StringComparer.Ordinal)
+                ? UserMetadata(current.Metadata)
                 : new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var (name, value) in snapshot)
                 values[name] = value;
@@ -1041,6 +1041,16 @@ public sealed class S3StorageBackend :
     private string ToDirectoryPrefix(string path) => path.Length == 0 ? _keyPrefix : ToKey(path).TrimEnd('/') + "/";
     private string FromKey(string key) => _keyPrefix.Length == 0 ? key : key.StartsWith(_keyPrefix, StringComparison.Ordinal) ? key[_keyPrefix.Length..] : string.Empty;
     private static string NameOf(string path) => path.Split('/')[^1];
+    /// <summary>
+    /// User metadata under the names it was written with: the SDK reports keys with the <c>x-amz-meta-</c>
+    /// header prefix, which would otherwise leak into every read and round trip.
+    /// </summary>
+    private static Dictionary<string, string> UserMetadata(MetadataCollection metadata) =>
+        metadata.Keys.ToDictionary(
+            key => key.StartsWith("x-amz-meta-", StringComparison.OrdinalIgnoreCase) ? key["x-amz-meta-".Length..] : key,
+            key => metadata[key],
+            StringComparer.Ordinal);
+
     private static StorageItem DirectoryItem(string path) => new() { Path = path, Name = path.Length == 0 ? string.Empty : NameOf(path), ItemType = StorageItemType.Directory };
 
     private static StorageItem FromMetadata(string path, GetObjectMetadataResponse response) => new()
@@ -1053,7 +1063,7 @@ public sealed class S3StorageBackend :
         ContentType = response.Headers.ContentType,
         ETag = response.ETag?.Trim('"'),
         VersionId = response.VersionId,
-        Metadata = response.Metadata.Keys.ToDictionary(key => key, key => response.Metadata[key], StringComparer.Ordinal)
+        Metadata = UserMetadata(response.Metadata)
     };
 
     private static StorageItem FromListedObject(string path, S3Object item) => new()

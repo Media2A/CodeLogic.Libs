@@ -94,7 +94,7 @@ public sealed class SyncTests
     }
 
     [Fact]
-    public async Task Two_way_sync_copies_newer_files_in_both_directions()
+    public async Task Two_way_sync_with_newer_wins_copies_newer_files_in_both_directions()
     {
         using var directory = new TestDirectory();
         var (a, b) = Pair(directory);
@@ -103,7 +103,7 @@ public sealed class SyncTests
         await Write(a, "shared.txt", "old", Old);
         await Write(b, "shared.txt", "newest", New);
 
-        var report = (await a.SyncAsync("", b, "", new StorageSyncOptions { Direction = StorageSyncDirection.TwoWay })).Value!;
+        var report = (await a.SyncAsync("", b, "", new StorageSyncOptions { Direction = StorageSyncDirection.TwoWay, ConflictPolicy = StorageSyncConflictPolicy.NewerWins })).Value!;
 
         Assert.Equal(3, report.Copied);
         Assert.Equal("from b", await Read(a, "b-only.txt"));

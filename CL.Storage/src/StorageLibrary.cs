@@ -1396,6 +1396,44 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         CancellationToken cancellationToken = default) =>
         Sync.StorageSync.SyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
 
+    /// <summary>Plans a sync between two connections without changing anything; approve the plan by its digest.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory.</param>
+    /// <param name="options">Direction, conflicts, baseline, filters, and safety limits.</param>
+    /// <param name="cancellationToken">Token used to cancel the listings.</param>
+    /// <returns>The plan.</returns>
+    public Task<Result<Sync.StorageSyncPlan>> PlanSyncAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageSyncOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.PlanSyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
+
+    /// <summary>Applies an approved sync plan between two connections.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory; must be the plan's.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory; must be the plan's.</param>
+    /// <param name="plan">The plan.</param>
+    /// <param name="approvedDigest">The digest that was approved.</param>
+    /// <param name="options">The options the plan was made with.</param>
+    /// <param name="cancellationToken">Stops the run; the report keeps what was done.</param>
+    /// <returns>Each step's outcome.</returns>
+    public Task<Result<Sync.StorageSyncReport>> ApplySyncAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageSyncPlan plan,
+        string approvedDigest,
+        Sync.StorageSyncOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.ApplySyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, plan, approvedDigest, options, cancellationToken);
+
     /// <summary>
     /// Opens a background transfer queue. Its jobs live in <see cref="Queue.StorageTransferQueueOptions.Store"/>
     /// (in memory by default); a durable store brings back the jobs of an earlier run, with those left

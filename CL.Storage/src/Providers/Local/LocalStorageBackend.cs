@@ -34,7 +34,9 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         StorageFeature.CreateLinks |
         StorageFeature.ReadLinks |
         // Unix permission bits exist only on Unix-like systems.
-        (OperatingSystem.IsWindows() ? StorageFeature.None : StorageFeature.Permissions));
+        (OperatingSystem.IsWindows() ? StorageFeature.None : StorageFeature.Permissions) |
+        // NTFS and APFS/HFS+ compare names without regard to case by default.
+        (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StorageFeature.CaseInsensitivePaths : StorageFeature.None));
 
     private readonly LocalPathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;

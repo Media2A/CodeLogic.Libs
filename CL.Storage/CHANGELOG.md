@@ -18,6 +18,7 @@
 - FTP could not find files whose names start with a dot on servers without MLST that hide dot-files from
   LIST (vsftpd); they are now found by listing the parent with hidden files.
 - SFTP `AppendAsync` failed on a missing file instead of creating it.
+- S3 metadata read back with an `x-amz-meta-` prefix on every key, so metadata did not round-trip.
 
 ### Added
 
@@ -51,9 +52,25 @@
   priority, reordering and removal, exponential backoff honouring `Retry-After`, throttled progress, an
   event context, history limits, adaptive concurrency, and cancelled/retrying/blocked/reconciliation events.
 - `StorageErrors.Create` rebuilds an error from a stored code, message, and details.
+- Three-way sync: a baseline store (`IStorageSyncStateStore`) with per-path identities, a classifier for
+  created, modified, and deleted files per side, `BothModified`/`BothCreated`/`DeleteVersusModify`
+  conflicts with `Block`, `KeepBoth`, and `NewerWins` policies, and deletions carried only through the
+  baseline.
+- Plan then apply: `PlanSyncAsync` returns a serializable plan with a digest; `ApplySyncAsync` applies only
+  the approved plan, refuses a stale baseline, and re-checks every item before acting.
+- Sync deletion safety (`MaxDeletes`, `MaxDeletePercent`, unexpectedly empty sides), include/exclude globs
+  with `**`, case-collision refusal (`StorageFeature.CaseInsensitivePaths`), object-store times kept in
+  `cl-mtime` metadata, an item cap, budgeted parallel hashing that prefers server digests, per-item
+  retries, continue-or-stop, cancellation that keeps the report, and link handling.
+- Sync copies go through conditional, pinned, optionally verified staged writes.
 
 ### Changed (breaking)
 
+- Sync: `TwoWay` without a baseline no longer lets the newer file win silently; differing files are
+  conflicts (`Block` by default; set `ConflictPolicy = NewerWins` for the old behaviour). `StorageSyncAction`
+  is a record with named properties and no `Error`; outcomes are in `StorageSyncReport.Results`. Mirror
+  deletes a folder whole only when the filters excluded nothing inside it. `StorageCompare.CompareAsync`
+  is the non-extension form; `CompareAsync` on a connection is unchanged.
 - `CreateTransferQueue` is replaced by `OpenTransferQueueAsync`; `Enqueue*` and every control method are
   asynchronous and return results. Job ids are strings, priorities are integers (higher first), and
   `StorageTransferPriority` is gone. `RetryDelay` became `RetryBaseDelay`/`RetryMaxDelay`. Disposing the
