@@ -670,11 +670,12 @@ public sealed class NeedsReviewQueueTests
     {
         await using var fixture = await Fixture.CreateAsync();
         await fixture.Source.UploadBytesAsync("a.bin", [1]);
-        var once = 1;
+        // More failures than one attempt tries the save, so the first attempt stops because of the store.
+        var failures = 6;
         var store = new ScriptedStore
         {
             BeforeSave = (record, _) => record.State == StorageTransferState.Running && record.Checkpoint.Phase == StorageTransferPhase.Transferring &&
-                                        Interlocked.Exchange(ref once, 0) == 1
+                                        Interlocked.Decrement(ref failures) >= 0
                 ? throw new IOException("store down")
                 : Task.CompletedTask
         };
@@ -683,7 +684,8 @@ public sealed class NeedsReviewQueueTests
         await queue.EnqueueCopyAsync("Source", "a.bin", "Destination", "x.bin", jobId: "x");
         await queue.WaitForIdleAsync().WaitAsync(Wait);
 
-        Assert.Equal(StorageTransferState.Completed, queue.Get("x")!.State);
+        var job = queue.Get("x")!;
+        Assert.Equal((StorageTransferState.Completed, 2), (job.State, job.Attempts));
     }
 
     // ---------------------------------------------------------------- B40
