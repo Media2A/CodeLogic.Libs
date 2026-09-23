@@ -485,4 +485,4 @@ mirroring the CL.MySQL2 surface.
   smart-cache pools) has not been ported to CL.PostgreSQL yet — repository
   CRUD only.
 - Earlier history is retained in the
-  [git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.PostgreSQL).
+  [git log](https://github.com/zyntal-com/CodeLogic.Libs/commits/main/CL.PostgreSQL).

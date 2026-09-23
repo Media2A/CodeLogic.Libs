@@ -5,9 +5,9 @@
 > and rollback-safe cross-provider transfers.
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.StorageS3)](https://www.nuget.org/packages/CodeLogic.StorageS3)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
-> S3-compatible object storage for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — one API across Amazon S3, MinIO, and Cloudflare R2.
+> S3-compatible object storage for [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) — one API across Amazon S3, MinIO, and Cloudflare R2.
 
 Built on [AWSSDK.S3](https://www.nuget.org/packages/AWSSDK.S3). Configure one or more named connections, then upload, download, list, copy, and presign objects through a single `S3StorageService`. Every operation returns the framework `Result<T>` (existence checks return a plain `bool`), so failures surface as `Error` values instead of exceptions.
 
@@ -112,13 +112,13 @@ Provider tips: **AWS** → `forcePathStyle: false`, `disablePayloadSigning: fals
 
 ## Documentation
 
-Full guide: **[CL.StorageS3 documentation](https://media2a.github.io/CodeLogic.Libs/libs/storages3.html)**
+Full guide: **[CL.StorageS3 documentation](https://zyntal-com.github.io/CodeLogic.Libs/libs/storages3.html)**
 
 ## Requirements
 
-- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) · .NET 10
 - AWSSDK.S3 4.x
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE).

@@ -1,9 +1,9 @@
 # CodeLogic.PostgreSQL
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.PostgreSQL)](https://www.nuget.org/packages/CodeLogic.PostgreSQL)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
-> A typed PostgreSQL data-access layer for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — multi-database connections, an attribute-driven repository, a fluent LINQ query builder, joins and projections, cursor paging, upserts, caching, migrations, and declarative schema sync.
+> A typed PostgreSQL data-access layer for [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) — multi-database connections, an attribute-driven repository, a fluent LINQ query builder, joins and projections, cursor paging, upserts, caching, migrations, and declarative schema sync.
 
 Map a plain class with attributes and the library reconciles the live table to match, then exposes a typed `Repository<T>` and a chainable `QueryBuilder<T>` over it. It builds on [Npgsql](https://www.nuget.org/packages/Npgsql) and connects to one or many PostgreSQL instances from a single config. Every fallible operation returns a framework `Result<T>` — no exceptions on the expected failure paths.
 
@@ -132,18 +132,18 @@ A few places where PostgreSQL genuinely differs from the MySQL and SQL Server si
 
 ## Documentation
 
-Full guide: **[CL.PostgreSQL documentation](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/index.html)**
+Full guide: **[CL.PostgreSQL documentation](https://zyntal-com.github.io/CodeLogic.Libs/libs/postgresql/index.html)**
 
-- [Overview](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/index.html) — load, multi-database, repository CRUD, config, health, events.
-- [Query Builder](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/queries.html) — fluent methods, terminals, aggregates, projections, cursor paging, bulk writes, transactions.
-- [Schema & Migrations](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/schema-migrations.html) — entity attributes, sync modes, the CRC sentinel, soft delete, retention, migrations, backups.
-- [Performance & Caching](https://media2a.github.io/CodeLogic.Libs/libs/postgresql/performance.html) — result cache, smart pools, multi-node coordination, retry, N+1 detection, batch limits.
+- [Overview](https://zyntal-com.github.io/CodeLogic.Libs/libs/postgresql/index.html) — load, multi-database, repository CRUD, config, health, events.
+- [Query Builder](https://zyntal-com.github.io/CodeLogic.Libs/libs/postgresql/queries.html) — fluent methods, terminals, aggregates, projections, cursor paging, bulk writes, transactions.
+- [Schema & Migrations](https://zyntal-com.github.io/CodeLogic.Libs/libs/postgresql/schema-migrations.html) — entity attributes, sync modes, the CRC sentinel, soft delete, retention, migrations, backups.
+- [Performance & Caching](https://zyntal-com.github.io/CodeLogic.Libs/libs/postgresql/performance.html) — result cache, smart pools, multi-node coordination, retry, N+1 detection, batch limits.
 
 ## Requirements
 
-- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) · .NET 10
 - Npgsql 9.x · PostgreSQL 12+ (covering `INCLUDE` indexes need 11+; identity columns need 10+)
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE).

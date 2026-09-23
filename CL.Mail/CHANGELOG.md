@@ -81,4 +81,4 @@ provider.
 ### Notes
 
 - Earlier history is retained in the
-  [git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.Mail).
+  [git log](https://github.com/zyntal-com/CodeLogic.Libs/commits/main/CL.Mail).

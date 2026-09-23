@@ -53,7 +53,17 @@
 
 - name: Storage
 - name: CL.Storage
-  href: storage.md
+  items:
+    - name: Overview
+      href: storage/index.md
+    - name: Connections
+      href: storage/connections.md
+    - name: Transfers & Sync
+      href: storage/transfers.md
+    - name: Files & Attributes
+      href: storage/files.md
+    - name: Errors & Events
+      href: storage/errors-events.md
 
 - name: Security
 - name: CL.TwoFactorAuth

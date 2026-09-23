@@ -94,4 +94,4 @@ presigned URLs, and lifecycle helpers.
 ### Notes
 
 - Earlier history is retained in the
-  [git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.StorageS3).
+  [git log](https://github.com/zyntal-com/CodeLogic.Libs/commits/main/CL.StorageS3).
