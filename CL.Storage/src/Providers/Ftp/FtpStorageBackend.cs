@@ -34,6 +34,8 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         StorageFeature.ReadLinks);
 
     private readonly ProviderClientPool<AsyncFtpClient> _clients;
+    private readonly IPoolHandle<AsyncFtpClient> _pool;
+    private readonly Action? _sessionOpened;
     private readonly RemotePathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
     private readonly ProviderRetryPolicy _retry;
@@ -66,13 +68,44 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         StorageRetryConfig? retry,
         IStorageConnectionObserver? observer,
         Func<AsyncFtpClient, CancellationToken, Task>? afterConnect = null)
+        : this(connectionId, new OwnedPool<AsyncFtpClient>(CreatePool(clientFactory, session, afterConnect)), root, maxBufferedDownloadBytes, retry, observer)
+    {
+        ArgumentNullException.ThrowIfNull(clientFactory);
+    }
+
+    internal FtpStorageBackend(
+        string connectionId,
+        IPoolHandle<AsyncFtpClient> pool,
+        string? root,
+        long maxBufferedDownloadBytes,
+        StorageRetryConfig? retry,
+        IStorageConnectionObserver? observer)
     {
         if (string.IsNullOrWhiteSpace(connectionId)) throw new ArgumentException("Connection ID is required.", nameof(connectionId));
-        ArgumentNullException.ThrowIfNull(clientFactory);
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
         _observer = observer;
-        _clients = new ProviderClientPool<AsyncFtpClient>(
+        _pool = pool;
+        _clients = pool.Pool;
+        if (observer is not null)
+        {
+            _sessionOpened = () => observer.SessionOpened(connectionId, StorageProvider.Ftp);
+            _clients.SessionOpened += _sessionOpened;
+        }
+        _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Ftp, observer);
+        _retry.Enrich = error => TlsDiagnosis.Enrich(error, Identity);
+        _paths = new RemotePathResolver(root);
+        _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
+    }
+
+    internal ProviderPoolStats PoolStats => _clients.Stats;
+
+    /// <summary>Creates the session pool for a client factory; shared pools are created once per settings.</summary>
+    internal static ProviderClientPool<AsyncFtpClient> CreatePool(
+        Func<AsyncFtpClient> clientFactory,
+        StorageSessionConfig? session,
+        Func<AsyncFtpClient, CancellationToken, Task>? afterConnect) =>
+        new(
             clientFactory,
             afterConnect is null
                 ? static (client, token) => client.Connect(token)
@@ -85,15 +118,9 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             DestroyClientAsync,
             ProviderPoolOptions.From(session),
             ProbeAsync);
-        if (observer is not null)
-            _clients.SessionOpened += () => observer.SessionOpened(connectionId, StorageProvider.Ftp);
-        _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Ftp, observer);
-        _retry.Enrich = error => TlsDiagnosis.Enrich(error, Identity);
-        _paths = new RemotePathResolver(root);
-        _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
-    }
 
-    internal ProviderPoolStats PoolStats => _clients.Stats;
+    /// <summary>Identifies the listing snapshots continuation tokens refer to; settings-based so tokens outlive a registration.</summary>
+    internal string? ListingScope { get; init; }
 
     /// <summary>Records the certificate each session is offered; set by the factory.</summary>
     internal ServerIdentityRecorder? Identity { get; init; }
@@ -209,7 +236,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             // GetListing returns the whole listing in one call, so it runs once per pass and every
             // later page is served from the cached snapshot instead of re-listing the directory.
             return await ProviderPaging.CreateAsync(
-                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                ProviderPaging.Scope(ListingScope ?? ConnectionId, target.StoragePath, options.Recursive),
                 options,
                 async token =>
                 {
@@ -790,7 +817,11 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         }, cancellationToken);
 
     /// <inheritdoc />
-    public ValueTask DisposeAsync() => _clients.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        if (_sessionOpened is not null) _clients.SessionOpened -= _sessionOpened;
+        return _pool.ReleaseAsync();
+    }
 
     private static async Task<Result> CommitPathAsync(
         AsyncFtpClient client,

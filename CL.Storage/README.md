@@ -218,6 +218,13 @@ retry transient failures automatically. Both are tuned per connection:
   first attempt may already have succeeded.
 - `StorageConnectionOpenedEvent`, `StorageConnectionLostEvent`, and `StorageConnectionRetryEvent`
   are published for monitoring, and each retry is logged as a warning.
+- Registrations with identical settings, under any id, share one pool while they coexist, so
+  `MaxSessions` applies to them together. When the last one is removed, its sessions close at once,
+  unless `LingerSeconds` (0 to 3600, default 0) is set: then they stay open that long, and a
+  registration added again with the same settings picks up the warm sessions. Leave it at 0 for servers
+  with a strict per-user connection limit.
+- Listing continuation tokens are tied to the settings rather than the registration id, so paging
+  continues after the same settings are registered again under a new id.
 
 ## Common API
 
@@ -668,6 +675,18 @@ time, and ETag, so a rename appears as a delete plus a create. A failed poll is 
 interval rather than reported as deletions. The library's own staging items never appear.
 Connections from `GetStorage()` watch natively too. If notifications arrive faster than they can be
 buffered, a `StorageChangeKind.Overflow` change for the watched directory is reported: list it again.
+
+Polling a large remote tree is cheaper with `Incremental = true`: after the first listing, a poll lists
+only the root and the folders whose modification time changed (entries were added, removed, or renamed
+in them), and reuses the previous listing for the rest. Every `FullRescanEvery` polls (10 by default)
+the whole tree is listed again, which catches edits to existing files and changes deep inside folders
+whose own time did not change. Providers without folder times (object stores) always list everything.
+
+```csharp
+var options = new StorageWatchOptions { Recursive = true, Incremental = true, FullRescanEvery = 20 };
+await foreach (var change in partner.WatchAsync("outbox", options, stopping))
+    Console.WriteLine($"{change.Kind}: {change.Path}");
+```
 
 ### Links in transfers
 

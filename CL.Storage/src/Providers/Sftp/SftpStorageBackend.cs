@@ -36,6 +36,8 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         StorageFeature.CreateLinks);
 
     private readonly ProviderClientPool<SftpClient> _clients;
+    private readonly IPoolHandle<SftpClient> _pool;
+    private readonly Action? _sessionOpened;
     private readonly RemotePathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
     private readonly ProviderRetryPolicy _retry;
@@ -67,27 +69,49 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         StorageSessionConfig? session,
         StorageRetryConfig? retry,
         IStorageConnectionObserver? observer)
+        : this(connectionId, new OwnedPool<SftpClient>(CreatePool(clientFactory, session)), root, maxBufferedDownloadBytes, retry, observer)
+    {
+        ArgumentNullException.ThrowIfNull(clientFactory);
+    }
+
+    internal SftpStorageBackend(
+        string connectionId,
+        IPoolHandle<SftpClient> pool,
+        string? root,
+        long maxBufferedDownloadBytes,
+        StorageRetryConfig? retry,
+        IStorageConnectionObserver? observer)
     {
         if (string.IsNullOrWhiteSpace(connectionId)) throw new ArgumentException("Connection ID is required.", nameof(connectionId));
-        ArgumentNullException.ThrowIfNull(clientFactory);
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
         _observer = observer;
-        _clients = new ProviderClientPool<SftpClient>(
-            clientFactory,
-            SftpHostKeyTracker.ConnectAsync,
-            static client => client.IsConnected,
-            DestroyClientAsync,
-            ProviderPoolOptions.From(session),
-            ProbeAsync);
+        _pool = pool;
+        _clients = pool.Pool;
         if (observer is not null)
-            _clients.SessionOpened += () => observer.SessionOpened(connectionId, StorageProvider.Sftp);
+        {
+            _sessionOpened = () => observer.SessionOpened(connectionId, StorageProvider.Sftp);
+            _clients.SessionOpened += _sessionOpened;
+        }
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Sftp, observer);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
 
     internal ProviderPoolStats PoolStats => _clients.Stats;
+
+    /// <summary>Creates the session pool for a client factory; shared pools are created once per settings.</summary>
+    internal static ProviderClientPool<SftpClient> CreatePool(Func<SftpClient> clientFactory, StorageSessionConfig? session) =>
+        new(
+            clientFactory,
+            SftpHostKeyTracker.ConnectAsync,
+            static client => client.IsConnected,
+            DestroyClientAsync,
+            ProviderPoolOptions.From(session),
+            ProbeAsync);
+
+    /// <summary>Identifies the listing snapshots continuation tokens refer to; settings-based so tokens outlive a registration.</summary>
+    internal string? ListingScope { get; init; }
 
     /// <summary>Records the host key each session is offered; set by the factory.</summary>
     internal ServerIdentityRecorder? Identity { get; init; }
@@ -210,7 +234,7 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
             // The walk runs only when no snapshot is cached for this listing pass, so pages after
             // the first cost neither an SSH handshake nor a directory traversal.
             return await ProviderPaging.CreateAsync(
-                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                ProviderPaging.Scope(ListingScope ?? ConnectionId, target.StoragePath, options.Recursive),
                 options,
                 async token =>
                 {
@@ -727,7 +751,11 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         }, cancellationToken);
 
     /// <inheritdoc />
-    public ValueTask DisposeAsync() => _clients.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        if (_sessionOpened is not null) _clients.SessionOpened -= _sessionOpened;
+        return _pool.ReleaseAsync();
+    }
 
     private Task<SftpClient> OpenClientAsync(CancellationToken cancellationToken) =>
         _clients.RentAsync(cancellationToken);

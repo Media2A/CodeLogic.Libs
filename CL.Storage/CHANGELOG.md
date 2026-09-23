@@ -64,6 +64,14 @@
   retries, continue-or-stop, cancellation that keeps the report, and link handling.
 - Sync copies go through conditional, pinned, optionally verified staged writes.
 
+- FTP and SFTP registrations with identical settings share one session pool, so replacing a registration
+  keeps its warm sessions. `StorageSessionConfig.LingerSeconds` keeps the pool open for a while after the
+  last registration using it is removed, so re-registering the same settings reuses its sessions.
+- Listing continuation tokens on Local, FTP, SFTP, and WebDAV are tied to the connection's settings instead
+  of its id, so a token keeps working after the same settings are registered again under another id.
+- `StorageWatchOptions.Incremental` and `FullRescanEvery`: recursive polls list only folders whose
+  modification time changed, with a full rescan every N polls to catch content edits and deep changes.
+
 ### Changed (breaking)
 
 - Sync: `TwoWay` without a baseline no longer lets the newer file win silently; differing files are

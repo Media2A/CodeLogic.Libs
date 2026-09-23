@@ -18,5 +18,8 @@ internal sealed class LocalStorageBackendFactory : IStorageBackendFactory
     public StorageProvider Provider => StorageProvider.Local;
 
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null) =>
-        new LocalStorageBackend(connectionId, (LocalConnectionConfig)configuration, maxBufferedDownloadBytes);
+        new LocalStorageBackend(connectionId, (LocalConnectionConfig)configuration, maxBufferedDownloadBytes)
+        {
+            ListingScope = ProviderSettingsKey.For(configuration)
+        };
 }

@@ -38,7 +38,8 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             http,
             new Uri(endpoint.GetLeftPart(UriPartial.Authority)))
         {
-            Identity = identity
+            Identity = identity,
+            ListingScope = ProviderSettingsKey.For(value)
         };
     }
 

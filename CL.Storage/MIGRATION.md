@@ -182,6 +182,13 @@ as before. Handle the new states `Paused`, `Blocked`, `NeedsReconciliation`, and
   and `Deleted` still work. Deletions a safety rule held back are in `report.Withheld`.
 - Construct `StorageSyncAction` with named properties if you build them yourself.
 
+### Shared sessions (2026-09-23)
+
+- FTP and SFTP registrations with identical settings now share one session pool. `MaxSessions` therefore
+  caps sessions across all of them together, not per registration. Give registrations that must have
+  their own limit different settings (for example a different `Session` section).
+- `GetConnectionDiagnosticsAsync` pool counters cover every registration sharing the pool.
+
 ## Recommended rollout
 
 1. Add `CodeLogic.Storage` beside the legacy package.

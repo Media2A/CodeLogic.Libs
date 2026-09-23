@@ -41,6 +41,15 @@ public sealed record StorageWatchOptions
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(30);
     /// <summary>Gets whether to poll even when the provider can notify natively.</summary>
     public bool ForcePolling { get; init; }
+    /// <summary>
+    /// Gets whether polls are incremental: a folder is listed again only when its modification time changed,
+    /// which is when entries were added, removed, or renamed in it. Edits to a file's content, and changes
+    /// deep inside a folder whose own time did not change, are caught by the full rescan every
+    /// <see cref="FullRescanEvery"/> polls. Providers without folder times (object stores) list everything.
+    /// </summary>
+    public bool Incremental { get; init; }
+    /// <summary>Gets how many polls pass between full rescans in incremental mode.</summary>
+    public int FullRescanEvery { get; init; } = 10;
 }
 
 /// <summary>Native change notifications, advertised with <see cref="StorageFeature.ChangeNotifications"/>.</summary>
@@ -77,6 +86,8 @@ public static class StorageWatch
         options ??= new StorageWatchOptions();
         if (options.PollInterval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(options), "PollInterval must be positive.");
+        if (options.FullRescanEvery < 1)
+            throw new ArgumentOutOfRangeException(nameof(options), "FullRescanEvery must be at least 1.");
         return !options.ForcePolling && storage is IStorageWatchService native && storage.Capabilities.Supports(StorageFeature.ChangeNotifications)
             ? native.WatchNativeAsync(path, options.Recursive, cancellationToken)
             : PollAsync(storage, path, options, cancellationToken);
@@ -90,9 +101,14 @@ public static class StorageWatch
     {
         var previous = await SnapshotAsync(storage, path, options.Recursive, cancellationToken).ConfigureAwait(false) ?? [];
         using var timer = new PeriodicTimer(options.PollInterval);
+        var polls = 0;
         while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
         {
-            var current = await SnapshotAsync(storage, path, options.Recursive, cancellationToken).ConfigureAwait(false);
+            polls++;
+            var full = !options.Incremental || !options.Recursive || polls % options.FullRescanEvery == 0;
+            var current = full
+                ? await SnapshotAsync(storage, path, options.Recursive, cancellationToken).ConfigureAwait(false)
+                : await IncrementalSnapshotAsync(storage, path, previous, cancellationToken).ConfigureAwait(false);
             if (current is null) continue;
             var now = DateTimeOffset.UtcNow;
             foreach (var (key, item) in current)
@@ -121,6 +137,60 @@ public static class StorageWatch
             items[item.Value!.Path] = item.Value;
         }
         return items;
+    }
+
+    /// <summary>
+    /// Refreshes a snapshot by listing only folders whose modification time changed (and the root), reusing the
+    /// previous snapshot for the rest. Returns null when a listing fails, so the poll is retried.
+    /// </summary>
+    internal static async Task<Dictionary<string, StorageItem>?> IncrementalSnapshotAsync(
+        IStorageService storage,
+        string root,
+        IReadOnlyDictionary<string, StorageItem> previous,
+        CancellationToken cancellationToken)
+    {
+        var normalizedRoot = StoragePath.Normalize(root);
+        if (normalizedRoot.IsFailure) return null;
+        var current = new Dictionary<string, StorageItem>(previous, StringComparer.Ordinal);
+        var pending = new Queue<string>();
+        pending.Enqueue(normalizedRoot.Value!);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Dequeue();
+            var children = new Dictionary<string, StorageItem>(StringComparer.Ordinal);
+            await foreach (var item in storage.EnumerateItemsAsync(directory, new StorageListOptions(), cancellationToken).ConfigureAwait(false))
+            {
+                if (item.IsFailure)
+                {
+                    if (item.Error!.Code == StorageErrors.NotFoundCode) break;
+                    return null;
+                }
+                children[item.Value!.Path] = item.Value;
+            }
+            // Replace this folder's direct children; a vanished child folder takes its whole subtree along.
+            foreach (var stale in current.Keys.Where(key => ParentOf(key) == directory && !children.ContainsKey(key)).ToList())
+            {
+                current.Remove(stale);
+                foreach (var nested in current.Keys.Where(key => key.StartsWith(stale + "/", StringComparison.Ordinal)).ToList())
+                    current.Remove(nested);
+            }
+            foreach (var (childPath, child) in children)
+            {
+                current[childPath] = child;
+                if (child.ItemType != StorageItemType.Directory) continue;
+                var before = previous.GetValueOrDefault(childPath);
+                // Descend where entries may have changed, or where the provider has no folder times at all.
+                if (before is null || child.LastModified is null || before.LastModified != child.LastModified)
+                    pending.Enqueue(childPath);
+            }
+        }
+        return current;
+    }
+
+    private static string ParentOf(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash < 0 ? string.Empty : path[..slash];
     }
 
     /// <summary>Adapts <see cref="FileSystemWatcher"/> events to storage changes.</summary>

@@ -63,6 +63,9 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
 
     /// <inheritdoc />
     public string ConnectionId { get; }
+
+    /// <summary>Identifies the listing snapshots continuation tokens refer to; settings-based so tokens outlive a registration.</summary>
+    internal string? ListingScope { get; init; }
     /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.Local;
     /// <inheritdoc />
@@ -134,7 +137,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
             // Directory enumeration runs once per listing pass instead of once per page.
             var target = resolved.Value!;
             return await ProviderPaging.CreateAsync(
-                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                ProviderPaging.Scope(ListingScope ?? ConnectionId, target.StoragePath, options.Recursive),
                 options,
                 token => Task.FromResult(Result<IEnumerable<StorageItem>>.Success(
                     EnumerateItems(target, options.Recursive, token).ToArray().AsEnumerable())),

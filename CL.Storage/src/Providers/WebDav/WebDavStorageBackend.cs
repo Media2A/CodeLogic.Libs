@@ -89,6 +89,9 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
 
     /// <inheritdoc />
     public string ConnectionId { get; }
+
+    /// <summary>Identifies the listing snapshots continuation tokens refer to; settings-based so tokens outlive a registration.</summary>
+    internal string? ListingScope { get; init; }
     /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.WebDav;
     /// <inheritdoc />
@@ -148,7 +151,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             // snapshot rather than re-issuing a PROPFIND per directory.
             var target = resolved.Value!;
             return await ProviderPaging.CreateAsync(
-                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                ProviderPaging.Scope(ListingScope ?? ConnectionId, target.StoragePath, options.Recursive),
                 options,
                 async token => Result<IEnumerable<StorageItem>>.Success(
                     await CollectListingAsync(target, options.Recursive, token).ConfigureAwait(false)),

@@ -17,19 +17,25 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (FtpConnectionConfig)configuration;
-        var identity = new ServerIdentityRecorder();
+        // Registrations with identical settings share one pool, so re-registering keeps warm sessions.
+        var key = ProviderSettingsKey.For(value);
+        var shared = SharedResources.Acquire(key, () =>
+        {
+            var recorder = new ServerIdentityRecorder();
+            return new SharedPool<AsyncFtpClient>(FtpStorageBackend.CreatePool(() => CreateClient(value, recorder), value.Session, AfterConnect(value)), recorder);
+        }, pool => pool.Pool.DisposeAsync());
+        var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new FtpStorageBackend(
             connectionId,
-            () => CreateClient(value, identity),
+            new SharedPoolHandle<AsyncFtpClient>(key, shared, linger),
             value.Root,
             maxBufferedDownloadBytes,
-            value.Session,
             value.Retry,
-            observer,
-            AfterConnect(value))
+            observer)
         {
             AllowRawCommands = value.AllowRawCommands,
-            Identity = identity
+            Identity = shared.Identity,
+            ListingScope = key
         };
     }
 

@@ -16,18 +16,25 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (SftpConnectionConfig)configuration;
-        var identity = new ServerIdentityRecorder();
+        // Registrations with identical settings share one pool, so re-registering keeps warm sessions.
+        var key = ProviderSettingsKey.For(value);
+        var shared = SharedResources.Acquire(key, () =>
+        {
+            var recorder = new ServerIdentityRecorder();
+            return new SharedPool<SftpClient>(SftpStorageBackend.CreatePool(() => CreateClient(value, recorder), value.Session), recorder);
+        }, pool => pool.Pool.DisposeAsync());
+        var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new SftpStorageBackend(
             connectionId,
-            () => CreateClient(value, identity),
+            new SharedPoolHandle<SftpClient>(key, shared, linger),
             value.Root,
             maxBufferedDownloadBytes,
-            value.Session,
             value.Retry,
             observer)
         {
             CommandClientFactory = value.AllowRawCommands ? () => CreateCommandClient(value) : null,
-            Identity = identity
+            Identity = shared.Identity,
+            ListingScope = key
         };
     }
 
