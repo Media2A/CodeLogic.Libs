@@ -1,6 +1,6 @@
 # CL.StorageS3
 
-> **Legacy package:** new development should use [CL.Storage](storage.md). See its migration guide
+> **Legacy package:** new development should use [CL.Storage](storage/index.md). See its migration guide
 > for mounted S3 connections, version APIs, bounded multipart uploads, and safe cross-provider transfers.
 
 > S3-compatible object storage — one API across Amazon S3, MinIO, and Cloudflare R2.

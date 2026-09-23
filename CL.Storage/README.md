@@ -372,12 +372,12 @@ wherever the provider reports them. Changing them goes through `IStorageAttribut
 extension methods on every `IStorageService`:
 
 ```csharp
-await storage.SetPermissionsAsync("reports/q3.csv", "640");
-await storage.SetPermissionsRecursiveAsync("public", fileMode: 0x1A4, directoryMode: 0x1ED); // 0644 / 0755
-await storage.SetOwnerAsync("reports/q3.csv", ownerId: 1001, groupId: 1001);
-await storage.SetTimestampsAsync("reports/q3.csv", lastModified: sourceTime);
-await storage.CreateLinkAsync("current", "releases/v42");
-var link = await storage.ReadLinkAsync("current");
+await media.SetPermissionsAsync("reports/q3.csv", "640");
+await media.SetPermissionsRecursiveAsync("public", fileMode: 0x1A4, directoryMode: 0x1ED); // 0644 / 0755
+await media.SetOwnerAsync("reports/q3.csv", ownerId: 1001, groupId: 1001);
+await media.SetTimestampsAsync("reports/q3.csv", lastModified: sourceTime);
+await media.CreateLinkAsync("current", "releases/v42");
+var link = await media.ReadLinkAsync("current");
 ```
 
 | | Local | FTP | SFTP |
@@ -400,9 +400,9 @@ mounted root. On Windows, creating local links needs Developer Mode or the symbo
 When it is not set, the `Overwrite` flag decides as before.
 
 ```csharp
-await storage.UploadFileAsync("backup/db.bak", @"C:\dumps\db.bak",
+await media.UploadFileAsync("backup/db.bak", @"C:\dumps\db.bak",
     new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfNewer });
-var report = await library.UploadDirectoryAsync(@"C:\site", "web", "public",
+var report = await storage.UploadDirectoryAsync(@"C:\site", "web", "public",
     new StorageTransferOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfNewerOrSizeDiffers });
 Console.WriteLine($"{report.Value!.Files} uploaded, {report.Value.SkippedFiles} unchanged");
 ```
@@ -434,7 +434,7 @@ transfers, the `ItemPath` of the current file; directory transfers accumulate by
 ```csharp
 var progress = new Progress<StorageTransferProgress>(p =>
     Console.WriteLine($"{p.ItemPath}: {p.BytesTransferred:N0} B at {p.BytesPerSecond / 1024:N0} KiB/s"));
-await library.CopyAsync("sftp", "exports", "s3", "archive", new StorageTransferOptions { Progress = progress });
+await storage.CopyAsync("sftp", "exports", "s3", "archive", new StorageTransferOptions { Progress = progress });
 ```
 
 Speed limits are set per connection and shared by all of its concurrent transfers:
@@ -451,7 +451,7 @@ connections together. Limits also apply to relayed transfers between connections
 `CreateTransferQueue` runs transfers in the background, like FileZilla's queue:
 
 ```csharp
-await using var queue = library.CreateTransferQueue(new StorageTransferQueueOptions
+await using var queue = storage.CreateTransferQueue(new StorageTransferQueueOptions
 {
     MaxConcurrentTransfers = 4,
     MaxTransfersPerConnection = 2,
@@ -474,11 +474,11 @@ re-queues transient failures automatically before moving a job to `FailedJobs`. 
 ### Compare and sync
 
 ```csharp
-var diff = await library.CompareAsync("sftp", "site", "s3", "backup/site");
+var diff = await storage.CompareAsync("sftp", "site", "s3", "backup/site");
 foreach (var entry in diff.Value!.Entries.Where(e => e.Kind != StorageDiffKind.Same))
     Console.WriteLine($"{entry.Kind,-18} {entry.Reasons,-12} {entry.RelativePath}");
 
-var report = await library.SyncAsync("sftp", "site", "s3", "backup/site", new StorageSyncOptions
+var report = await storage.SyncAsync("sftp", "site", "s3", "backup/site", new StorageSyncOptions
 {
     Direction = StorageSyncDirection.Mirror,
     DeleteExtraneous = true,
@@ -515,7 +515,7 @@ return `storage.unsupported`.
 ### Watching for changes
 
 ```csharp
-await foreach (var change in storage.WatchAsync("incoming", cancellationToken: stopping))
+await foreach (var change in media.WatchAsync("incoming", cancellationToken: stopping))
     Console.WriteLine($"{change.Kind}: {change.Path}");
 ```
 

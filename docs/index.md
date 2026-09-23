@@ -75,7 +75,7 @@ var mysql = Libraries.Get<CL.MySQL2.MySQL2Library>();
 
 <div class="cl-group">Storage</div>
 <div class="lib-grid">
-  <a class="lib-card" href="libs/storage.md">
+  <a class="lib-card" href="libs/storage/index.md">
     <div class="lib-name">CL.Storage</div>
     <div class="lib-pkg">CodeLogic.Storage</div>
     <p class="lib-desc">Safe mounted storage across local filesystems, S3, FTP/SFTP, WebDAV, Azure Blob, GCS, and Swift.</p>
