@@ -18,7 +18,8 @@ internal sealed class StorageServiceProxy :
     IStorageChecksumService,
     IStorageAppendService,
     IStorageCommandService,
-    IStorageSpaceService
+    IStorageSpaceService,
+    Sync.IStorageWatchService
 {
     private readonly StorageLibrary _library;
     private readonly string _connectionId;
@@ -252,6 +253,21 @@ internal sealed class StorageServiceProxy :
             : Task.FromResult(Result.Failure(
                 StorageErrors.Unsupported("This storage connection does not support object versions."))),
             normalized.Value!);
+    }
+
+    /// <summary>
+    /// Watches natively when the connection's backend can. The lease is held only while the watch starts,
+    /// so a long-running watch never blocks replacing the connection; it keeps watching the root it began on.
+    /// </summary>
+    public IAsyncEnumerable<Sync.StorageChange> WatchNativeAsync(string path, bool recursive, CancellationToken cancellationToken)
+    {
+        var normalized = StoragePath.Normalize(path);
+        if (normalized.IsFailure)
+            throw new ArgumentException(normalized.Error!.Message, nameof(path));
+        using var lease = _library.AcquireOperation(_connectionId);
+        return lease.Backend is Sync.IStorageWatchService native
+            ? native.WatchNativeAsync(normalized.Value!, recursive, cancellationToken)
+            : throw new NotSupportedException("This storage connection has no native change notifications.");
     }
 
     private T Read<T>(Func<IStorageBackend, T> read)

@@ -156,6 +156,14 @@ public sealed class FtpConnectionConfig : StorageConnectionConfigBase
     [ConfigField(Label = "Client certificate password", Secret = true, InputType = ConfigInputType.Password, Group = "TLS", Order = 31)]
     public string? ClientCertificatePassword { get; set; }
 
+    /// <summary>
+    /// Gets or sets the client certificate (PFX/PKCS#12) as bytes — base64 in JSON — for credentials kept in
+    /// a secret store rather than on disk. Mutually exclusive with <c>ClientCertificatePath</c>; decrypted
+    /// with <c>ClientCertificatePassword</c>.
+    /// </summary>
+    [ConfigField(Label = "Client certificate content", Secret = true, Group = "TLS", Order = 32)]
+    public byte[]? ClientCertificateContent { get; set; }
+
     /// <summary>Gets or sets the operation timeout in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 30;
 
@@ -197,6 +205,8 @@ public sealed class FtpConnectionConfig : StorageConnectionConfigBase
             yield return "Root is invalid";
         if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && !Path.IsPathFullyQualified(ClientCertificatePath))
             yield return "ClientCertificatePath must be an absolute path";
+        if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && ClientCertificateContent is { Length: > 0 })
+            yield return "Set ClientCertificatePath or ClientCertificateContent, not both";
         if (EncryptionMode == StorageFtpEncryptionMode.None && (TrustedCertificateSha256?.Count > 0 || TrustedPublicKeySha256?.Count > 0))
             yield return "Certificate and public-key pins require an encrypted FTP connection";
         foreach (var fingerprint in (TrustedCertificateSha256 ?? []).Concat(TrustedPublicKeySha256 ?? []))

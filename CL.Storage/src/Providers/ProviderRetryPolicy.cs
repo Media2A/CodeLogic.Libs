@@ -65,19 +65,30 @@ internal sealed class ProviderRetryPolicy
     public static ProviderRetryPolicy None(string connectionId, StorageProvider provider) =>
         new(new StorageRetryConfig { RetryCount = 0 }, connectionId, provider);
 
+    /// <summary>Gets or sets a hook that adds context to every failed attempt, such as the certificate a TLS failure refused.</summary>
+    public Func<Error, Error>? Enrich { get; set; }
+
     public Task<Result> ExecuteAsync(
         string operation,
         RetryKind kind,
         Func<int, CancellationToken, Task<Result>> attempt,
         CancellationToken cancellationToken) =>
-        ExecuteCoreAsync(operation, kind, attempt, static result => result.Error, cancellationToken);
+        ExecuteCoreAsync(operation, kind, async (number, token) =>
+        {
+            var result = await attempt(number, token).ConfigureAwait(false);
+            return result.IsFailure && Enrich is { } enrich ? Result.Failure(enrich(result.Error!)) : result;
+        }, static result => result.Error, cancellationToken);
 
     public Task<Result<T>> ExecuteAsync<T>(
         string operation,
         RetryKind kind,
         Func<int, CancellationToken, Task<Result<T>>> attempt,
         CancellationToken cancellationToken) =>
-        ExecuteCoreAsync(operation, kind, attempt, static result => result.Error, cancellationToken);
+        ExecuteCoreAsync(operation, kind, async (number, token) =>
+        {
+            var result = await attempt(number, token).ConfigureAwait(false);
+            return result.IsFailure && Enrich is { } enrich ? Result<T>.Failure(enrich(result.Error!)) : result;
+        }, static result => result.Error, cancellationToken);
 
     /// <summary>Runs an upload, replaying the source from its starting position on retry.</summary>
     /// <remarks>A non-seekable source cannot be replayed, so its upload is attempted exactly once.</remarks>

@@ -77,6 +77,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.WebDav, observer);
+        _retry.Enrich = error => TlsDiagnosis.Enrich(error, Identity);
         _http = http;
         _endpoint = endpoint;
         _client = client;
@@ -259,7 +260,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken) =>
         _retry.ExecuteAsync("Download WebDAV file", RetryKind.Idempotent, (_, token) => DownloadCoreAsync(path, options, token), cancellationToken);

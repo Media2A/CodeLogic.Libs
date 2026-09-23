@@ -74,13 +74,8 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             identity?.RecordCertificate(certificate, accepted);
             return accepted;
         };
-        if (!string.IsNullOrWhiteSpace(value.ClientCertificatePath))
-        {
-            handler.SslOptions.ClientCertificates =
-            [
-                X509CertificateLoader.LoadPkcs12FromFile(value.ClientCertificatePath, value.ClientCertificatePassword)
-            ];
-        }
+        if (ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword) is { } certificate)
+            handler.SslOptions.ClientCertificates = [certificate];
 
         switch (value.AuthenticationMode)
         {

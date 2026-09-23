@@ -161,11 +161,14 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         }
         try
         {
+            var (nativeToken, previous) = options.Recursive
+                ? ImplicitDirectories.Unwrap(options.ContinuationToken)
+                : (options.ContinuationToken, null);
             var page = await ListProviderPageAsync(
                 DirectoryPrefix(normalized.Value!),
                 options.Recursive ? null : "/",
                 options.PageSize,
-                options.ContinuationToken,
+                nativeToken,
                 cancellationToken).ConfigureAwait(false);
             if (page.IsFailure) return Result<StoragePage>.Failure(page.Error!);
             var items = page.Value!.Items.Select(item =>
@@ -187,7 +190,20 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                             ETag = item.Hash
                         };
             }).Where(item => item is not null).Cast<StorageItem>().ToArray();
-            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.Value.NextMarker));
+            if (options.Recursive)
+            {
+                var withFolders = new List<StorageItem>();
+                foreach (var item in items)
+                {
+                    ImplicitDirectories.AddParents(withFolders, item.Path, normalized.Value!, previous, DirectoryItem);
+                    previous = item.Path;
+                    withFolders.Add(item);
+                }
+                items = [.. withFolders.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
+                    .OrderBy(item => item.Path, StringComparer.Ordinal)];
+            }
+            var next = options.Recursive ? ImplicitDirectories.Wrap(page.Value.NextMarker, previous) : page.Value.NextMarker;
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), next));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Swift objects")); }
@@ -266,7 +282,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {

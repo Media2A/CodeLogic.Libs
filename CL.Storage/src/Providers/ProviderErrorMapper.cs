@@ -60,7 +60,7 @@ internal static class ProviderErrorMapper
                 $"{operation}: all {exhausted.MaxSessions} {service} sessions are in use.",
                 "reason=session_limit");
         if (Find<AuthenticationException>(exception) is not null)
-            return StorageErrors.TlsFailure($"{operation}: the {service} TLS handshake or certificate validation failed.");
+            return StorageErrors.TlsFailure($"{operation}: the {service} TLS handshake or certificate validation failed.", TlsDiagnosis.Details(exception));
         if (IsDiskFull(exception))
             return StorageErrors.QuotaExceeded($"{operation}: insufficient storage space.");
         if (exception is SocketException socket)

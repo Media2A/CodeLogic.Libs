@@ -95,12 +95,8 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             config.NoopInterval = checked(session.KeepAliveSeconds * 1000);
         }
 
-        if (!string.IsNullOrWhiteSpace(value.ClientCertificatePath))
-        {
-#pragma warning disable SYSLIB0057
-            config.ClientCertificates.Add(new X509Certificate2(value.ClientCertificatePath, value.ClientCertificatePassword));
-#pragma warning restore SYSLIB0057
-        }
+        if (ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword) is { } certificate)
+            config.ClientCertificates.Add(certificate);
 
         var client = CreateProxiedClient(value, config);
         client.Encoding = StorageEncodings.Get(value.Encoding);

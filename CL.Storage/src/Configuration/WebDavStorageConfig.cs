@@ -74,6 +74,14 @@ public sealed class WebDavConnectionConfig : StorageConnectionConfigBase
     [ConfigField(Label = "Client certificate password", Secret = true, InputType = ConfigInputType.Password, Group = "TLS", Order = 31)]
     public string? ClientCertificatePassword { get; set; }
 
+    /// <summary>
+    /// Gets or sets the client certificate (PFX/PKCS#12) as bytes — base64 in JSON — for credentials kept in
+    /// a secret store rather than on disk. Mutually exclusive with <c>ClientCertificatePath</c>; decrypted
+    /// with <c>ClientCertificatePassword</c>.
+    /// </summary>
+    [ConfigField(Label = "Client certificate content", Secret = true, Group = "TLS", Order = 32)]
+    public byte[]? ClientCertificateContent { get; set; }
+
     /// <summary>Gets or sets the maximum number of concurrent HTTP connections to the server.</summary>
     public int? MaxConnectionsPerServer { get; set; }
 
@@ -133,6 +141,8 @@ public sealed class WebDavConnectionConfig : StorageConnectionConfigBase
             yield return $"{AuthenticationMode} authentication requires Username and Password";
         if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && !System.IO.Path.IsPathFullyQualified(ClientCertificatePath))
             yield return "ClientCertificatePath must be an absolute path";
+        if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && ClientCertificateContent is { Length: > 0 })
+            yield return "Set ClientCertificatePath or ClientCertificateContent, not both";
         foreach (var fingerprint in TrustedPublicKeySha256 ?? [])
         {
             if (!CertificateFingerprint.IsValidSha256(fingerprint))

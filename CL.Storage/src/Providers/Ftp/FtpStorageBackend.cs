@@ -88,6 +88,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         if (observer is not null)
             _clients.SessionOpened += () => observer.SessionOpened(connectionId, StorageProvider.Ftp);
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Ftp, observer);
+        _retry.Enrich = error => TlsDiagnosis.Enrich(error, Identity);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
@@ -353,7 +354,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken) =>
         _retry.ExecuteAsync("Download FTP file", RetryKind.Idempotent, (_, token) => DownloadCoreAsync(path, options, token), cancellationToken);
@@ -1089,7 +1090,8 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             case FtpCommandException command:
                 return MapReply(command, operation);
             case FtpInvalidCertificateException:
-                return StorageErrors.TlsFailure($"{operation}: the FTP server certificate was not trusted.");
+                return StorageErrors.TlsFailure($"{operation}: the FTP server certificate was not trusted.",
+                    $"{StorageErrorInfo.TlsReasonKey}={TlsDiagnosis.ServerCertificateRejected}");
             case FtpMissingObjectException:
                 return StorageErrors.NotFound($"{operation}: item was not found.");
             case FtpProxyException:

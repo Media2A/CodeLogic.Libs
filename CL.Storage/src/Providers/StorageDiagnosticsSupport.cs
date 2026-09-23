@@ -33,8 +33,18 @@ internal interface IStorageDiagnosticsSource
 internal sealed class ServerIdentityRecorder
 {
     private StorageServerIdentity? _last;
+    private long _lastTicks;
 
     public StorageServerIdentity? Last => Volatile.Read(ref _last);
+
+    /// <summary>Gets when <see cref="Last"/> was recorded.</summary>
+    public DateTimeOffset? LastRecordedAt => Interlocked.Read(ref _lastTicks) is var ticks and > 0 ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
+
+    private void Set(StorageServerIdentity identity)
+    {
+        Volatile.Write(ref _last, identity);
+        Interlocked.Exchange(ref _lastTicks, DateTimeOffset.UtcNow.UtcTicks);
+    }
 
     public void RecordCertificate(X509Certificate? certificate, bool trusted)
     {
@@ -42,7 +52,7 @@ internal sealed class ServerIdentityRecorder
         try
         {
             using var parsed = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
-            Volatile.Write(ref _last, new StorageServerIdentity(
+            Set(new StorageServerIdentity(
                 "tls-certificate",
                 Convert.ToHexString(SHA256.HashData(parsed.RawData)),
                 TlsPins.PublicKeyPin(parsed),
@@ -59,7 +69,7 @@ internal sealed class ServerIdentityRecorder
     }
 
     public void RecordHostKey(string? algorithm, string fingerprintSha256, bool trusted) =>
-        Volatile.Write(ref _last, new StorageServerIdentity(
+        Set(new StorageServerIdentity(
             "ssh-host-key",
             fingerprintSha256.StartsWith("SHA256:", StringComparison.Ordinal) ? fingerprintSha256 : $"SHA256:{fingerprintSha256}",
             null,

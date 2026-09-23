@@ -183,6 +183,8 @@ public sealed class GoogleCloudStorageBackend :
                 PageToken = continuation.Value!.ProviderPageToken
             });
             var providerPage = await listing.ReadPageAsync(providerPageSize, cancellationToken).ConfigureAwait(false);
+            // The last key before this provider page, so folders straddling a page boundary are reported once.
+            var previous = continuation.Value.Previous;
             foreach (var item in providerPage)
             {
                 var pathValue = FromKey(item.Name);
@@ -190,7 +192,10 @@ public sealed class GoogleCloudStorageBackend :
                 if (string.Equals(pathValue.TrimEnd('/'), listingPath, StringComparison.Ordinal)) continue;
                 if (options.Recursive)
                 {
-                    AddParentDirectories(items, pathValue, listingPath);
+                    var parents = new List<StorageItem>();
+                    ImplicitDirectories.AddParents(parents, pathValue, listingPath, previous, DirectoryItem);
+                    foreach (var parent in parents) items[parent.Path] = parent;
+                    previous = pathValue.TrimEnd('/');
                     if (pathValue.EndsWith('/')) items[pathValue.TrimEnd('/')] = DirectoryItem(pathValue.TrimEnd('/'));
                     else items[pathValue] = ToItem(pathValue, item);
                 }
@@ -220,13 +225,14 @@ public sealed class GoogleCloudStorageBackend :
             {
                 nextToken = EncodeContinuationToken(new GcsContinuationToken(
                     continuation.Value.ProviderPageToken,
-                    nextSkip));
+                    nextSkip,
+                    continuation.Value.Previous));
             }
             else
             {
                 nextToken = string.IsNullOrEmpty(providerPage.NextPageToken)
                     ? null
-                    : EncodeContinuationToken(new GcsContinuationToken(providerPage.NextPageToken, 0));
+                    : EncodeContinuationToken(new GcsContinuationToken(providerPage.NextPageToken, 0, previous));
             }
             return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(pageItems, options), nextToken));
         }
@@ -327,7 +333,7 @@ public sealed class GoogleCloudStorageBackend :
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
@@ -808,19 +814,6 @@ public sealed class GoogleCloudStorageBackend :
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static void AddParentDirectories(IDictionary<string, StorageItem> items, string itemPath, string listingPath)
-    {
-        var parent = itemPath.TrimEnd('/');
-        while ((parent = Parent(parent)).Length > listingPath.Length)
-            items[parent] = DirectoryItem(parent);
-    }
-
-    private static string Parent(string path)
-    {
-        var index = path.LastIndexOf('/');
-        return index < 0 ? string.Empty : path[..index];
-    }
-
     private static string EncodeContinuationToken(GcsContinuationToken token) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(token)));
 
@@ -926,5 +919,5 @@ public sealed class GoogleCloudStorageBackend :
             ?? StorageErrors.ProviderError($"{operation}: Google Cloud Storage provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
-    private sealed record GcsContinuationToken(string? ProviderPageToken, int Skip);
+    private sealed record GcsContinuationToken(string? ProviderPageToken, int Skip, string? Previous = null);
 }

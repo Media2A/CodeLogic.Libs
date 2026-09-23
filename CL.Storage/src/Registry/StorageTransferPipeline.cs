@@ -78,15 +78,39 @@ internal static class StorageTransferPipeline
     }
 
     /// <summary>Wraps a successful download in progress reporting and speed limits when requested.</summary>
-    public static Result<Stream> Meter(object backend, string path, Result<Stream> download, StorageDownloadOptions? options)
+    /// <summary>
+    /// Wraps a download for progress and speed limits. With a progress sink and no known length, the item's
+    /// size is looked up once so reports carry <see cref="StorageTransferProgress.TotalBytes"/>.
+    /// </summary>
+    public static async Task<Result<Stream>> MeterAsync(
+        IStorageBackend backend,
+        string path,
+        Result<Stream> download,
+        StorageDownloadOptions? options,
+        CancellationToken cancellationToken)
     {
         if (download.IsFailure) return download;
         var limits = LimitsFor(backend);
         if (options?.Progress is null && !limits.LimitsDownloads) return download;
+        var total = options?.Length;
+        if (total is null && options?.Progress is not null)
+        {
+            var stream = download.Value!;
+            if (stream.CanSeek)
+            {
+                total = stream.Length - stream.Position;
+            }
+            else
+            {
+                var info = await backend.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+                if (info.IsSuccess && info.Value!.Size is { } size)
+                    total = Math.Max(0, size - (options.Offset));
+            }
+        }
         return Result<Stream>.Success(new MeteredStream(
             download.Value!,
             options?.Progress,
-            options?.Length,
+            total,
             path,
             leaveOpen: false,
             limits.Download,

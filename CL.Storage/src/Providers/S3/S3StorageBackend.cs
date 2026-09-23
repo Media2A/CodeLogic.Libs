@@ -177,13 +177,16 @@ public sealed class S3StorageBackend :
 
         try
         {
+            var (nativeToken, previous) = options.Recursive
+                ? ImplicitDirectories.Unwrap(options.ContinuationToken)
+                : (options.ContinuationToken, null);
             var request = new ListObjectsV2Request
             {
                 BucketName = _bucket,
                 Prefix = ToDirectoryPrefix(normalized.Value!),
                 Delimiter = options.Recursive ? null : "/",
                 MaxKeys = options.PageSize,
-                ContinuationToken = options.ContinuationToken
+                ContinuationToken = nativeToken
             };
             var response = await _client.ListObjectsV2Async(request, cancellationToken).ConfigureAwait(false);
             var items = new List<StorageItem>();
@@ -196,6 +199,11 @@ public sealed class S3StorageBackend :
             {
                 var relative = FromKey(item.Key);
                 if (relative.Length == 0) continue;
+                if (options.Recursive)
+                {
+                    ImplicitDirectories.AddParents(items, relative, normalized.Value!, previous, DirectoryItem);
+                    previous = relative.TrimEnd('/');
+                }
                 if (relative.EndsWith('/'))
                     items.Add(DirectoryItem(relative.TrimEnd('/')));
                 else
@@ -203,7 +211,8 @@ public sealed class S3StorageBackend :
             }
             var unique = items.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
                 .OrderBy(item => item.Path, StringComparer.Ordinal).ToArray();
-            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(unique, options), response.NextContinuationToken));
+            var next = options.Recursive ? ImplicitDirectories.Wrap(response.NextContinuationToken, previous) : response.NextContinuationToken;
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(unique, options), next));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List S3 objects")); }
@@ -297,7 +306,7 @@ public sealed class S3StorageBackend :
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {

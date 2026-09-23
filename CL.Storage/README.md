@@ -142,7 +142,11 @@ certificate pins; there is no accept-any switch.
 - `TrustedCertificateSha256` pins the whole certificate; `TrustedPublicKeySha256` pins only its
   public key, so it keeps working across renewals that keep the key. Pinned self-signed certificates
   are accepted unless `RequireValidCertificateChain` is set. Without pins, normal validation applies.
-  TLS problems report `storage.tls_failure`.
+  TLS problems report `storage.tls_failure` with a `tlsReason` detail: `server_certificate_rejected`
+  (with `presentedCertificateSha256` and `presentedPublicKeySha256`, ready to pin),
+  `client_certificate_rejected` (a credential problem), `protocol_mismatch`, or `handshake_failed`.
+- A client certificate is read from `ClientCertificatePath`, or from `ClientCertificateContent` (the PFX
+  bytes, base64 in JSON) when it comes from a secret store; `ClientCertificatePassword` decrypts either.
 - Legacy encodings such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for
   file names on older servers.
 - `ServerTimeZone` converts listing times from servers that report local time.
@@ -364,6 +368,12 @@ await media.UploadAsync("settings.json", replacement, new StorageUploadOptions
 Providers that cannot enforce the condition atomically reject it instead of performing a racy
 check-then-write.
 
+Creating only when absent (`Overwrite = false`) is atomic where `StorageFeature.ConditionalCreate` is
+declared: Local, WebDAV, S3, Azure Blob, Google Cloud Storage, and Swift. FTP and SFTP do not declare it,
+because their protocols have no atomic create-if-absent; a caller that must not race should check the
+flag and refuse. Local overwrites are staged too: the new content is written to a temporary file in the
+same directory and moved over the target, so a reader never sees a half-written file.
+
 ## Permissions, ownership, timestamps, and links
 
 `StorageItem` now carries `UnixMode` (with `Permissions` as `rwxr-xr-x` text), `Owner`/`Group`
@@ -444,7 +454,10 @@ Speed limits are set per connection and shared by all of its concurrent transfer
 ```
 
 `StorageConfig.MaxTotalUploadBytesPerSecond` and `MaxTotalDownloadBytesPerSecond` cap all
-connections together. Limits also apply to relayed transfers between connections.
+connections together. Limits are enforced inside each provider's upload and download, so they apply to
+every path: `UploadAsync` and `DownloadAsync` streams used directly, the file helpers, and relayed
+transfers between connections. Download progress carries `TotalBytes` even without a `Length`; the
+item's size is looked up once when the stream cannot report it.
 
 ### Transfer queue
 
@@ -523,6 +536,8 @@ Local connections use native file-system notifications (including renames). Ever
 is polled: the directory is listed every `PollInterval` (30 s by default) and compared by type, size,
 time, and ETag, so a rename appears as a delete plus a create. A failed poll is retried on the next
 interval rather than reported as deletions. The library's own staging items never appear.
+Connections from `GetStorage()` watch natively too. If notifications arrive faster than they can be
+buffered, a `StorageChangeKind.Overflow` change for the watched directory is reported: list it again.
 
 ### Links in transfers
 
@@ -588,6 +603,20 @@ if (opened.IsSuccess)
 ```
 
 Do not dispose reusable clients returned by `GetNativeClient`; dispose session leases.
+
+### Runtime-only mode
+
+Applications that manage connections themselves can run the library without configuration files:
+
+```csharp
+var storage = new StorageLibrary(new StorageLibraryOptions { RuntimeOnly = true });
+// after the CodeLogic lifecycle has started it:
+await storage.AddOrUpdateConnectionAsync("partner", sftpSettings);
+```
+
+No `config.storage*.json` section is registered, read, or written, no default connection is required,
+and `persist` only updates the in-memory copy. Library-wide settings can be passed as
+`StorageLibraryOptions.Settings`.
 
 ### Testing settings and diagnosing connections
 

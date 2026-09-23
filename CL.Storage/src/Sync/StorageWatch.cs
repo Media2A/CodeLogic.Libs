@@ -16,7 +16,12 @@ public enum StorageChangeKind
     /// <summary>The item disappeared.</summary>
     Deleted,
     /// <summary>The item was renamed (native watching only; polling reports a delete and a create).</summary>
-    Renamed
+    Renamed,
+    /// <summary>
+    /// Changes were lost because notifications arrived faster than they could be buffered (native watching
+    /// only). <see cref="StorageChange.Path"/> is the watched directory; list it again to catch up.
+    /// </summary>
+    Overflow
 }
 
 /// <summary>One observed change.</summary>
@@ -143,6 +148,9 @@ public static class StorageWatch
         watcher.Changed += (_, e) => Post(StorageChangeKind.Changed, e.FullPath, null);
         watcher.Deleted += (_, e) => Post(StorageChangeKind.Deleted, e.FullPath, null);
         watcher.Renamed += (_, e) => Post(StorageChangeKind.Renamed, e.FullPath, e.OldFullPath);
+        // A full buffer drops notifications silently unless the error is handled; report it so the caller rescans.
+        watcher.Error += (_, _) =>
+            channel.Writer.TryWrite(new StorageChange(StorageChangeKind.Overflow, toStoragePath(fullPath) ?? string.Empty, null, StorageItemType.Directory, DateTimeOffset.UtcNow));
         watcher.EnableRaisingEvents = true;
         await foreach (var change in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             yield return change;

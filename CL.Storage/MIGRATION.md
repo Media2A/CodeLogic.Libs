@@ -140,6 +140,15 @@ positional members are unchanged. Use `TestConnectionAsync` to check settings be
 `AddOrUpdateConnectionAsync`, and subscribe to `StorageOperationFailedEvent` or
 `StorageConnectionHealthChangedEvent` for monitoring instead of wrapping every call.
 
+### Sync, watching, and runtime-only mode (2026-09-23)
+
+- `Mirror` now skips a destination that is newer than its source and the same size, as `Update` always
+  did. It also withholds deletes after any failed copy; rerun once the copies succeed.
+- Handle `StorageChangeKind.Overflow` from `WatchAsync` by listing the watched directory again.
+- Applications that registered every connection at runtime with `persist: false` and disabled the
+  configured ones can construct `new StorageLibrary(new StorageLibraryOptions { RuntimeOnly = true })`
+  instead; no `config.storage*.json` file is created.
+
 ## Recommended rollout
 
 1. Add `CodeLogic.Storage` beside the legacy package.

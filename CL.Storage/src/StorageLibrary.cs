@@ -17,6 +17,7 @@ using CL.Storage.Providers.Sftp;
 using CL.Storage.Providers.Swift;
 using CL.Storage.Providers.WebDav;
 using CL.Storage.Registry;
+using CodeLogic.Core.Configuration;
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
 using CodeLogic.Framework.Libraries;
@@ -35,6 +36,9 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private readonly IReadOnlyDictionary<Type, IStorageBackendFactory> _factories;
     private readonly Action? _defaultConnectionSnapshotCaptured;
     private readonly StorageConnectionObserver _connectionObserver;
+    private readonly bool _runtimeOnly;
+    private readonly StorageConfig? _runtimeSettings;
+    private readonly ConcurrentDictionary<Type, object> _memoryConfig = new();
     private readonly ConcurrentDictionary<string, StorageConnectionHealth> _health = new(StringComparer.OrdinalIgnoreCase);
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
@@ -47,7 +51,13 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private bool _enabled;
 
     /// <summary>Initializes the storage library with every built-in provider factory.</summary>
-    public StorageLibrary() : this([
+    public StorageLibrary() : this(new StorageLibraryOptions())
+    {
+    }
+
+    /// <summary>Initializes the storage library with every built-in provider factory and the given options.</summary>
+    /// <param name="options">Library options, such as <see cref="StorageLibraryOptions.RuntimeOnly"/>.</param>
+    public StorageLibrary(StorageLibraryOptions options) : this([
         new LocalStorageBackendFactory(),
         new S3StorageBackendFactory(),
         new FtpStorageBackendFactory(),
@@ -56,16 +66,19 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         new AzureBlobStorageBackendFactory(),
         new GoogleCloudStorageBackendFactory(),
         new SwiftStorageBackendFactory()
-    ], null)
+    ], null, options)
     { }
 
     internal StorageLibrary(IEnumerable<IStorageBackendFactory> factories) : this(factories, null) { }
 
     internal StorageLibrary(
         IEnumerable<IStorageBackendFactory> factories,
-        Action? defaultConnectionSnapshotCaptured)
+        Action? defaultConnectionSnapshotCaptured,
+        StorageLibraryOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(factories);
+        _runtimeOnly = options?.RuntimeOnly ?? false;
+        _runtimeSettings = options?.Settings;
         _factories = factories.ToDictionary(factory => factory.ConfigurationType);
         _defaultConnectionSnapshotCaptured = defaultConnectionSnapshotCaptured;
         _connectionObserver = new StorageConnectionObserver(TryCaptureEventPublisher, TryCaptureLogger);
@@ -99,6 +112,9 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             _state = LifecycleState.Configured;
         }
 
+        // Runtime-only libraries never touch configuration files; sections live in memory instead.
+        if (_runtimeOnly)
+            return Task.CompletedTask;
         context.Configuration.Register<StorageConfig>("storage");
         context.Configuration.Register<LocalStorageConfig>("storage.local");
         context.Configuration.Register<S3StorageConfig>("storage.s3");
@@ -123,15 +139,15 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 throw new InvalidOperationException("Storage library lifecycle phases must use the same LibraryContext.");
         }
 
-        var storage = context.Configuration.Get<StorageConfig>();
-        var local = context.Configuration.Get<LocalStorageConfig>();
-        var s3 = context.Configuration.Get<S3StorageConfig>();
-        var ftp = context.Configuration.Get<FtpStorageConfig>();
-        var sftp = context.Configuration.Get<SftpStorageConfig>();
-        var webDav = context.Configuration.Get<WebDavStorageConfig>();
-        var azure = context.Configuration.Get<AzureStorageConfig>();
-        var gcs = context.Configuration.Get<GoogleCloudStorageConfig>();
-        var swift = context.Configuration.Get<SwiftStorageConfig>();
+        var storage = ReadConfig<StorageConfig>(context);
+        var local = ReadConfig<LocalStorageConfig>(context);
+        var s3 = ReadConfig<S3StorageConfig>(context);
+        var ftp = ReadConfig<FtpStorageConfig>(context);
+        var sftp = ReadConfig<SftpStorageConfig>(context);
+        var webDav = ReadConfig<WebDavStorageConfig>(context);
+        var azure = ReadConfig<AzureStorageConfig>(context);
+        var gcs = ReadConfig<GoogleCloudStorageConfig>(context);
+        var swift = ReadConfig<SwiftStorageConfig>(context);
 
         EnsureValid("storage", storage.Validate());
         EnsureValid("storage.local", local.Validate());
@@ -172,7 +188,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 AddProviderConnections(builtEntries, infos, gcs, StorageProvider.GoogleCloudStorage, storage.MaxBufferedDownloadBytes, libraryLimits);
                 AddProviderConnections(builtEntries, infos, swift, StorageProvider.OpenStackSwift, storage.MaxBufferedDownloadBytes, libraryLimits);
 
-                if (!builtEntries.ContainsKey(storage.DefaultConnection))
+                if (!_runtimeOnly && !builtEntries.ContainsKey(storage.DefaultConnection))
                     throw new InvalidOperationException(
                         $"The configured default storage connection '{storage.DefaultConnection}' is not available from an enabled provider factory.");
             }
@@ -327,7 +343,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
             lock (_registryGate)
             {
-                if (!_registry.ContainsKey(runtime.DefaultConnection))
+                if (!_runtimeOnly && !_registry.ContainsKey(runtime.DefaultConnection))
                     return HealthStatus.Unhealthy($"Default storage connection '{runtime.DefaultConnection}' is unavailable");
                 foreach (var (id, entry) in _registry)
                 {
@@ -1383,7 +1399,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 candidate.Connections[id] = Clone(localConnection);
                 try
                 {
-                    await runtime.Context.Configuration.SaveAsync(candidate).ConfigureAwait(false);
+                    await SaveConfigAsync(runtime.Context, candidate).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception error)
@@ -1720,7 +1736,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     candidate.Connections.Remove(persistedKey);
                 try
                 {
-                    await runtime.Context.Configuration.SaveAsync(candidate).ConfigureAwait(false);
+                    await SaveConfigAsync(runtime.Context, candidate).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception error)
@@ -1923,6 +1939,23 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
     internal StorageConnectionObserver ConnectionObserver => _connectionObserver;
 
+    /// <summary>Gets whether the library keeps its configuration in memory only.</summary>
+    public bool RuntimeOnly => _runtimeOnly;
+
+    /// <summary>Reads a configuration section, from memory in runtime-only mode.</summary>
+    private T ReadConfig<T>(LibraryContext context) where T : ConfigModelBase, new() =>
+        _runtimeOnly
+            ? (T)_memoryConfig.GetOrAdd(typeof(T), _ => typeof(T) == typeof(StorageConfig) && _runtimeSettings is not null ? _runtimeSettings : new T())
+            : context.Configuration.Get<T>();
+
+    /// <summary>Saves a configuration section, to memory in runtime-only mode.</summary>
+    private Task SaveConfigAsync<T>(LibraryContext context, T value) where T : ConfigModelBase, new()
+    {
+        if (!_runtimeOnly) return context.Configuration.SaveAsync(value);
+        _memoryConfig[typeof(T)] = value;
+        return Task.CompletedTask;
+    }
+
     internal StorageEventPublisher CaptureEventPublisher()
     {
         LibraryContext context;
@@ -2119,69 +2152,66 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return null;
     }
 
-    private static ProviderStorageConfigBase GetProviderConfig(LibraryContext context, Type connectionType)
+    private ProviderStorageConfigBase GetProviderConfig(LibraryContext context, Type connectionType)
     {
-        var configuration = context.Configuration;
-        if (connectionType == typeof(S3ConnectionConfig)) return configuration.Get<S3StorageConfig>();
-        if (connectionType == typeof(FtpConnectionConfig)) return configuration.Get<FtpStorageConfig>();
-        if (connectionType == typeof(SftpConnectionConfig)) return configuration.Get<SftpStorageConfig>();
-        if (connectionType == typeof(WebDavConnectionConfig)) return configuration.Get<WebDavStorageConfig>();
-        if (connectionType == typeof(AzureBlobConnectionConfig)) return configuration.Get<AzureStorageConfig>();
-        if (connectionType == typeof(GoogleCloudConnectionConfig)) return configuration.Get<GoogleCloudStorageConfig>();
-        if (connectionType == typeof(SwiftConnectionConfig)) return configuration.Get<SwiftStorageConfig>();
+        if (connectionType == typeof(S3ConnectionConfig)) return ReadConfig<S3StorageConfig>(context);
+        if (connectionType == typeof(FtpConnectionConfig)) return ReadConfig<FtpStorageConfig>(context);
+        if (connectionType == typeof(SftpConnectionConfig)) return ReadConfig<SftpStorageConfig>(context);
+        if (connectionType == typeof(WebDavConnectionConfig)) return ReadConfig<WebDavStorageConfig>(context);
+        if (connectionType == typeof(AzureBlobConnectionConfig)) return ReadConfig<AzureStorageConfig>(context);
+        if (connectionType == typeof(GoogleCloudConnectionConfig)) return ReadConfig<GoogleCloudStorageConfig>(context);
+        if (connectionType == typeof(SwiftConnectionConfig)) return ReadConfig<SwiftStorageConfig>(context);
         throw new NotSupportedException($"Provider connection type '{connectionType.FullName}' is not supported.");
     }
 
-    private static Task SaveProviderConfigAsync(LibraryContext context, ProviderStorageConfigBase config) => config switch
+    private Task SaveProviderConfigAsync(LibraryContext context, ProviderStorageConfigBase config) => config switch
     {
-        S3StorageConfig value => context.Configuration.SaveAsync(value),
-        FtpStorageConfig value => context.Configuration.SaveAsync(value),
-        SftpStorageConfig value => context.Configuration.SaveAsync(value),
-        WebDavStorageConfig value => context.Configuration.SaveAsync(value),
-        AzureStorageConfig value => context.Configuration.SaveAsync(value),
-        GoogleCloudStorageConfig value => context.Configuration.SaveAsync(value),
-        SwiftStorageConfig value => context.Configuration.SaveAsync(value),
+        S3StorageConfig value => SaveConfigAsync(context, value),
+        FtpStorageConfig value => SaveConfigAsync(context, value),
+        SftpStorageConfig value => SaveConfigAsync(context, value),
+        WebDavStorageConfig value => SaveConfigAsync(context, value),
+        AzureStorageConfig value => SaveConfigAsync(context, value),
+        GoogleCloudStorageConfig value => SaveConfigAsync(context, value),
+        SwiftStorageConfig value => SaveConfigAsync(context, value),
         _ => throw new NotSupportedException($"Provider configuration type '{config.GetType().FullName}' is not supported.")
     };
 
-    private static string? FindConfiguredSection(
+    private string? FindConfiguredSection(
         string id,
         LibraryContext context,
         Type? exceptConnectionType = null)
     {
-        var configuration = context.Configuration;
         if (exceptConnectionType != typeof(LocalConnectionConfig) &&
-            TryFindKey(configuration.Get<LocalStorageConfig>().Connections, id, out _))
+            TryFindKey(ReadConfig<LocalStorageConfig>(context).Connections, id, out _))
             return "storage.local";
-        if (exceptConnectionType != typeof(S3ConnectionConfig) && configuration.Get<S3StorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(S3ConnectionConfig) && ReadConfig<S3StorageConfig>(context).ContainsConnection(id))
             return "storage.s3";
-        if (exceptConnectionType != typeof(FtpConnectionConfig) && configuration.Get<FtpStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(FtpConnectionConfig) && ReadConfig<FtpStorageConfig>(context).ContainsConnection(id))
             return "storage.ftp";
-        if (exceptConnectionType != typeof(SftpConnectionConfig) && configuration.Get<SftpStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(SftpConnectionConfig) && ReadConfig<SftpStorageConfig>(context).ContainsConnection(id))
             return "storage.sftp";
-        if (exceptConnectionType != typeof(WebDavConnectionConfig) && configuration.Get<WebDavStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(WebDavConnectionConfig) && ReadConfig<WebDavStorageConfig>(context).ContainsConnection(id))
             return "storage.webdav";
-        if (exceptConnectionType != typeof(AzureBlobConnectionConfig) && configuration.Get<AzureStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(AzureBlobConnectionConfig) && ReadConfig<AzureStorageConfig>(context).ContainsConnection(id))
             return "storage.azure";
-        if (exceptConnectionType != typeof(GoogleCloudConnectionConfig) && configuration.Get<GoogleCloudStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(GoogleCloudConnectionConfig) && ReadConfig<GoogleCloudStorageConfig>(context).ContainsConnection(id))
             return "storage.gcs";
-        if (exceptConnectionType != typeof(SwiftConnectionConfig) && configuration.Get<SwiftStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(SwiftConnectionConfig) && ReadConfig<SwiftStorageConfig>(context).ContainsConnection(id))
             return "storage.swift";
         return null;
     }
 
-    private static ProviderConfigMatch? FindProviderConfigContaining(string id, LibraryContext context)
+    private ProviderConfigMatch? FindProviderConfigContaining(string id, LibraryContext context)
     {
-        var configuration = context.Configuration;
         ProviderStorageConfigBase[] configs =
         [
-            configuration.Get<S3StorageConfig>(),
-            configuration.Get<FtpStorageConfig>(),
-            configuration.Get<SftpStorageConfig>(),
-            configuration.Get<WebDavStorageConfig>(),
-            configuration.Get<AzureStorageConfig>(),
-            configuration.Get<GoogleCloudStorageConfig>(),
-            configuration.Get<SwiftStorageConfig>()
+            ReadConfig<S3StorageConfig>(context),
+            ReadConfig<FtpStorageConfig>(context),
+            ReadConfig<SftpStorageConfig>(context),
+            ReadConfig<WebDavStorageConfig>(context),
+            ReadConfig<AzureStorageConfig>(context),
+            ReadConfig<GoogleCloudStorageConfig>(context),
+            ReadConfig<SwiftStorageConfig>(context)
         ];
         foreach (var config in configs)
         {
@@ -2279,16 +2309,15 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             throw new ArgumentException("A storage connection ID is required.", nameof(connectionId));
     }
 
-    private static string? FindConfiguredNonLocalSection(string id, LibraryContext context)
+    private string? FindConfiguredNonLocalSection(string id, LibraryContext context)
     {
-        var configuration = context.Configuration;
-        if (Contains(configuration.Get<S3StorageConfig>(), id)) return "storage.s3";
-        if (Contains(configuration.Get<FtpStorageConfig>(), id)) return "storage.ftp";
-        if (Contains(configuration.Get<SftpStorageConfig>(), id)) return "storage.sftp";
-        if (Contains(configuration.Get<WebDavStorageConfig>(), id)) return "storage.webdav";
-        if (Contains(configuration.Get<AzureStorageConfig>(), id)) return "storage.azure";
-        if (Contains(configuration.Get<GoogleCloudStorageConfig>(), id)) return "storage.gcs";
-        if (Contains(configuration.Get<SwiftStorageConfig>(), id)) return "storage.swift";
+        if (Contains(ReadConfig<S3StorageConfig>(context), id)) return "storage.s3";
+        if (Contains(ReadConfig<FtpStorageConfig>(context), id)) return "storage.ftp";
+        if (Contains(ReadConfig<SftpStorageConfig>(context), id)) return "storage.sftp";
+        if (Contains(ReadConfig<WebDavStorageConfig>(context), id)) return "storage.webdav";
+        if (Contains(ReadConfig<AzureStorageConfig>(context), id)) return "storage.azure";
+        if (Contains(ReadConfig<GoogleCloudStorageConfig>(context), id)) return "storage.gcs";
+        if (Contains(ReadConfig<SwiftStorageConfig>(context), id)) return "storage.swift";
         return null;
 
         static bool Contains(ProviderStorageConfigBase providerConfig, string connectionId) =>

@@ -14,6 +14,19 @@ public static class StorageErrorInfo
     public const string SftpStatusKey = "sftpStatus";
     /// <summary>Details key carrying the HTTP status code.</summary>
     public const string HttpStatusKey = "httpStatus";
+    /// <summary>
+    /// Details key on <c>storage.tls_failure</c> explaining the failure: <c>server_certificate_rejected</c>
+    /// (the server's certificate is not trusted; see <see cref="PresentedCertificateKey"/>),
+    /// <c>client_certificate_rejected</c> (the server refused or required our certificate — a credential
+    /// problem), <c>protocol_mismatch</c> (no common TLS version or cipher), or <c>handshake_failed</c>.
+    /// </summary>
+    public const string TlsReasonKey = "tlsReason";
+    /// <summary>Details key with the SHA-256 of a refused server certificate, as <c>TrustedCertificateSha256</c> expects.</summary>
+    public const string PresentedCertificateKey = "presentedCertificateSha256";
+    /// <summary>Details key with the SHA-256 public-key pin of a refused server certificate, as <c>TrustedPublicKeySha256</c> expects.</summary>
+    public const string PresentedPublicKeyKey = "presentedPublicKeySha256";
+    /// <summary>Details key with the fingerprint of a refused SSH host key.</summary>
+    public const string PresentedFingerprintKey = "presentedFingerprint";
 
     private static readonly HashSet<string> TransientCodes = new(StringComparer.Ordinal)
     {

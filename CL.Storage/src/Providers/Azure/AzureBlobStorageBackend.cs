@@ -156,14 +156,25 @@ public sealed class AzureBlobStorageBackend :
         {
             if (options.Recursive)
             {
+                var (nativeToken, previous) = ImplicitDirectories.Unwrap(options.ContinuationToken);
                 await foreach (var page in _container.GetBlobsAsync(
                     BlobTraits.Metadata,
                     BlobStates.None,
                     prefix,
-                    cancellationToken).AsPages(options.ContinuationToken, options.PageSize).ConfigureAwait(false))
+                    cancellationToken).AsPages(nativeToken, options.PageSize).ConfigureAwait(false))
                 {
-                    var items = page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>().ToArray();
-                    return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.ContinuationToken));
+                    var items = new List<StorageItem>();
+                    foreach (var item in page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>())
+                    {
+                        ImplicitDirectories.AddParents(items, item.Path, normalized.Value!, previous, DirectoryItem);
+                        previous = item.Path;
+                        items.Add(item);
+                    }
+                    var unique = items.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
+                        .OrderBy(item => item.Path, StringComparer.Ordinal).ToArray();
+                    return Result<StoragePage>.Success(new StoragePage(
+                        StorageListFilter.Apply(unique, options),
+                        ImplicitDirectories.Wrap(page.ContinuationToken, previous)));
                 }
             }
             else
@@ -273,7 +284,7 @@ public sealed class AzureBlobStorageBackend :
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {

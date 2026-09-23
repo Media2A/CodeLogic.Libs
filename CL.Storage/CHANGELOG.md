@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-09-23
+
+### Fixed
+
+- `Mirror` sync copied an older source over a newer destination of the same size (so every run
+  re-copied files to object stores); only `Update` checked, although both are documented not to.
+- `Mirror` with `DeleteExtraneous` ran its deletes even after copies in the same run failed; deletes
+  are now skipped (reported as `storage.partial_failure`) until a run copies cleanly.
+- Sync looked up each action's entry with a linear search inside the copy loop (quadratic).
+- Recursive listings on S3, Azure Blob, and Swift left out folders that exist only as key prefixes (no
+  marker object), so sync and compare never saw them. They are now inferred, once each, across pages.
+- Google Cloud recursive listings repeated inferred folders after every provider page boundary.
+- Connections from `GetStorage()` never watched natively, because the service proxy did not pass native
+  change notifications through, so local connections always polled.
+- The native watcher dropped changes silently when its buffer overflowed.
+
+### Added
+
+- `StorageLibraryOptions.RuntimeOnly`: no configuration section is registered, read, or written;
+  connections exist only once added at runtime, and no default connection is required.
+- `storage.tls_failure` carries a `tlsReason` detail (`server_certificate_rejected`,
+  `client_certificate_rejected`, `protocol_mismatch`, `handshake_failed`); a refused server certificate
+  adds `presentedCertificateSha256` and `presentedPublicKeySha256`, ready to pin.
+- `ClientCertificateContent` on FTP and WebDAV connections: the client certificate as bytes (base64 in
+  JSON), so it never has to be written to disk.
+- Download progress carries `TotalBytes` even without a `Length`: the item's size is looked up once.
+- `StorageChangeKind.Overflow`, reported when native watching lost changes and the caller should rescan.
+
+### Changed (breaking)
+
+- `StorageChangeKind` gained `Overflow`; exhaustive switches over it need a new case.
+- `Mirror` sync no longer replaces a destination that is newer and the same size.
+
 ## 2026-09-22
 
 ### Fixed

@@ -236,21 +236,30 @@ public static class StorageSync
             var created = await destination.CreateDirectoryAsync(Join(destinationPath, plan[i].RelativePath), cancellationToken).ConfigureAwait(false);
             done[i] = plan[i] with { Error = created.Error };
         }
+        var entries = diff.Value.Entries.ToDictionary(entry => entry.RelativePath, StringComparer.Ordinal);
         await Parallel.ForEachAsync(
             Enumerable.Range(0, plan.Count).Where(i => plan[i].Kind is StorageSyncActionKind.CopyToDestination or StorageSyncActionKind.CopyToSource),
             new ParallelOptions { MaxDegreeOfParallelism = options.MaxConcurrency, CancellationToken = cancellationToken },
             async (i, token) =>
             {
                 var action = plan[i];
-                var entry = diff.Value.Entries.First(item => item.RelativePath == action.RelativePath);
+                var entry = entries[action.RelativePath];
                 var result = action.Kind == StorageSyncActionKind.CopyToDestination
                     ? await CopyFileAsync(source, Join(sourcePath, action.RelativePath), entry.Source!, destination, Join(destinationPath, action.RelativePath), options, token).ConfigureAwait(false)
                     : await CopyFileAsync(destination, Join(destinationPath, action.RelativePath), entry.Destination!, source, Join(sourcePath, action.RelativePath), options, token).ConfigureAwait(false);
                 done[i] = action with { Error = result.Error };
             }).ConfigureAwait(false);
+        // A failed copy means the destination does not match the source yet, so deleting "extra" items
+        // could remove the only good copy of something; deletes wait for a clean run.
+        var failedCopies = done.Count(action => action is { Error: not null, Kind: StorageSyncActionKind.CopyToDestination or StorageSyncActionKind.CopyToSource or StorageSyncActionKind.CreateDirectory });
         foreach (var i in Enumerable.Range(0, plan.Count).Where(i => plan[i].Kind == StorageSyncActionKind.DeleteFromDestination)
                      .OrderByDescending(i => plan[i].RelativePath.Count(c => c == '/')))
         {
+            if (failedCopies > 0)
+            {
+                done[i] = plan[i] with { Error = StorageErrors.PartialFailure($"Not deleted because {failedCopies} copy or directory step(s) failed in this run.") };
+                continue;
+            }
             var deleted = await destination.DeleteAsync(Join(destinationPath, plan[i].RelativePath),
                 new StorageDeleteOptions { Recursive = true, IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
             done[i] = plan[i] with { Error = deleted.Error };
@@ -283,7 +292,8 @@ public static class StorageSync
                 case StorageDiffKind.Different when !entry.IsDirectory:
                     var towardSource = options.Direction == StorageSyncDirection.TwoWay && entry.Reasons.HasFlag(StorageDiffReason.DestinationNewer);
                     // Update and mirror never copy an older source over a newer destination unless the content differs too.
-                    if (options.Direction == StorageSyncDirection.Update && entry.Reasons == StorageDiffReason.DestinationNewer) break;
+                    if (options.Direction is StorageSyncDirection.Update or StorageSyncDirection.Mirror &&
+                        entry.Reasons == StorageDiffReason.DestinationNewer) break;
                     actions.Add(towardSource
                         ? new StorageSyncAction(entry.RelativePath, StorageSyncActionKind.CopyToSource, entry.Reasons, entry.Destination!.Size)
                         : new StorageSyncAction(entry.RelativePath, StorageSyncActionKind.CopyToDestination, entry.Reasons, entry.Source!.Size));
