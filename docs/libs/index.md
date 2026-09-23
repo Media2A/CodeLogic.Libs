@@ -44,7 +44,7 @@ your application or from other libraries after `StartAsync()`.
 
 <div class="cl-group">Storage</div>
 <div class="lib-grid">
-  <a class="lib-card" href="storage.md">
+  <a class="lib-card" href="storage/index.md">
     <div class="lib-name">CL.Storage</div>
     <div class="lib-pkg">CodeLogic.Storage</div>
     <p class="lib-desc">Safe mounted local, S3, FTP/SFTP, WebDAV, Azure, GCS, and Swift storage.</p>

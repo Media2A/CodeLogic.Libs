@@ -1,9 +1,9 @@
 # CodeLogic.Common
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Common)](https://www.nuget.org/packages/CodeLogic.Common)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
-> A broad, stateless utility toolkit for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — security, ID/password generation, JSON, compression, imaging, strings, time, web, networking, caching, file handling, and reflection.
+> A broad, stateless utility toolkit for [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) — security, ID/password generation, JSON, compression, imaging, strings, time, web, networking, caching, file handling, and reflection.
 
 `CodeLogic.Common` is a grab-bag of small, dependency-light helpers used across CodeLogic applications. Almost everything is exposed as **static helper classes** grouped by namespace, so you call them directly — `Hashing.Sha256(...)`, `IdGenerator.NanoId()`, `JsonHelper.Serialize(...)` — with no library instance to wire up. Many fallible operations return a framework `Result` / `Result<T>` instead of throwing, while simple helpers return plain values (`string`, `bool`, `byte[]`). The package also ships a `CommonLibrary` (`ILibrary`) so it participates in the CodeLogic lifecycle and health system.
 
@@ -65,14 +65,14 @@ await CodeLogic.StartAsync();
 
 ## Documentation
 
-Full guide: **[CL.Common documentation](https://media2a.github.io/CodeLogic.Libs/libs/common/index.html)**
+Full guide: **[CL.Common documentation](https://zyntal-com.github.io/CodeLogic.Libs/libs/common/index.html)**
 
 ## Requirements
 
 - No configuration required — `CL.Common` is a stateless utility library and writes no config file.
-- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) · .NET 10
 - SkiaSharp 3.x (imaging) · K4os.Compression.LZ4 1.x (LZ4) · Newtonsoft.Json 13.x
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE).

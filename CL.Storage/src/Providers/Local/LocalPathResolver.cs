@@ -21,7 +21,15 @@ internal sealed class LocalPathResolver
 
     public string Root { get; }
 
-    public Result<ResolvedLocalPath> Resolve(string path)
+    public Result<ResolvedLocalPath> Resolve(string path) => Resolve(path, allowFinalLink: false);
+
+    /// <summary>
+    /// Resolves a path whose last segment may itself be a link, without following it. Used to create,
+    /// read, or change a link while every parent directory still gets the usual link checks.
+    /// </summary>
+    public Result<ResolvedLocalPath> ResolveLink(string path) => Resolve(path, allowFinalLink: true);
+
+    private Result<ResolvedLocalPath> Resolve(string path, bool allowFinalLink)
     {
         var normalized = StoragePath.Normalize(path);
         if (normalized.IsFailure)
@@ -36,9 +44,12 @@ internal sealed class LocalPathResolver
                 return Result<ResolvedLocalPath>.Failure(StorageErrors.InvalidPath("The path escapes the configured root."));
 
             var current = Root;
-            foreach (var segment in normalized.Value.Split('/', StringSplitOptions.RemoveEmptyEntries))
+            var segments = normalized.Value.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            for (var index = 0; index < segments.Length; index++)
             {
-                current = Path.Combine(current, segment);
+                if (allowFinalLink && index == segments.Length - 1)
+                    break;
+                current = Path.Combine(current, segments[index]);
                 FileAttributes attributes;
                 try
                 {
@@ -72,6 +83,15 @@ internal sealed class LocalPathResolver
         {
             return Result<ResolvedLocalPath>.Failure(StorageErrors.FromException(error, "Resolve path"));
         }
+    }
+
+    /// <summary>Maps a contained full path back to a storage path, or returns null when it lies outside the root.</summary>
+    public string? ToStoragePath(string fullPath)
+    {
+        var full = Path.GetFullPath(fullPath);
+        if (!IsContained(full)) return null;
+        var relative = Path.GetRelativePath(Root, full).Replace(Path.DirectorySeparatorChar, '/');
+        return relative == "." ? string.Empty : relative;
     }
 
     public bool IsContained(string fullPath)

@@ -1,7 +1,9 @@
 using System.Diagnostics.CodeAnalysis;
 using CL.Storage.Abstractions;
+using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
+using CL.Storage.Registry;
 using CL.Storage.Providers.Local;
 using CodeLogic.Core.Results;
 using WebDAVClient;
@@ -11,7 +13,7 @@ using WebDAVClient.Model;
 namespace CL.Storage.Providers.WebDav;
 
 /// <summary>Root-scoped storage over a WebDAV endpoint.</summary>
-public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataService
+public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataService, IStorageDiagnosticsSource
 {
     private static readonly StorageCapabilities WebDavCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -21,6 +23,9 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         StorageFeature.DirectoryMove |
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
+        // A rename on the server (RNFR/RNTO, SFTP rename, WebDAV MOVE) moves a whole tree in one step,
+        // so folder moves no longer fall back to copy-then-delete through the client.
+        StorageFeature.AtomicMove |
         StorageFeature.ConditionalCreate |
         StorageFeature.AtomicReplace |
         StorageFeature.MetadataRead);
@@ -30,6 +35,9 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     private readonly string _basePath;
     private readonly bool _ownsClient;
     private readonly long _maxBufferedDownloadBytes;
+    private readonly ProviderRetryPolicy _retry;
+    private readonly HttpClient? _http;
+    private readonly Uri? _endpoint;
     private int _disposed;
 
     /// <summary>Initializes a backend over a WebDAV client.</summary>
@@ -39,18 +47,38 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     /// <param name="basePath">Optional remote base path prepended to requests.</param>
     /// <param name="ownsClient">Whether disposal of this backend also disposes the client.</param>
     /// <param name="maxBufferedDownloadBytes">Maximum size accepted by buffered download helpers.</param>
+    /// <param name="retry">Transient-failure retry policy; defaults when omitted.</param>
     public WebDavStorageBackend(
         string connectionId,
         IClient client,
         string? root = null,
         string? basePath = null,
         bool ownsClient = false,
-        long maxBufferedDownloadBytes = 67_108_864)
+        long maxBufferedDownloadBytes = 67_108_864,
+        StorageRetryConfig? retry = null)
+        : this(connectionId, client, root, basePath, ownsClient, maxBufferedDownloadBytes, retry, observer: null)
+    {
+    }
+
+    internal WebDavStorageBackend(
+        string connectionId,
+        IClient client,
+        string? root,
+        string? basePath,
+        bool ownsClient,
+        long maxBufferedDownloadBytes,
+        StorageRetryConfig? retry,
+        IStorageConnectionObserver? observer,
+        HttpClient? http = null,
+        Uri? endpoint = null)
     {
         if (string.IsNullOrWhiteSpace(connectionId)) throw new ArgumentException("Connection ID is required.", nameof(connectionId));
         ArgumentNullException.ThrowIfNull(client);
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
+        _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.WebDav, observer);
+        _http = http;
+        _endpoint = endpoint;
         _client = client;
         _paths = new RemotePathResolver(root);
         _basePath = NormalizeBasePath(basePath);
@@ -68,7 +96,10 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     public StorageCapabilities Capabilities => WebDavCapabilities;
 
     /// <inheritdoc />
-    public async Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
+    public Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Get WebDAV item info", RetryKind.Idempotent, (_, token) => GetInfoCoreAsync(path, token), cancellationToken);
+
+    private async Task<Result<StorageItem>> GetInfoCoreAsync(string path, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var resolved = _paths.Resolve(path);
@@ -87,9 +118,12 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
+    public Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Check WebDAV item existence", RetryKind.Idempotent, (_, token) => ExistsCoreAsync(path, token), cancellationToken);
+
+    private async Task<Result<bool>> ExistsCoreAsync(string path, CancellationToken cancellationToken)
     {
-        var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        var info = await GetInfoCoreAsync(path, cancellationToken).ConfigureAwait(false);
         if (info.IsSuccess) return Result<bool>.Success(true);
         return info.Error?.Code == StorageErrors.NotFoundCode
             ? Result<bool>.Success(false)
@@ -97,7 +131,10 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<Result<StoragePage>> ListAsync(string path, StorageListOptions? options = null, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("List WebDAV directory", RetryKind.Idempotent, (_, token) => ListCoreAsync(path, options, token), cancellationToken);
+
+    private async Task<Result<StoragePage>> ListCoreAsync(string path, StorageListOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageListOptions();
         var validation = options.Validate();
@@ -125,7 +162,10 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default)
+    public Task<Result> CreateDirectoryAsync(string path, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Create WebDAV directory", RetryKind.Idempotent, (_, token) => CreateDirectoryCoreAsync(path, token), cancellationToken);
+
+    private async Task<Result> CreateDirectoryCoreAsync(string path, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var resolved = _paths.Resolve(path);
@@ -140,7 +180,16 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
+    /// <remarks>Uploads are staged and renamed into place, so replaying a seekable source cannot leave a partial file.</remarks>
+    public Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (StorageTransferPipeline.Applies(this, options))
+            return StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken);
+        return _retry.ExecuteUploadAsync("Upload WebDAV file", source, token => UploadCoreAsync(path, source, options, token), cancellationToken);
+    }
+
+    private async Task<Result<StorageItem>> UploadCoreAsync(string path, Stream source, StorageUploadOptions? options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
         options ??= new StorageUploadOptions();
@@ -163,7 +212,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             else
             {
                 var parentStorage = _paths.FromRemotePath(parent) ?? string.Empty;
-                var parentInfo = await GetInfoAsync(parentStorage, cancellationToken).ConfigureAwait(false);
+                var parentInfo = await GetInfoCoreAsync(parentStorage, cancellationToken).ConfigureAwait(false);
                 if (parentInfo.IsFailure) return Result<StorageItem>.Failure(parentInfo.Error!);
             }
 
@@ -177,13 +226,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
                 cancellationToken).ConfigureAwait(false);
             if (!success) return Result<StorageItem>.Failure(StorageErrors.ProviderError("The WebDAV server did not accept the upload."));
 
-            success = await _client.MoveFile(
-                stagingRemotePath,
-                resolved.Value.RemotePath,
-                options.Overwrite,
-                null,
-                null,
-                cancellationToken).ConfigureAwait(false);
+            success = await TransferAsync("MOVE", stagingRemotePath, resolved.Value.RemotePath, options.Overwrite, folder: false, cancellationToken).ConfigureAwait(false);
             if (!success)
             {
                 return Result<StorageItem>.Failure(options.Overwrite
@@ -192,7 +235,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             }
 
             stagingRemotePath = null;
-            return await GetInfoAsync(resolved.Value.StoragePath, cancellationToken).ConfigureAwait(false);
+            return await GetInfoCoreAsync(resolved.Value.StoragePath, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Upload WebDAV file")); }
@@ -215,7 +258,13 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken) =>
+        _retry.ExecuteAsync("Download WebDAV file", RetryKind.Idempotent, (_, token) => DownloadCoreAsync(path, options, token), cancellationToken);
+
+    private async Task<Result<Stream>> DownloadCoreAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
@@ -227,7 +276,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (resolved.IsFailure) return Result<Stream>.Failure(resolved.Error!);
         try
         {
-            var info = await GetInfoAsync(resolved.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
+            var info = await GetInfoCoreAsync(resolved.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
             if (info.IsFailure) return Result<Stream>.Failure(info.Error!);
             if (info.Value!.ItemType == StorageItemType.Directory)
                 return Result<Stream>.Failure(StorageErrors.Conflict("A WebDAV directory cannot be downloaded as a file."));
@@ -287,7 +336,10 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<Result> DeleteAsync(string path, StorageDeleteOptions? options = null, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Delete WebDAV item", RetryKind.NonIdempotent, (_, token) => DeleteCoreAsync(path, options, token), cancellationToken);
+
+    private async Task<Result> DeleteCoreAsync(string path, StorageDeleteOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDeleteOptions();
         var validation = options.Validate();
@@ -299,7 +351,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (resolved.IsFailure) return Result.Failure(resolved.Error!);
         try
         {
-            var info = await GetInfoAsync(resolved.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
+            var info = await GetInfoCoreAsync(resolved.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
             if (info.IsFailure) return options.IgnoreMissing && info.Error?.Code == StorageErrors.NotFoundCode
                 ? Result.Success()
                 : Result.Failure(info.Error!);
@@ -339,7 +391,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (relationship.IsFailure) return relationship;
         try
         {
-            var info = await GetInfoAsync(source.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
+            var info = await GetInfoCoreAsync(source.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
             if (info.IsFailure) return Result.Failure(info.Error!);
             if (info.Value!.ItemType == StorageItemType.Directory)
             {
@@ -349,9 +401,13 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
                 if (relationship.IsFailure) return relationship;
             }
             if (options.CreateParents) await EnsureDirectoryAsync(RemotePathResolver.Parent(destination.Value!.RemotePath), cancellationToken).ConfigureAwait(false);
-            var success = info.Value!.ItemType == StorageItemType.Directory
-                ? await _client.CopyFolder(source.Value.RemotePath, destination.Value!.RemotePath, options.Overwrite, null, cancellationToken).ConfigureAwait(false)
-                : await _client.CopyFile(source.Value.RemotePath, destination.Value!.RemotePath, options.Overwrite, null, cancellationToken).ConfigureAwait(false);
+            var success = await TransferAsync(
+                "COPY",
+                source.Value.RemotePath,
+                destination.Value!.RemotePath,
+                options.Overwrite,
+                folder: info.Value!.ItemType == StorageItemType.Directory,
+                cancellationToken).ConfigureAwait(false);
             return success ? Result.Success() : Result.Failure(options.Overwrite
                 ? StorageErrors.ProviderError("The WebDAV server did not copy the item.")
                 : StorageErrors.Conflict("The WebDAV destination already exists."));
@@ -361,7 +417,10 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Move WebDAV item", RetryKind.NonIdempotent, (_, token) => MoveCoreAsync(sourcePath, destinationPath, options, token), cancellationToken);
+
+    private async Task<Result> MoveCoreAsync(string sourcePath, string destinationPath, StorageTransferOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageTransferOptions();
         var validation = options.Validate();
@@ -376,7 +435,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (relationship.IsFailure) return relationship;
         try
         {
-            var info = await GetInfoAsync(source.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
+            var info = await GetInfoCoreAsync(source.Value!.StoragePath, cancellationToken).ConfigureAwait(false);
             if (info.IsFailure) return Result.Failure(info.Error!);
             if (info.Value!.ItemType == StorageItemType.Directory)
             {
@@ -386,9 +445,13 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
                 if (relationship.IsFailure) return relationship;
             }
             if (options.CreateParents) await EnsureDirectoryAsync(RemotePathResolver.Parent(destination.Value!.RemotePath), cancellationToken).ConfigureAwait(false);
-            var success = info.Value!.ItemType == StorageItemType.Directory
-                ? await _client.MoveFolder(source.Value.RemotePath, destination.Value!.RemotePath, options.Overwrite, null, null, cancellationToken).ConfigureAwait(false)
-                : await _client.MoveFile(source.Value.RemotePath, destination.Value!.RemotePath, options.Overwrite, null, null, cancellationToken).ConfigureAwait(false);
+            var success = await TransferAsync(
+                "MOVE",
+                source.Value.RemotePath,
+                destination.Value!.RemotePath,
+                options.Overwrite,
+                folder: info.Value!.ItemType == StorageItemType.Directory,
+                cancellationToken).ConfigureAwait(false);
             return success ? Result.Success() : Result.Failure(options.Overwrite
                 ? StorageErrors.ProviderError("The WebDAV server did not move the item.")
                 : StorageErrors.Conflict("The WebDAV destination already exists."));
@@ -398,7 +461,10 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     }
 
     /// <inheritdoc />
-    public async Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default)
+    public Task<Result> CheckHealthAsync(CancellationToken cancellationToken = default) =>
+        _retry.ExecuteAsync("Check WebDAV health", RetryKind.Idempotent, (_, token) => CheckHealthCoreAsync(token), cancellationToken);
+
+    private async Task<Result> CheckHealthCoreAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -417,7 +483,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        var info = await GetInfoCoreAsync(path, cancellationToken).ConfigureAwait(false);
         return info.IsSuccess
             ? Result<IReadOnlyDictionary<string, string>>.Success(info.Value!.Metadata)
             : Result<IReadOnlyDictionary<string, string>>.Failure(info.Error!);
@@ -460,7 +526,11 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
     /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
-        if (_ownsClient && Interlocked.Exchange(ref _disposed, 1) == 0) _client.Dispose();
+        if (_ownsClient && Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            _client.Dispose();
+            _http?.Dispose();
+        }
         return ValueTask.CompletedTask;
     }
 
@@ -499,7 +569,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
             current += "/" + segment;
             var storagePath = _paths.FromRemotePath(current);
             if (storagePath is null) continue;
-            var exists = await ExistsAsync(storagePath, cancellationToken).ConfigureAwait(false);
+            var exists = await ExistsCoreAsync(storagePath, cancellationToken).ConfigureAwait(false);
             if (exists.IsFailure) throw new WebDAVException(exists.Error!.Message);
             if (exists.Value) continue;
             var parent = RemotePathResolver.Parent(current);
@@ -510,7 +580,11 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
 
     private string? FromHref(string href)
     {
-        var value = Uri.TryCreate(href, UriKind.Absolute, out var absolute) ? absolute.AbsolutePath : href;
+        // Only http(s) hrefs are absolute: on Unix, Uri also parses "/dir/a%20b" as a file path and keeps
+        // "%20" literal, so names needing escapes would never match.
+        var value = Uri.TryCreate(href, UriKind.Absolute, out var absolute) && (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps)
+            ? absolute.AbsolutePath
+            : href;
         value = Uri.UnescapeDataString(value).Replace('\\', '/');
         if (!value.StartsWith('/')) value = "/" + value;
         if (_basePath != "/" && value.StartsWith(_basePath, StringComparison.OrdinalIgnoreCase))
@@ -559,28 +633,118 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         return value;
     }
 
-    private static string EnsureTrailingSlash(string path) => path.EndsWith('/') ? path : path + "/";
-    private static string NameOf(string path) => path.Split('/')[^1];
-    private static bool IsNotFound(WebDAVException error) => error.ErrorCode == 404;
-
-    private static Error Map(Exception exception, string operation)
+    /// <summary>
+    /// Issues a WebDAV MOVE or COPY. Returns false when the destination exists and overwrite is off.
+    /// </summary>
+    /// <remarks>
+    /// The WebDAV client library does not dispose the responses of its move and copy calls, so each one
+    /// strands a pooled connection until garbage collection; with a connection limit the next request
+    /// blocks forever. When this backend owns the HTTP stack it sends these requests itself.
+    /// </remarks>
+    private async Task<bool> TransferAsync(string method, string sourceRemotePath, string destinationRemotePath, bool overwrite, bool folder, CancellationToken cancellationToken)
     {
-        if (exception is WebDAVException webDav)
+        if (_http is null || _endpoint is null)
         {
-            return webDav.ErrorCode switch
+            return (method, folder) switch
             {
-                401 or 403 => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                404 => StorageErrors.NotFound($"{operation}: item was not found."),
-                408 or 504 => StorageErrors.Timeout($"{operation}: operation timed out."),
-                409 or 412 or 423 => StorageErrors.Conflict($"{operation}: WebDAV conflict."),
-                >= 500 => StorageErrors.Unavailable($"{operation}: WebDAV service is unavailable."),
-                _ => StorageErrors.ProviderError($"{operation}: WebDAV request failed.", $"status={webDav.ErrorCode}")
+                ("MOVE", true) => await _client.MoveFolder(sourceRemotePath, destinationRemotePath, overwrite, null, null, cancellationToken).ConfigureAwait(false),
+                ("MOVE", false) => await _client.MoveFile(sourceRemotePath, destinationRemotePath, overwrite, null, null, cancellationToken).ConfigureAwait(false),
+                (_, true) => await _client.CopyFolder(sourceRemotePath, destinationRemotePath, overwrite, null, cancellationToken).ConfigureAwait(false),
+                _ => await _client.CopyFile(sourceRemotePath, destinationRemotePath, overwrite, null, cancellationToken).ConfigureAwait(false)
             };
         }
-        if (exception is TimeoutException or TaskCanceledException)
-            return StorageErrors.Timeout($"{operation}: operation timed out.");
-        if (exception is HttpRequestException)
-            return StorageErrors.Unavailable($"{operation}: WebDAV service is unavailable.");
-        return StorageErrors.ProviderError($"{operation}: WebDAV provider failed.");
+
+        using var request = new HttpRequestMessage(new HttpMethod(method), ResourceUri(sourceRemotePath, folder));
+        request.Headers.TryAddWithoutValidation("Destination", ResourceUri(destinationRemotePath, folder).AbsoluteUri);
+        request.Headers.TryAddWithoutValidation("Overwrite", overwrite ? "T" : "F");
+        if (folder) request.Headers.TryAddWithoutValidation("Depth", "infinity");
+        foreach (var header in _client is Client concrete && concrete.CustomHeaders is { } custom ? custom : [])
+            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode)
+            return true;
+        if (response.StatusCode == System.Net.HttpStatusCode.PreconditionFailed && !overwrite)
+            return false;
+        throw new WebDAVException((int)response.StatusCode, $"WebDAV {method} failed (Status Code: {(int)response.StatusCode}).");
+    }
+
+    /// <summary>Records the certificate each TLS connection is offered; set by the factory.</summary>
+    internal ServerIdentityRecorder? Identity { get; init; }
+
+    StorageServerIdentity? IStorageDiagnosticsSource.PresentedIdentity => Identity?.Last;
+
+    StorageSessionPoolStats? IStorageDiagnosticsSource.PoolStats => null;
+
+    /// <summary>Sends <c>OPTIONS</c> to the mounted root and reports the <c>Server</c>, <c>DAV</c>, and <c>Allow</c> headers.</summary>
+    async Task<Result<StorageServerDetails>> IStorageDiagnosticsSource.GetServerDetailsAsync(CancellationToken cancellationToken)
+    {
+        if (_http is null || _endpoint is null)
+            return Result<StorageServerDetails>.Failure(StorageErrors.Unsupported("This WebDAV backend does not own its HTTP client."));
+        var root = _paths.Resolve(string.Empty);
+        if (root.IsFailure) return Result<StorageServerDetails>.Failure(root.Error!);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Options, ResourceUri(root.Value!.RemotePath, folder: true));
+            foreach (var header in _client is Client concrete && concrete.CustomHeaders is { } custom ? custom : [])
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                throw new WebDAVException((int)response.StatusCode, $"WebDAV OPTIONS failed (Status Code: {(int)response.StatusCode}).");
+            var server = response.Headers.Server.Count > 0 ? response.Headers.Server.ToString() : null;
+            var features = new List<string>();
+            if (response.Headers.TryGetValues("DAV", out var dav))
+                features.AddRange(dav.SelectMany(value => value.Split(',')).Select(value => value.Trim()).Where(value => value.Length > 0).Select(value => $"DAV {value}"));
+            features.AddRange(response.Content.Headers.Allow.Select(method => method.ToUpperInvariant()).Order(StringComparer.Ordinal));
+            var negotiated = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["http"] = response.Version.ToString()
+            };
+            return Result<StorageServerDetails>.Success(new StorageServerDetails(server, server?.Split(' ', 2)[0], features.Distinct(StringComparer.Ordinal).ToArray(), negotiated));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageServerDetails>.Failure(Map(error, "Read WebDAV server details")); }
+    }
+
+    private Uri ResourceUri(string remotePath, bool folder)
+    {
+        var basePath = _basePath.TrimEnd('/');
+        var encoded = string.Join('/', remotePath.Split('/').Select(Uri.EscapeDataString));
+        if (!encoded.StartsWith('/')) encoded = "/" + encoded;
+        if (folder && !encoded.EndsWith('/')) encoded += "/";
+        return new Uri(_endpoint!, basePath + encoded);
+    }
+
+    private static string EnsureTrailingSlash(string path) => path.EndsWith('/') ? path : path + "/";
+    private static string NameOf(string path) => path.Split('/')[^1];
+    private static bool IsNotFound(WebDAVException error) => HttpStatusOf(error) == 404;
+
+    /// <summary>Reads the HTTP status from a WebDAV failure.</summary>
+    /// <remarks>
+    /// The client stores the HTTP status in <c>GetHttpCode()</c>; <c>ErrorCode</c> is usually zero. Some
+    /// failures only carry the status name in the message ("Status Code: Unauthorized"), so that is the
+    /// last resort.
+    /// </remarks>
+    internal static int HttpStatusOf(WebDAVException error)
+    {
+        if (error.GetHttpCode() is > 0 and var http) return http;
+        if (error.ErrorCode is >= 100 and < 600) return error.ErrorCode;
+        var match = StatusInMessage.Match(error.Message ?? string.Empty);
+        if (!match.Success) return 0;
+        var token = match.Groups[1].Value;
+        if (int.TryParse(token, out var numeric)) return numeric;
+        return Enum.TryParse<System.Net.HttpStatusCode>(token, ignoreCase: true, out var named) ? (int)named : 0;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex StatusInMessage =
+        new(@"Status Code:\s*([A-Za-z]+|\d{3})", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    internal static Error Map(Exception exception, string operation)
+    {
+        if (exception is WebDAVConflictException)
+            return StorageErrors.Conflict($"{operation}: WebDAV conflict.");
+        if (exception is WebDAVException webDav && HttpStatusOf(webDav) is > 0 and var status)
+            return ProviderErrorMapper.FromHttpStatus(status, operation, "WebDAV");
+        return ProviderErrorMapper.FromTransport(exception, operation, "WebDAV")
+            ?? StorageErrors.ProviderError($"{operation}: WebDAV provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 }

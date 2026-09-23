@@ -14,7 +14,7 @@ using CodeLogic.Core.Results;
 namespace CL.Storage.Providers.Swift;
 
 /// <summary>Root-scoped storage over the OpenStack Swift HTTP API.</summary>
-public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataService
+public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataService, IStorageChecksumService
 {
     private static readonly StorageCapabilities SwiftCapabilities = new(
         StorageFeature.VirtualDirectories |
@@ -25,6 +25,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.ConditionalCreate |
@@ -110,6 +111,29 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     }
 
     /// <inheritdoc />
+    /// <remarks>A Swift ETag is the content MD5, except for segmented large objects, which are not reported.</remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm != StorageChecksumAlgorithm.Md5)
+            return ProviderChecksums.Unavailable(algorithm, "Swift stores only MD5 checksums.");
+        try
+        {
+            using var response = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Head, ObjectUri(ToKey(normalized.Value!))),
+                cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+                return Result<StorageChecksum>.Failure(FromStatus(response, "Get Swift checksum"));
+            if (response.Headers.Contains("X-Object-Manifest") || response.Headers.Contains("X-Static-Large-Object"))
+                return ProviderChecksums.Unavailable(algorithm, "A segmented Swift object's ETag is not its MD5.");
+            return ProviderChecksums.FromHex(algorithm, RawETag(response));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get Swift checksum")); }
+    }
+
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
@@ -163,7 +187,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                             ETag = item.Hash
                         };
             }).Where(item => item is not null).Cast<StorageItem>().ToArray();
-            return Result<StoragePage>.Success(new StoragePage(items, page.Value.NextMarker));
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.Value.NextMarker));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Swift objects")); }
@@ -197,6 +221,8 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (StorageTransferPipeline.Applies(this, options))
+            return await StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
@@ -239,7 +265,10 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     }
 
     /// <inheritdoc />
-    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
@@ -538,9 +567,36 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             if (!string.IsNullOrWhiteSpace(_token) && !string.IsNullOrWhiteSpace(_storageUrl) &&
                 DateTimeOffset.UtcNow < _tokenExpiresAt - TimeSpan.FromMinutes(1))
                 return;
-            await AuthenticateKeystoneAsync(cancellationToken).ConfigureAwait(false);
+            if (_configuration.AuthenticationMode == SwiftAuthenticationMode.TempAuthV1)
+                await AuthenticateTempAuthAsync(cancellationToken).ConfigureAwait(false);
+            else
+                await AuthenticateKeystoneAsync(cancellationToken).ConfigureAwait(false);
         }
         finally { _authenticationGate.Release(); }
+    }
+
+    /// <summary>Authenticates with TempAuth v1: credentials in headers, token and storage URL in the reply.</summary>
+    private async Task AuthenticateTempAuthAsync(CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, _configuration.AuthenticationUrl);
+        request.Headers.TryAddWithoutValidation("X-Auth-User", _configuration.Username);
+        request.Headers.TryAddWithoutValidation("X-Auth-Key", _configuration.Password);
+        using var response = await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"TempAuth authentication failed with HTTP {(int)response.StatusCode}.", null, response.StatusCode);
+        if (!response.Headers.TryGetValues("X-Auth-Token", out var tokens))
+            throw new InvalidOperationException("TempAuth did not return X-Auth-Token.");
+        var storageUrl = _configuration.StorageUrl;
+        if (string.IsNullOrWhiteSpace(storageUrl) && response.Headers.TryGetValues("X-Storage-Url", out var urls))
+            storageUrl = urls.First();
+        var expires = response.Headers.TryGetValues("X-Auth-Token-Expires", out var lifetimes) &&
+            long.TryParse(lifetimes.First(), NumberStyles.None, CultureInfo.InvariantCulture, out var seconds)
+                ? DateTimeOffset.UtcNow.AddSeconds(seconds)
+                : DateTimeOffset.UtcNow.AddHours(1);
+        _token = tokens.First();
+        _storageUrl = storageUrl?.TrimEnd('/') ??
+            throw new InvalidOperationException("TempAuth did not return X-Storage-Url.");
+        _tokenExpiresAt = expires;
     }
 
     private async Task AuthenticateKeystoneAsync(CancellationToken cancellationToken)
@@ -781,11 +837,20 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             Size = path.EndsWith('/') ? null : response.Content.Headers.ContentLength,
             LastModified = response.Content.Headers.LastModified,
             ContentType = contentTypes?.FirstOrDefault(),
-            ETag = response.Headers.ETag?.Tag.Trim('"'),
+            ETag = RawETag(response),
             VersionId = versionIds?.FirstOrDefault(),
             Metadata = metadata
         };
     }
+
+    /// <summary>
+    /// Swift sends its ETag unquoted, which the typed <c>ETag</c> header parser rejects as invalid,
+    /// so the header is read raw. Quotes are stripped when a proxy or middleware adds them.
+    /// </summary>
+    internal static string? RawETag(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("ETag", out var values) && values.FirstOrDefault() is { Length: > 0 } raw
+            ? raw.Trim().Trim('"')
+            : null;
 
     private static string QuoteETag(string etag) =>
         etag.StartsWith('"') && etag.EndsWith('"') ? etag : $"\"{etag}\"";
@@ -799,29 +864,19 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
 
     private static string NameOf(string path) => path.Split('/')[^1];
 
-    private static Error FromStatus(HttpResponseMessage response, string operation) => response.StatusCode switch
-    {
-        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => StorageErrors.Unauthorized($"{operation}: access was denied."),
-        HttpStatusCode.NotFound => StorageErrors.NotFound($"{operation}: item was not found."),
-        HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout => StorageErrors.Timeout($"{operation}: operation timed out."),
-        HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed => StorageErrors.Conflict($"{operation}: Swift conflict."),
-        HttpStatusCode.TooManyRequests or >= HttpStatusCode.InternalServerError => StorageErrors.Unavailable($"{operation}: Swift service is unavailable."),
-        _ => StorageErrors.ProviderError($"{operation}: Swift request failed with HTTP {(int)response.StatusCode}.")
-    };
+    private static Error FromStatus(HttpResponseMessage response, string operation) =>
+        ProviderErrorMapper.FromHttpStatus(
+            (int)response.StatusCode,
+            operation,
+            "Swift",
+            ProviderErrorMapper.RetryAfter(response.Headers.RetryAfter));
 
     private static Error Map(Exception exception, string operation)
     {
-        if (exception is HttpRequestException request && request.StatusCode.HasValue)
-            return request.StatusCode.Value switch
-            {
-                HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                HttpStatusCode.NotFound => StorageErrors.NotFound($"{operation}: item was not found."),
-                HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout => StorageErrors.Timeout($"{operation}: operation timed out."),
-                _ => StorageErrors.Unavailable($"{operation}: Swift service is unavailable.")
-            };
-        if (exception is TimeoutException or TaskCanceledException) return StorageErrors.Timeout($"{operation}: operation timed out.");
-        if (exception is HttpRequestException) return StorageErrors.Unavailable($"{operation}: Swift service is unavailable.");
-        return StorageErrors.ProviderError($"{operation}: Swift provider failed.");
+        if (exception is HttpRequestException { StatusCode: { } status })
+            return ProviderErrorMapper.FromHttpStatus((int)status, operation, "Swift");
+        return ProviderErrorMapper.FromTransport(exception, operation, "Swift")
+            ?? StorageErrors.ProviderError($"{operation}: Swift provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private sealed record SwiftPage(IReadOnlyList<SwiftListItem> Items, string? NextMarker);

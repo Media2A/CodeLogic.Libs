@@ -1,9 +1,9 @@
 # CodeLogic.GameNetQuery
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.GameNetQuery)](https://www.nuget.org/packages/CodeLogic.GameNetQuery)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
-> Query and administer game servers from [CodeLogic 4](https://github.com/Media2A/CodeLogic) — Valve A2S over UDP, Source RCON, and Minecraft GameSpy4 / RCON.
+> Query and administer game servers from [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) — Valve A2S over UDP, Source RCON, and Minecraft GameSpy4 / RCON.
 
 Speaks the wire protocols used by Source-engine and Minecraft servers: A2S over UDP for live server info and player lists, the Source RCON TCP protocol for remote console commands (with high-level Counter-Strike 2 / Counter-Strike: Source admin wrappers), and Minecraft's GameSpy4 UDP query plus RCON. No external NuGet dependencies.
 
@@ -60,13 +60,13 @@ None. `CL.GameNetQuery` is a zero-config library — it writes no config file. E
 
 ## Documentation
 
-Full guide: **[CL.GameNetQuery documentation](https://media2a.github.io/CodeLogic.Libs/libs/gamenetquery.html)**
+Full guide: **[CL.GameNetQuery documentation](https://zyntal-com.github.io/CodeLogic.Libs/libs/gamenetquery.html)**
 
 ## Requirements
 
-- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) · .NET 10
 - No external NuGet dependencies.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE).

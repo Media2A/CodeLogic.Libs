@@ -1,9 +1,9 @@
 # CodeLogic.SocialConnect
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.SocialConnect)](https://www.nuget.org/packages/CodeLogic.SocialConnect)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
-> Discord webhooks and Steam Web API integration for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — send rich Discord notifications and read Steam player profiles, bans, and game libraries.
+> Discord webhooks and Steam Web API integration for [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) — send rich Discord notifications and read Steam player profiles, bans, and game libraries.
 
 Three services behind one library: a **Discord webhook** sender (text, rich embeds, full payloads), a **Steam profile** reader (players, bans, owned games — cached), and **Steam authentication** for validating game-session tickets. No external NuGet dependencies — built on `System.Net.Http.Json`.
 
@@ -94,13 +94,13 @@ Auto-generated on first run as `config.socialconnect.json`:
 
 ## Documentation
 
-Full guide: **[CL.SocialConnect documentation](https://media2a.github.io/CodeLogic.Libs/libs/socialconnect.html)**
+Full guide: **[CL.SocialConnect documentation](https://zyntal-com.github.io/CodeLogic.Libs/libs/socialconnect.html)**
 
 ## Requirements
 
-- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) · .NET 10
 - No external NuGet dependencies
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE).

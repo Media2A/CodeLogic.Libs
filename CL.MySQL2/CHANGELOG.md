@@ -297,11 +297,11 @@ NuGet package version of `CodeLogic.MySQL2`.
   HTML or relative paths). The full API now lives in the docs site rather than
   the README.
 - **Docs site pages rewritten** to match the house style across the four-page
-  structure: [`index`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/index.html)
+  structure: [`index`](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/index.html)
   (overview, load, repository basics, entry points, config, health, events),
-  [`queries`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/queries.html),
-  [`schema-migrations`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/schema-migrations.html),
-  and [`performance`](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/performance.html).
+  [`queries`](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/queries.html),
+  [`schema-migrations`](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/schema-migrations.html),
+  and [`performance`](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/performance.html).
   Each sub-page now opens with a tagline and an overview breadcrumb and closes
   with a consistent "See also" footer.
 - **No API changes.** Documentation only — no behaviour, signatures, config
@@ -763,6 +763,6 @@ Major rewrite. Breaking.
 ## Earlier releases
 
 Pre-4.0 history is retained in the
-[git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.MySQL2)
+[git log](https://github.com/zyntal-com/CodeLogic.Libs/commits/main/CL.MySQL2)
 but is not documented in detail here — the library shape changed
 significantly in the v4 rewrite.

@@ -65,7 +65,8 @@ public sealed class S3StorageBackendTests
         var result = await backend.UploadAsync("large.bin", source);
 
         Assert.True(result.IsFailure);
-        Assert.Equal(StorageErrors.UnavailableCode, result.Error!.Code);
+        Assert.Equal(StorageErrors.ServerBusyCode, result.Error!.Code);
+        Assert.True(StorageErrorInfo.IsTransient(result.Error));
         Assert.True(recorder.AbortCalled);
         Assert.False(source.Disposed);
         Assert.Null(recorder.CompletedRequest);

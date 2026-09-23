@@ -111,6 +111,35 @@ Expected failures now use stable `storage.*` codes. Cancellation is an `Operatio
 not a failed result. A move whose destination completed but whose source deletion failed returns
 `storage.partial_failure`; callers should reconcile that state rather than retrying blindly.
 
+### Finer error codes
+
+Provider failures that previously surfaced as `storage.unauthorized`, `storage.unavailable`, or
+`storage.provider_error` now use more specific codes. The Core error kind is unchanged for the
+authorization and availability groups, so code that branches on the kind keeps working; code that
+compares exact codes should switch to the table below or to `StorageErrorInfo.IsTransient`.
+
+| Situation | Before | Now |
+|---|---|---|
+| Wrong password, key, or token (FTP 530, SSH auth, HTTP 401) | `unauthorized` / `provider_error` | `authentication_failed` |
+| Logged in but not allowed (FTP 550 permission, SFTP, HTTP 403, local ACL) | `unauthorized` / `provider_error` | `permission_denied` |
+| TLS handshake or certificate pin failure | `unauthorized` / `unavailable` | `tls_failure` |
+| SSH host key not trusted | `unavailable` | `host_key_rejected` |
+| DNS failure, connection refused, proxy failure | `unavailable` / `provider_error` | `connection_failed` |
+| Connection dropped mid-operation | `unavailable` / `provider_error` | `connection_lost` |
+| Rate limited or too many sessions (HTTP 429/503, FTP 421, SSH) | `unavailable` / `provider_error` | `server_busy` |
+| Disk full or quota (FTP 452/552, HTTP 507, local ENOSPC) | `unavailable` / `provider_error` | `quota_exceeded` |
+
+`StorageErrorInfo.IsTransient` returns true for `timeout`, `unavailable`, `connection_failed`,
+`connection_lost`, and `server_busy`. Provider codes are available through
+`StorageErrorInfo.TryGetDetail(error, StorageErrorInfo.FtpReplyKey, out var reply)` and similar keys.
+
+### Connection info and diagnostics
+
+`StorageConnectionInfo` gained `Host`, `Port`, `Security`, and `LastHealth` init properties; its
+positional members are unchanged. Use `TestConnectionAsync` to check settings before
+`AddOrUpdateConnectionAsync`, and subscribe to `StorageOperationFailedEvent` or
+`StorageConnectionHealthChangedEvent` for monitoring instead of wrapping every call.
+
 ## Recommended rollout
 
 1. Add `CodeLogic.Storage` beside the legacy package.

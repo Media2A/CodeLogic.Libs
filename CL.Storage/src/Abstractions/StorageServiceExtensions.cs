@@ -27,14 +27,8 @@ public static class StorageServiceExtensions
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(progress);
         cancellationToken.ThrowIfCancellationRequested();
-        long? total = null;
-        if (source.CanSeek)
-        {
-            try { total = Math.Max(0, source.Length - source.Position); }
-            catch (NotSupportedException) { }
-        }
-        await using var tracked = new ProgressReadStream(source, progress, total, leaveOpen: true);
-        return await storage.UploadAsync(path, tracked, options, cancellationToken).ConfigureAwait(false);
+        // The backend pipeline meters the stream and keeps it seekable, so upload retries still work.
+        return await storage.UploadAsync(path, source, (options ?? new StorageUploadOptions()) with { Progress = progress }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Returns an owned download stream that reports bytes as the caller reads it.</summary>
@@ -79,13 +73,17 @@ public static class StorageServiceExtensions
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
+            var fullPath = Path.GetFullPath(sourceFilePath);
             await using var source = new FileStream(
-                Path.GetFullPath(sourceFilePath),
+                fullPath,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.Read,
                 65_536,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
+            // Newer-only conflict policies compare against the local file's modification time.
+            if (options?.ConflictPolicy is not null && options.SourceLastModified is null)
+                options = options with { SourceLastModified = new DateTimeOffset(File.GetLastWriteTimeUtc(fullPath)) };
             return await storage.UploadAsync(destinationPath, source, options, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -106,6 +104,7 @@ public static class StorageServiceExtensions
         StorageDownloadOptions? options = null,
         bool overwrite = true,
         bool createParents = true,
+        StorageConflictPolicy? conflictPolicy = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(storage);
@@ -117,6 +116,20 @@ public static class StorageServiceExtensions
         try
         {
             var destination = Path.GetFullPath(destinationFilePath);
+            if (conflictPolicy == StorageConflictPolicy.Resume && File.Exists(destination) && options is null or { Offset: 0, Length: null })
+            {
+                var resumed = await ResumeDownloadAsync(storage, sourcePath, destination, options, cancellationToken).ConfigureAwait(false);
+                if (resumed is not null) return resumed.Value;
+                conflictPolicy = StorageConflictPolicy.Overwrite;
+            }
+            if (conflictPolicy is not null)
+            {
+                var decision = await DecideLocalConflictAsync(storage, sourcePath, destination, conflictPolicy.Value, options, cancellationToken).ConfigureAwait(false);
+                if (decision.IsFailure) return Result<FileInfo>.Failure(decision.Error!);
+                if (decision.Value.Skip) return Result<FileInfo>.Success(new FileInfo(destination));
+                destination = decision.Value.Path;
+                overwrite = decision.Value.Overwrite;
+            }
             var parent = Path.GetDirectoryName(destination);
             if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(Path.GetFileName(destination)))
                 return Result<FileInfo>.Failure(StorageErrors.InvalidPath("The destination must identify a file."));
@@ -164,6 +177,73 @@ public static class StorageServiceExtensions
                 catch { }
             }
         }
+    }
+
+    /// <summary>
+    /// Continues a partial local download by appending the missing range. Returns null when the local
+    /// file is larger than the remote one, so the caller downloads it again from the start.
+    /// </summary>
+    private static async Task<Result<FileInfo>?> ResumeDownloadAsync(
+        IStorageService storage,
+        string sourcePath,
+        string destination,
+        StorageDownloadOptions? options,
+        CancellationToken cancellationToken)
+    {
+        var remote = await storage.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        if (remote.IsFailure) return Result<FileInfo>.Failure(remote.Error!);
+        var present = new FileInfo(destination).Length;
+        if (remote.Value!.Size is not { } total || present > total) return null;
+        if (present == total) return Result<FileInfo>.Success(new FileInfo(destination));
+
+        var rest = await storage.DownloadAsync(sourcePath, (options ?? new StorageDownloadOptions()) with { Offset = present }, cancellationToken).ConfigureAwait(false);
+        if (rest.IsFailure) return Result<FileInfo>.Failure(rest.Error!);
+        await using (var source = rest.Value!)
+        await using (var target = new FileStream(destination, FileMode.Append, FileAccess.Write, FileShare.None, 65_536, FileOptions.Asynchronous))
+        {
+            await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+            await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        return Result<FileInfo>.Success(new FileInfo(destination));
+    }
+
+    /// <summary>Applies a conflict policy to a local download destination.</summary>
+    private static async Task<Result<(bool Skip, string Path, bool Overwrite)>> DecideLocalConflictAsync(
+        IStorageService storage,
+        string sourcePath,
+        string destination,
+        StorageConflictPolicy policy,
+        StorageDownloadOptions? options,
+        CancellationToken cancellationToken)
+    {
+        if (policy is StorageConflictPolicy.Fail or StorageConflictPolicy.Overwrite or StorageConflictPolicy.Resume || !File.Exists(destination))
+            return Result<(bool, string, bool)>.Success((false, destination, policy != StorageConflictPolicy.Fail));
+        if (policy == StorageConflictPolicy.Skip)
+            return Result<(bool, string, bool)>.Success((true, destination, false));
+        if (policy == StorageConflictPolicy.Rename)
+        {
+            for (var attempt = 1; attempt <= 1_000; attempt++)
+            {
+                var candidate = Registry.StorageConflictResolver.Candidate(destination.Replace('\\', '/'), attempt).Replace('/', Path.DirectorySeparatorChar);
+                if (!File.Exists(candidate) && !Directory.Exists(candidate))
+                    return Result<(bool, string, bool)>.Success((false, candidate, false));
+            }
+            return Result<(bool, string, bool)>.Failure(StorageErrors.Conflict("No free local file name was found."));
+        }
+
+        var remote = await storage.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        if (remote.IsFailure) return Result<(bool, string, bool)>.Failure(remote.Error!);
+        var local = new FileInfo(destination);
+        var remoteSize = options is { Offset: 0, Length: null } or null ? remote.Value!.Size : null;
+        var newer = Registry.StorageConflictResolver.IsNewer(remote.Value!.LastModified, new DateTimeOffset(local.LastWriteTimeUtc));
+        var sizeDiffers = Registry.StorageConflictResolver.SizeDiffers(remoteSize, local.Length);
+        var replace = policy switch
+        {
+            StorageConflictPolicy.OverwriteIfNewer => newer,
+            StorageConflictPolicy.OverwriteIfSizeDiffers => sizeDiffers,
+            _ => newer || sizeDiffers
+        };
+        return Result<(bool, string, bool)>.Success((!replace, destination, replace));
     }
 
     /// <summary>Downloads bounded text content.</summary>
@@ -277,9 +357,29 @@ public static class StorageServiceExtensions
         }
     }
 
+    /// <summary>Returns the checksum the server holds for a file, without downloading it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">File path relative to the mounted root.</param>
+    /// <param name="algorithm">Requested digest algorithm.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>The server checksum, or <c>storage.unsupported</c> when the server has none for this algorithm.</returns>
+    public static Task<Result<StorageChecksum>> GetServerChecksumAsync(
+        this IStorageService storage,
+        string path,
+        StorageChecksumAlgorithm algorithm = StorageChecksumAlgorithm.Sha256,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageChecksumService checksums
+            ? checksums.GetServerChecksumAsync(path, algorithm, cancellationToken)
+            : Task.FromResult(Result<StorageChecksum>.Failure(StorageErrors.Unsupported("This storage connection does not report server checksums.")));
+    }
+
     /// <summary>
-    /// Streams an item through a client-side digest without buffering its content. MD5 is available
-    /// for interoperability; SHA-256 or stronger should be used for security-sensitive verification.
+    /// Returns an item's digest. By default the server's stored checksum is used when it has one for
+    /// the algorithm, and otherwise the content is streamed through a client-side digest without
+    /// buffering. MD5 is available for interoperability; SHA-256 or stronger should be used for
+    /// security-sensitive verification. Byte ranges are always computed.
     /// </summary>
     public static async Task<Result<StorageChecksum>> ComputeChecksumAsync(
         this IStorageService storage,
@@ -287,6 +387,7 @@ public static class StorageServiceExtensions
         StorageChecksumAlgorithm algorithm = StorageChecksumAlgorithm.Sha256,
         StorageDownloadOptions? options = null,
         IProgress<StorageTransferProgress>? progress = null,
+        StorageChecksumMode mode = StorageChecksumMode.PreferServer,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(storage);
@@ -297,6 +398,19 @@ public static class StorageServiceExtensions
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageChecksum>.Failure(validation.Error!);
+
+        var wholeFile = options.Offset == 0 && options.Length is null && options.VersionId is null;
+        if (mode != StorageChecksumMode.ComputeOnly && wholeFile && storage is IStorageChecksumService checksums)
+        {
+            var server = await checksums.GetServerChecksumAsync(path, algorithm, cancellationToken).ConfigureAwait(false);
+            if (server.IsSuccess || server.Error?.Code != StorageErrors.UnsupportedCode || mode == StorageChecksumMode.ServerOnly)
+                return server;
+        }
+        else if (mode == StorageChecksumMode.ServerOnly)
+        {
+            return Result<StorageChecksum>.Failure(StorageErrors.Unsupported(
+                "A server checksum is only available for whole files on connections that report them."));
+        }
 
         var download = await storage.DownloadAsync(path, options, cancellationToken).ConfigureAwait(false);
         if (download.IsFailure) return Result<StorageChecksum>.Failure(download.Error!);
@@ -344,6 +458,7 @@ public static class StorageServiceExtensions
         StorageChecksumAlgorithm algorithm = StorageChecksumAlgorithm.Sha256,
         StorageDownloadOptions? options = null,
         IProgress<StorageTransferProgress>? progress = null,
+        StorageChecksumMode mode = StorageChecksumMode.PreferServer,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(storage);
@@ -374,6 +489,7 @@ public static class StorageServiceExtensions
             algorithm,
             options,
             progress,
+            mode,
             cancellationToken).ConfigureAwait(false);
         if (actual.IsFailure)
             return Result<StorageChecksumVerification>.Failure(actual.Error!);
@@ -443,6 +559,197 @@ public static class StorageServiceExtensions
             ? tagService.SetTagsAsync(path, tags, options, cancellationToken)
             : Task.FromResult(Result<StorageItem>.Failure(
                 StorageErrors.Unsupported("This storage connection does not support object tag updates.")));
+    }
+
+    /// <summary>Appends content to a file when the connection supports it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">File path relative to the mounted root.</param>
+    /// <param name="source">Content to append.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>The updated file, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result<StorageItem>> AppendAsync(this IStorageService storage, string path, Stream source, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageAppendService append
+            ? append.AppendAsync(path, source, cancellationToken)
+            : Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Unsupported("This storage connection cannot append.")));
+    }
+
+    /// <summary>
+    /// Deletes the library's own staging and backup items (<c>.cl-storage-*</c>, <c>.clstorage-*</c>)
+    /// under a directory that are older than <paramref name="olderThan"/>, such as leftovers of a crash.
+    /// </summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Directory to scan recursively.</param>
+    /// <param name="olderThan">Minimum age; keep this well above your longest transfer so running transfers are not disturbed.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider requests.</param>
+    /// <returns>The number of items deleted.</returns>
+    public static async Task<Result<int>> CleanupStaleStagingAsync(this IStorageService storage, string path, TimeSpan olderThan, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        var cutoff = DateTimeOffset.UtcNow - olderThan;
+        var stale = new List<StorageItem>();
+        await foreach (var item in storage.EnumerateItemsAsync(path, new StorageListOptions { Recursive = true, IncludeInternal = true }, cancellationToken).ConfigureAwait(false))
+        {
+            if (item.IsFailure) return Result<int>.Failure(item.Error!);
+            if (Providers.StorageListFilter.IsInternal(item.Value!.Name) && item.Value.LastModified is { } modified && modified < cutoff)
+                stale.Add(item.Value);
+        }
+        var deleted = 0;
+        foreach (var item in stale)
+        {
+            var result = await storage.DeleteAsync(item.Path, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+            if (result.IsFailure) return Result<int>.Failure(result.Error!);
+            deleted++;
+        }
+        return Result<int>.Success(deleted);
+    }
+
+    /// <summary>Sends a raw FTP or SSH command when the connection allows it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="command">Command text.</param>
+    /// <param name="cancellationToken">Token used to cancel the command.</param>
+    /// <returns>The reply, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result<StorageCommandResult>> ExecuteCommandAsync(this IStorageService storage, string command, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageCommandService commands
+            ? commands.ExecuteCommandAsync(command, cancellationToken)
+            : Task.FromResult(Result<StorageCommandResult>.Failure(StorageErrors.Unsupported("This storage connection does not support raw commands.")));
+    }
+
+    /// <summary>Reads free and used space when the connection reports it.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Path relative to the mounted root.</param>
+    /// <param name="cancellationToken">Token used to cancel the request.</param>
+    /// <returns>Space figures, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result<StorageSpaceInfo>> GetSpaceAsync(this IStorageService storage, string path = "", CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageSpaceService space
+            ? space.GetSpaceAsync(path, cancellationToken)
+            : Task.FromResult(Result<StorageSpaceInfo>.Failure(StorageErrors.Unsupported("This storage connection does not report free space.")));
+    }
+
+    /// <summary>Sets Unix permission bits when supported by the connection.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Item path relative to the mounted root.</param>
+    /// <param name="unixMode">Permission bits, for example octal 0755.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>Success, or <c>storage.unsupported</c> when the connection has no permission support.</returns>
+    public static Task<Result> SetPermissionsAsync(this IStorageService storage, string path, int unixMode, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageAttributeService attributes
+            ? attributes.SetPermissionsAsync(path, unixMode, cancellationToken)
+            : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support permissions.")));
+    }
+
+    /// <summary>Sets Unix permission bits from octal text such as <c>755</c> or <c>0644</c>.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Item path relative to the mounted root.</param>
+    /// <param name="octalMode">Octal permission text.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>Success, or <c>storage.invalid_content</c> when the text is not a valid mode.</returns>
+    public static Task<Result> SetPermissionsAsync(this IStorageService storage, string path, string octalMode, CancellationToken cancellationToken = default) =>
+        UnixPermissions.TryParseOctal(octalMode, out var mode)
+            ? storage.SetPermissionsAsync(path, mode, cancellationToken)
+            : Task.FromResult(Result.Failure(StorageErrors.InvalidContent($"'{octalMode}' is not an octal permission mode.")));
+
+    /// <summary>
+    /// Applies permissions to every item under a directory, like FileZilla's recursive chmod: files get
+    /// <paramref name="fileMode"/> and directories <paramref name="directoryMode"/>, including the root directory.
+    /// </summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Directory path relative to the mounted root.</param>
+    /// <param name="fileMode">Mode for files, or <see langword="null"/> to leave files unchanged.</param>
+    /// <param name="directoryMode">Mode for directories, or <see langword="null"/> to leave directories unchanged.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider requests.</param>
+    /// <returns>The number of items changed, or the first failure.</returns>
+    public static async Task<Result<int>> SetPermissionsRecursiveAsync(
+        this IStorageService storage,
+        string path,
+        int? fileMode,
+        int? directoryMode,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        if (fileMode is null && directoryMode is null)
+            return Result<int>.Failure(StorageErrors.InvalidContent("A file or directory mode is required."));
+        var changed = 0;
+        await foreach (var item in storage.EnumerateItemsAsync(path, new StorageListOptions { Recursive = true }, cancellationToken).ConfigureAwait(false))
+        {
+            if (item.IsFailure) return Result<int>.Failure(item.Error!);
+            var mode = item.Value!.ItemType == StorageItemType.Directory ? directoryMode : item.Value.ItemType == StorageItemType.File ? fileMode : null;
+            if (mode is null) continue;
+            var result = await storage.SetPermissionsAsync(item.Value.Path, mode.Value, cancellationToken).ConfigureAwait(false);
+            if (result.IsFailure) return Result<int>.Failure(result.Error!);
+            changed++;
+        }
+        if (directoryMode is { } rootMode && StoragePath.Normalize(path).Value is { Length: > 0 } root)
+        {
+            var result = await storage.SetPermissionsAsync(root, rootMode, cancellationToken).ConfigureAwait(false);
+            if (result.IsFailure) return Result<int>.Failure(result.Error!);
+            changed++;
+        }
+        return Result<int>.Success(changed);
+    }
+
+    /// <summary>Changes the numeric owner and/or group when supported by the connection.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Item path relative to the mounted root.</param>
+    /// <param name="ownerId">New owner ID, or <see langword="null"/> to keep it.</param>
+    /// <param name="groupId">New group ID, or <see langword="null"/> to keep it.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>Success, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result> SetOwnerAsync(this IStorageService storage, string path, long? ownerId, long? groupId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageAttributeService attributes
+            ? attributes.SetOwnerAsync(path, ownerId, groupId, cancellationToken)
+            : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support ownership changes.")));
+    }
+
+    /// <summary>Sets modification and access times when supported by the connection.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Item path relative to the mounted root.</param>
+    /// <param name="lastModified">New modification time, or <see langword="null"/> to keep it.</param>
+    /// <param name="lastAccessed">New access time, or <see langword="null"/> to keep it.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>Success, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result> SetTimestampsAsync(this IStorageService storage, string path, DateTimeOffset? lastModified, DateTimeOffset? lastAccessed = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageAttributeService attributes
+            ? attributes.SetTimestampsAsync(path, lastModified, lastAccessed, cancellationToken)
+            : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support setting timestamps.")));
+    }
+
+    /// <summary>Creates a symbolic link when supported by the connection.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="linkPath">Path of the link to create.</param>
+    /// <param name="targetPath">Path of the item the link points to.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>Success, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result> CreateLinkAsync(this IStorageService storage, string linkPath, string targetPath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageAttributeService attributes
+            ? attributes.CreateLinkAsync(linkPath, targetPath, cancellationToken)
+            : Task.FromResult(Result.Failure(StorageErrors.Unsupported("This storage connection does not support creating links.")));
+    }
+
+    /// <summary>Reads where a symbolic link points when supported by the connection.</summary>
+    /// <param name="storage">Storage connection.</param>
+    /// <param name="path">Link path relative to the mounted root.</param>
+    /// <param name="cancellationToken">Token used to cancel the provider request.</param>
+    /// <returns>The link target, or <c>storage.unsupported</c>.</returns>
+    public static Task<Result<StorageLinkInfo>> ReadLinkAsync(this IStorageService storage, string path, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(storage);
+        return storage is IStorageAttributeService attributes
+            ? attributes.ReadLinkAsync(path, cancellationToken)
+            : Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.Unsupported("This storage connection does not support reading links.")));
     }
 
     /// <summary>Creates a temporary signed read/write URL when supported by the connection.</summary>

@@ -28,6 +28,9 @@ internal static class StorageTransferCoordinator
         ArgumentNullException.ThrowIfNull(destination);
         ArgumentNullException.ThrowIfNull(options);
         cancellationToken.ThrowIfCancellationRequested();
+        var aggregate = options.Progress is { } progress ? new AggregateProgress(progress) : null;
+        if (aggregate is not null)
+            options = options with { Progress = aggregate };
 
         var sourceInfo = await source.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         if (sourceInfo.IsFailure)
@@ -62,8 +65,15 @@ internal static class StorageTransferCoordinator
                     options,
                     cleanup,
                     cancellationToken).ConfigureAwait(false),
-                _ => Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
-                    "Relayed transfer of storage links is not supported because link targets are provider-specific."))
+                _ => await TransferLinkAsync(
+                    source,
+                    sourceInfo.Value,
+                    treeRoot: null,
+                    destination,
+                    destinationPath,
+                    options,
+                    cleanup,
+                    cancellationToken).ConfigureAwait(false)
             };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -87,8 +97,40 @@ internal static class StorageTransferCoordinator
             var committed = await cleanup.CommitAsync().ConfigureAwait(false);
             if (committed.IsFailure)
                 return Result<StorageTransferSummary>.Failure(committed.Error!);
+            aggregate?.Complete();
         }
         return result;
+    }
+
+    /// <summary>Adds up per-file progress into one running total for a whole relayed transfer.</summary>
+    private sealed class AggregateProgress(IProgress<StorageTransferProgress> target) : IProgress<StorageTransferProgress>
+    {
+        private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+        private long _completedFiles;
+        private long _current;
+
+        public void Report(StorageTransferProgress value)
+        {
+            var total = Interlocked.Read(ref _completedFiles) + value.BytesTransferred;
+            Interlocked.Exchange(ref _current, total);
+            if (value.IsCompleted)
+                Interlocked.Add(ref _completedFiles, value.BytesTransferred);
+            target.Report(new StorageTransferProgress(total, null, false, Rate(total), null, value.ItemPath));
+        }
+
+        public void Complete()
+        {
+            var total = Interlocked.Read(ref _completedFiles);
+            target.Report(new StorageTransferProgress(total, total, true, Rate(total), TimeSpan.Zero));
+        }
+
+        private double Rate(long bytes) => _clock.Elapsed.TotalSeconds > 0 ? bytes / _clock.Elapsed.TotalSeconds : 0;
+    }
+
+    /// <summary>Tags a file's progress with its source path instead of the internal staging name.</summary>
+    private sealed class FileProgress(IProgress<StorageTransferProgress> inner, string path) : IProgress<StorageTransferProgress>
+    {
+        public void Report(StorageTransferProgress value) => inner.Report(value with { ItemPath = path });
     }
 
     private static async Task<Result<StorageTransferSummary>> CopyDirectoryAsync(
@@ -112,6 +154,8 @@ internal static class StorageTransferCoordinator
         long files = 0;
         long directories = 1;
         long bytes = 0;
+        long skipped = 0;
+        var transferred = new List<string>();
         string? continuationToken = null;
         var seenTokens = new HashSet<string>(StringComparer.Ordinal);
         var seenItems = new HashSet<string>(StringComparer.Ordinal);
@@ -188,11 +232,45 @@ internal static class StorageTransferCoordinator
                                 return Result<StorageTransferSummary>.Failure(copied.Error!);
                             files += copied.Value!.Files;
                             bytes += copied.Value.Bytes;
+                            skipped += copied.Value.SkippedFiles;
+                            transferred.AddRange(copied.Value.TransferredSources ?? []);
                             break;
                         }
                     default:
-                        return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
-                            $"Relayed directory transfer cannot copy link '{itemPath.Value}'."));
+                        {
+                            var parent = Parent(mappedPath);
+                            if (parent.Length > 0 && options.LinkHandling is StorageLinkHandling.Follow or StorageLinkHandling.Recreate)
+                            {
+                                var directory = await EnsureDirectoryAsync(
+                                    destination,
+                                    parent,
+                                    options.CreateParents,
+                                    cleanup,
+                                    cancellationToken).ConfigureAwait(false);
+                                if (directory.IsFailure)
+                                    return Result<StorageTransferSummary>.Failure(directory.Error!);
+                            }
+                            var linked = await TransferLinkAsync(
+                                source,
+                                item with { Path = itemPath.Value! },
+                                sourceDirectory.Path,
+                                destination,
+                                mappedPath,
+                                options,
+                                cleanup,
+                                cancellationToken).ConfigureAwait(false);
+                            if (linked.IsFailure)
+                                return Result<StorageTransferSummary>.Failure(linked.Error!);
+                            files += linked.Value!.Files;
+                            bytes += linked.Value.Bytes;
+                            skipped += linked.Value.SkippedFiles;
+                            // A skipped or recreated link stays behind on a move; only followed content counts as moved.
+                            if (options.LinkHandling == StorageLinkHandling.Recreate)
+                                transferred.Add(itemPath.Value!);
+                            else
+                                transferred.AddRange(linked.Value.TransferredSources ?? []);
+                            break;
+                        }
                 }
             }
 
@@ -217,7 +295,86 @@ internal static class StorageTransferCoordinator
             sourceDirectory.ItemType,
             files,
             directories,
-            bytes));
+            bytes,
+            skipped,
+            transferred));
+    }
+
+    /// <summary>
+    /// Applies <see cref="StorageTransferOptions.LinkHandling"/> to one link. <c>treeRoot</c> is the source
+    /// directory being transferred, used to remap link targets inside it, or null for a single link.
+    /// </summary>
+    private static async Task<Result<StorageTransferSummary>> TransferLinkAsync(
+        IStorageBackend source,
+        StorageItem link,
+        string? treeRoot,
+        IStorageBackend destination,
+        string destinationPath,
+        StorageTransferOptions options,
+        TransferCleanupTracker cleanup,
+        CancellationToken cancellationToken)
+    {
+        switch (options.LinkHandling)
+        {
+            case StorageLinkHandling.Skip:
+                return Result<StorageTransferSummary>.Success(new StorageTransferSummary(StorageItemType.Link, 0, 0, 0));
+
+            case StorageLinkHandling.Follow:
+            {
+                // Some providers stat through the link and report the target's type.
+                var target = await source.GetInfoAsync(link.Path, cancellationToken).ConfigureAwait(false);
+                if (target.IsSuccess && target.Value!.ItemType == StorageItemType.Directory)
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        $"Link '{link.Path}' points to a directory; following directory links is not supported."));
+                var file = target.IsSuccess && target.Value!.ItemType == StorageItemType.File
+                    ? target.Value with { Path = link.Path }
+                    : link with { ItemType = StorageItemType.File, Size = null };
+                return await CopyFileAsync(source, file, destination, destinationPath, options, cleanup, cancellationToken).ConfigureAwait(false);
+            }
+
+            case StorageLinkHandling.Recreate:
+            {
+                if (source is not IStorageAttributeService reader || !source.Capabilities.Supports(StorageFeature.ReadLinks))
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        "The source connection cannot read link targets, so links cannot be recreated."));
+                if (destination is not IStorageAttributeService writer || !destination.Capabilities.Supports(StorageFeature.CreateLinks))
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        "The destination connection cannot create links."));
+                var target = await reader.ReadLinkAsync(link.Path, cancellationToken).ConfigureAwait(false);
+                if (target.IsFailure)
+                    return Result<StorageTransferSummary>.Failure(target.Error!);
+                if (target.Value!.StoragePath is not { } targetPath)
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                        $"Link '{link.Path}' points outside the source root and cannot be recreated."));
+                var mapped = targetPath;
+                if (treeRoot is not null)
+                {
+                    var relative = GetRelativePath(treeRoot, targetPath);
+                    if (relative is null)
+                        return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                            $"Link '{link.Path}' points outside the transferred directory and cannot be recreated."));
+                    mapped = Combine(DestinationTreeRoot(destinationPath, link.Path, treeRoot), relative);
+                }
+                var created = await writer.CreateLinkAsync(destinationPath, mapped, cancellationToken).ConfigureAwait(false);
+                if (created.IsFailure)
+                    return Result<StorageTransferSummary>.Failure(created.Error!);
+                cleanup.TrackFile(destinationPath);
+                return Result<StorageTransferSummary>.Success(new StorageTransferSummary(StorageItemType.Link, 0, 0, 0));
+            }
+
+            default:
+                return Result<StorageTransferSummary>.Failure(StorageErrors.Unsupported(
+                    $"Link '{link.Path}' was not transferred: link targets are provider-specific. Set LinkHandling to skip, follow, or recreate links."));
+        }
+    }
+
+    /// <summary>Returns the destination directory that corresponds to <paramref name="treeRoot"/>.</summary>
+    private static string DestinationTreeRoot(string destinationItemPath, string sourceItemPath, string treeRoot)
+    {
+        var relative = GetRelativePath(treeRoot, sourceItemPath) ?? string.Empty;
+        var depth = relative.Length == 0 ? 0 : relative.Split('/').Length;
+        var segments = destinationItemPath.Split('/');
+        return string.Join('/', segments.Take(Math.Max(0, segments.Length - depth)));
     }
 
     private static async Task<Result<StorageTransferSummary>> CopyFileAsync(
@@ -229,6 +386,24 @@ internal static class StorageTransferCoordinator
         TransferCleanupTracker cleanup,
         CancellationToken cancellationToken)
     {
+        if (options.ConflictPolicy is not null)
+        {
+            var decision = await StorageConflictResolver.ResolveAsync(
+                destination,
+                destinationPath,
+                options.ConflictPolicy,
+                options.Overwrite,
+                sourceFile.Size,
+                sourceFile.LastModified,
+                cancellationToken).ConfigureAwait(false);
+            if (decision.IsFailure)
+                return Result<StorageTransferSummary>.Failure(decision.Error!);
+            if (decision.Value.Skip)
+                return Result<StorageTransferSummary>.Success(new StorageTransferSummary(StorageItemType.File, 0, 0, 0, SkippedFiles: 1, TransferredSources: []));
+            destinationPath = decision.Value.Path;
+            options = options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null };
+        }
+
         var destinationExists = await destination.ExistsAsync(destinationPath, cancellationToken).ConfigureAwait(false);
         if (destinationExists.IsFailure)
             return Result<StorageTransferSummary>.Failure(destinationExists.Error!);
@@ -333,7 +508,8 @@ internal static class StorageTransferCoordinator
                             Overwrite = false,
                             CreateParents = options.CreateParents,
                             ContentType = sourceFile.ContentType,
-                            Metadata = transferredMetadata
+                            Metadata = transferredMetadata,
+                            Progress = options.Progress is { } progress ? new FileProgress(progress, sourceFile.Path) : null
                         },
                         cancellationToken).ConfigureAwait(false);
                 }
@@ -428,7 +604,8 @@ internal static class StorageTransferCoordinator
             StorageItemType.File,
             Files: 1,
             Directories: 0,
-            Bytes: relay.Value));
+            Bytes: relay.Value,
+            TransferredSources: [sourceFile.Path]));
     }
 
     private static async Task<Result<long>> RelayAsync(
@@ -862,8 +1039,16 @@ internal static class StorageTransferCoordinator
     }
 }
 
+/// <param name="SourceType">Whether the transferred source was a file, directory, or link.</param>
+/// <param name="Files">Files written to the destination.</param>
+/// <param name="Directories">Directories created or reused at the destination.</param>
+/// <param name="Bytes">Content bytes relayed.</param>
+/// <param name="SkippedFiles">Files the conflict policy left untouched.</param>
+/// <param name="TransferredSources">Source paths of the files that were written, so a move can delete only those.</param>
 internal sealed record StorageTransferSummary(
     StorageItemType SourceType,
     long Files,
     long Directories,
-    long Bytes);
+    long Bytes,
+    long SkippedFiles = 0,
+    IReadOnlyList<string>? TransferredSources = null);

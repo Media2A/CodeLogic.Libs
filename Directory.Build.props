@@ -4,8 +4,8 @@
     <Authors>Media2A</Authors>
     <Copyright>Copyright © 2026 Media2A</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/Media2A/CodeLogic.Libs</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/Media2A/CodeLogic.Libs</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/zyntal-com/CodeLogic.Libs</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/zyntal-com/CodeLogic.Libs</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 

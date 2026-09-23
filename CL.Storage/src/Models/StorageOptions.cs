@@ -14,6 +14,19 @@ public sealed record StorageListOptions
     public int PageSize { get; init; } = 1000;
     /// <summary>Gets the opaque continuation token returned by a previous page.</summary>
     public string? ContinuationToken { get; init; }
+    /// <summary>
+    /// Gets whether the library's own staging and backup items (<c>.cl-storage-*</c>, <c>.clstorage-*</c>)
+    /// are listed. They exist only while a transfer runs, or after one was interrupted.
+    /// </summary>
+    public bool IncludeInternal { get; init; }
+    /// <summary>Gets whether hidden items (dot-files, or items marked hidden) are listed.</summary>
+    public bool IncludeHidden { get; init; } = true;
+    /// <summary>
+    /// Gets an optional case-insensitive name filter with <c>*</c> and <c>?</c> wildcards, such as <c>*.csv</c>.
+    /// It applies to item names, so in a recursive listing directories that do not match are omitted but
+    /// matching files inside them are still returned.
+    /// </summary>
+    public string? NamePattern { get; init; }
 
     /// <summary>Validates the requested page size.</summary>
     /// <returns>A provider-neutral validation result.</returns>
@@ -31,6 +44,18 @@ public sealed record StorageUploadOptions
 
     /// <summary>Gets whether an existing destination file may be replaced.</summary>
     public bool Overwrite { get; init; } = true;
+    /// <summary>
+    /// Gets how an existing destination is handled. When set it replaces <see cref="Overwrite"/>; when
+    /// <see langword="null"/>, <see cref="Overwrite"/> decides. Conditional policies are resolved by the
+    /// library's connections and helpers, not by a backend used on its own.
+    /// </summary>
+    public StorageConflictPolicy? ConflictPolicy { get; init; }
+    /// <summary>Gets the source's modification time, compared by <see cref="StorageConflictPolicy.OverwriteIfNewer"/>.</summary>
+    public DateTimeOffset? SourceLastModified { get; init; }
+    /// <summary>Gets an optional progress sink, reported at most every 250 ms with speed and remaining time.</summary>
+    public IProgress<StorageTransferProgress>? Progress { get; init; }
+    /// <summary>Set once progress, speed limits, and conflict policy have been applied, so they are not applied twice.</summary>
+    internal bool PipelineApplied { get; init; }
     /// <summary>Gets whether missing physical parent directories should be created.</summary>
     public bool CreateParents { get; init; } = true;
     /// <summary>Gets the optional MIME content type stored with the object.</summary>
@@ -66,6 +91,8 @@ public sealed record StorageUploadOptions
 /// <summary>Controls range, buffering, and exact-version downloads.</summary>
 public sealed record StorageDownloadOptions
 {
+    /// <summary>Gets an optional progress sink, reported as the returned stream is read.</summary>
+    public IProgress<StorageTransferProgress>? Progress { get; init; }
     /// <summary>Gets the zero-based byte offset at which reading begins.</summary>
     public long Offset { get; init; }
     /// <summary>Gets the requested byte count, or <see langword="null"/> to read through end of content.</summary>
@@ -179,14 +206,73 @@ public sealed record StorageTransferOptions
 {
     /// <summary>Gets whether an existing destination file may be replaced.</summary>
     public bool Overwrite { get; init; } = true;
+    /// <summary>
+    /// Gets how each existing destination file is handled. When set it replaces <see cref="Overwrite"/>.
+    /// Conditional policies are decided per file, so directory transfers relay through the client, and a
+    /// move deletes only the source files that were actually transferred.
+    /// </summary>
+    public StorageConflictPolicy? ConflictPolicy { get; init; }
     /// <summary>Gets whether missing physical destination parents should be created.</summary>
     public bool CreateParents { get; init; } = true;
     /// <summary>Gets how user metadata is handled across provider boundaries.</summary>
     public StorageMetadataPreservation MetadataPreservation { get; init; } = StorageMetadataPreservation.BestEffort;
+    /// <summary>Gets an optional progress sink for relayed transfers; bytes accumulate across the files of a directory.</summary>
+    public IProgress<StorageTransferProgress>? Progress { get; init; }
+    /// <summary>Gets how symbolic links are treated when a transfer relays content through the client.</summary>
+    public StorageLinkHandling LinkHandling { get; init; } = StorageLinkHandling.Reject;
 
-    /// <summary>Validates the metadata-preservation mode.</summary>
+    /// <summary>Validates the metadata-preservation and link-handling modes.</summary>
     /// <returns>A provider-neutral validation result.</returns>
-    public Result Validate() => Enum.IsDefined(MetadataPreservation)
-        ? Result.Success()
-        : Result.Failure(StorageErrors.InvalidPath("MetadataPreservation is invalid."));
+    public Result Validate()
+    {
+        if (!Enum.IsDefined(MetadataPreservation))
+            return Result.Failure(StorageErrors.InvalidPath("MetadataPreservation is invalid."));
+        if (ConflictPolicy is { } policy && !Enum.IsDefined(policy))
+            return Result.Failure(StorageErrors.InvalidPath("ConflictPolicy is invalid."));
+        return Enum.IsDefined(LinkHandling)
+            ? Result.Success()
+            : Result.Failure(StorageErrors.InvalidPath("LinkHandling is invalid."));
+    }
+}
+
+/// <summary>How an existing destination file is handled, like FileZilla's "target file already exists" choices.</summary>
+public enum StorageConflictPolicy
+{
+    /// <summary>Fails with <c>storage.conflict</c>.</summary>
+    Fail,
+    /// <summary>Replaces the destination.</summary>
+    Overwrite,
+    /// <summary>Leaves the destination untouched.</summary>
+    Skip,
+    /// <summary>Replaces the destination only when the source is newer (2-second tolerance; unknown times count as newer).</summary>
+    OverwriteIfNewer,
+    /// <summary>Replaces the destination only when the sizes differ (unknown sizes count as different).</summary>
+    OverwriteIfSizeDiffers,
+    /// <summary>Replaces the destination when the source is newer or the sizes differ.</summary>
+    OverwriteIfNewerOrSizeDiffers,
+    /// <summary>Writes to the first free name <c>name (1).ext</c>, <c>name (2).ext</c>, … instead.</summary>
+    Rename,
+    /// <summary>
+    /// Continues an interrupted upload: when the destination is a shorter prefix, only the missing tail is
+    /// appended. A destination of equal size is left alone and a larger one is overwritten. Needs a seekable
+    /// source and <see cref="StorageFeature.Append"/>; resumed bytes are written in place, not staged.
+    /// </summary>
+    Resume
+}
+
+/// <summary>How relayed transfers treat symbolic links.</summary>
+public enum StorageLinkHandling
+{
+    /// <summary>Fails the transfer when it meets a link, because link targets are provider-specific.</summary>
+    Reject,
+    /// <summary>Leaves links out of the transfer.</summary>
+    Skip,
+    /// <summary>Copies the content of the file a link points to. Links to directories are refused, which also rules out loops.</summary>
+    Follow,
+    /// <summary>
+    /// Creates an equivalent link at the destination. A target inside the transferred directory is remapped
+    /// to the copy; the source must support <see cref="StorageFeature.ReadLinks"/> and the destination
+    /// <see cref="StorageFeature.CreateLinks"/>.
+    /// </summary>
+    Recreate
 }

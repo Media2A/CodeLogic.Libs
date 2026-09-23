@@ -7,7 +7,7 @@ _layout: landing
   <h1>CodeLogic Libraries</h1>
   <p class="lead">
     Twelve production-ready .NET 10 libraries for the
-    <a href="https://github.com/Media2A/CodeLogic">CodeLogic 4</a> framework.
+    <a href="https://github.com/zyntal-com/CodeLogic">CodeLogic 4</a> framework.
     Databases, email, storage, security, monitoring, and more — each a self-contained
     <code>ILibrary</code> that manages its own configuration, lifecycle, and health checks.
   </p>
@@ -75,7 +75,7 @@ var mysql = Libraries.Get<CL.MySQL2.MySQL2Library>();
 
 <div class="cl-group">Storage</div>
 <div class="lib-grid">
-  <a class="lib-card" href="libs/storage.md">
+  <a class="lib-card" href="libs/storage/index.md">
     <div class="lib-name">CL.Storage</div>
     <div class="lib-pkg">CodeLogic.Storage</div>
     <p class="lib-desc">Safe mounted storage across local filesystems, S3, FTP/SFTP, WebDAV, Azure Blob, GCS, and Swift.</p>

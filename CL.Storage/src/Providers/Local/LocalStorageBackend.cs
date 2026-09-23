@@ -5,12 +5,13 @@ using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
+using CL.Storage.Registry;
 using CodeLogic.Core.Results;
 
 namespace CL.Storage.Providers.Local;
 
 /// <summary>Provides storage operations over a local path or mounted UNC root.</summary>
-public sealed class LocalStorageBackend : IStorageBackend
+public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageSpaceService, Sync.IStorageWatchService
 {
     /// <inheritdoc />
     public const long DefaultMaxBufferedDownloadBytes = 67_108_864;
@@ -24,7 +25,16 @@ public sealed class LocalStorageBackend : IStorageBackend
         StorageFeature.AtomicMove |
         StorageFeature.AtomicReplace |
         StorageFeature.ConditionalCreate |
-        StorageFeature.RangeReads);
+        StorageFeature.RangeReads |
+        StorageFeature.ChangeNotifications |
+        StorageFeature.SpaceInfo |
+        StorageFeature.Append |
+        StorageFeature.Links |
+        StorageFeature.SetTimestamps |
+        StorageFeature.CreateLinks |
+        StorageFeature.ReadLinks |
+        // Unix permission bits exist only on Unix-like systems.
+        (OperatingSystem.IsWindows() ? StorageFeature.None : StorageFeature.Permissions));
 
     private readonly LocalPathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
@@ -163,6 +173,8 @@ public sealed class LocalStorageBackend : IStorageBackend
     {
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(source);
+        if (StorageTransferPipeline.Applies(this, options))
+            return await StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure)
@@ -240,10 +252,10 @@ public sealed class LocalStorageBackend : IStorageBackend
     }
 
     /// <inheritdoc />
-    public Task<Result<Stream>> DownloadAsync(
-        string path,
-        StorageDownloadOptions? options = null,
-        CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         options ??= new StorageDownloadOptions();
@@ -346,7 +358,8 @@ public sealed class LocalStorageBackend : IStorageBackend
         if (options.Condition is { IsEmpty: false })
             return Task.FromResult(Result.Failure(StorageErrors.Unsupported(
                 "The local provider does not support atomic ETag or version delete conditions.")));
-        var resolved = _paths.Resolve(path);
+        // A link itself can be deleted even when following links is disabled; its target is never touched.
+        var resolved = _paths.ResolveLink(path);
         if (resolved.IsFailure)
             return Task.FromResult(Result.Failure(resolved.Error!));
         if (resolved.Value!.StoragePath.Length == 0)
@@ -355,7 +368,9 @@ public sealed class LocalStorageBackend : IStorageBackend
         try
         {
             var attributes = File.GetAttributes(resolved.Value.FullPath);
-            if ((attributes & FileAttributes.Directory) != 0)
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == (FileAttributes.Directory | FileAttributes.ReparsePoint))
+                Directory.Delete(resolved.Value.FullPath, recursive: false); // removes the link, not the target tree
+            else if ((attributes & FileAttributes.Directory) != 0)
                 Directory.Delete(resolved.Value.FullPath, options.Recursive);
             else
                 File.Delete(resolved.Value.FullPath);
@@ -575,17 +590,191 @@ public sealed class LocalStorageBackend : IStorageBackend
             : (attributes & FileAttributes.Directory) != 0
                 ? StorageItemType.Directory
                 : StorageItemType.File;
-        var info = type == StorageItemType.Directory ? (FileSystemInfo)new DirectoryInfo(fullPath) : new FileInfo(fullPath);
+        var isDirectory = (attributes & FileAttributes.Directory) != 0;
+        var info = isDirectory ? (FileSystemInfo)new DirectoryInfo(fullPath) : new FileInfo(fullPath);
+        var name = storagePath.Length == 0 ? info.Name : storagePath.Split('/')[^1];
         return new StorageItem
         {
             Path = storagePath,
-            Name = storagePath.Length == 0 ? info.Name : storagePath.Split('/')[^1],
+            Name = name,
             ItemType = type,
             Size = type == StorageItemType.File ? ((FileInfo)info).Length : null,
             LastModified = new DateTimeOffset(info.LastWriteTimeUtc),
+            Created = new DateTimeOffset(info.CreationTimeUtc),
+            LastAccessed = new DateTimeOffset(info.LastAccessTimeUtc),
             ContentType = type == StorageItemType.File ? GetContentType(info.Extension) : null,
-            ETag = null
+            ETag = null,
+            UnixMode = OperatingSystem.IsWindows() ? null : (int)info.UnixFileMode,
+            LinkTarget = type == StorageItemType.Link ? info.LinkTarget : null,
+            IsHidden = (attributes & FileAttributes.Hidden) != 0 || name.StartsWith('.')
         };
+    }
+
+    /// <inheritdoc />
+    public Task<Result> SetPermissionsAsync(string path, int unixMode, CancellationToken cancellationToken = default)
+    {
+        if (OperatingSystem.IsWindows())
+            return Task.FromResult(Result.Failure(StorageErrors.Unsupported("Unix permissions are not available on Windows.")));
+        return Attribute(path, "Set permissions", full =>
+        {
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(full, (UnixFileMode)unixMode);
+        }, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<Result> SetOwnerAsync(string path, long? ownerId, long? groupId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Result.Failure(StorageErrors.Unsupported(".NET has no API for changing local file ownership.")));
+
+    /// <inheritdoc />
+    public Task<Result> SetTimestampsAsync(string path, DateTimeOffset? lastModified, DateTimeOffset? lastAccessed = null, CancellationToken cancellationToken = default) =>
+        Attribute(path, "Set timestamps", full =>
+        {
+            FileSystemInfo info = Directory.Exists(full) ? new DirectoryInfo(full) : new FileInfo(full);
+            if (!info.Exists) throw new FileNotFoundException(null, full);
+            if (lastModified is { } modified) info.LastWriteTimeUtc = modified.UtcDateTime;
+            if (lastAccessed is { } accessed) info.LastAccessTimeUtc = accessed.UtcDateTime;
+        }, cancellationToken);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// The link stores a relative target so it keeps working if the root moves. On Windows, creating
+    /// symbolic links needs Developer Mode or the "Create symbolic links" privilege; without it the call
+    /// fails with <c>storage.permission_denied</c>.
+    /// </remarks>
+    public Task<Result> CreateLinkAsync(string linkPath, string targetPath, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var link = _paths.ResolveLink(linkPath);
+        if (link.IsFailure) return Task.FromResult(Result.Failure(link.Error!));
+        if (link.Value!.StoragePath.Length == 0)
+            return Task.FromResult(Result.Failure(StorageErrors.InvalidPath("A link cannot replace the root.")));
+        var target = _paths.Resolve(targetPath);
+        if (target.IsFailure) return Task.FromResult(Result.Failure(target.Error!));
+        try
+        {
+            if (File.Exists(link.Value.FullPath) || Directory.Exists(link.Value.FullPath) || new FileInfo(link.Value.FullPath).LinkTarget is not null)
+                return Task.FromResult(Result.Failure(StorageErrors.Conflict("The link path already exists.")));
+            var linkDirectory = Path.GetDirectoryName(link.Value.FullPath)!;
+            Directory.CreateDirectory(linkDirectory);
+            var relative = Path.GetRelativePath(linkDirectory, target.Value!.FullPath);
+            if (Directory.Exists(target.Value.FullPath))
+                Directory.CreateSymbolicLink(link.Value.FullPath, relative);
+            else
+                File.CreateSymbolicLink(link.Value.FullPath, relative);
+            return Task.FromResult(Result.Success());
+        }
+        catch (IOException error) when (error.HResult == unchecked((int)0x80070522))
+        {
+            return Task.FromResult(Result.Failure(StorageErrors.PermissionDenied(
+                "Create link: Windows requires Developer Mode or the symbolic-link privilege.")));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return Task.FromResult(Result.Failure(StorageErrors.FromException(error, "Create link")));
+        }
+    }
+
+    /// <inheritdoc />
+    public Task<Result<StorageLinkInfo>> ReadLinkAsync(string path, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var link = _paths.ResolveLink(path);
+        if (link.IsFailure) return Task.FromResult(Result<StorageLinkInfo>.Failure(link.Error!));
+        try
+        {
+            var info = new FileInfo(link.Value!.FullPath);
+            if (!info.Exists && !Directory.Exists(info.FullName) && info.LinkTarget is null)
+                return Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.NotFound($"Item '{link.Value.StoragePath}' was not found.")));
+            if (info.LinkTarget is not { } raw)
+                return Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.Conflict($"Item '{link.Value.StoragePath}' is not a link.")));
+            var absolute = Path.IsPathRooted(raw) ? raw : Path.Combine(Path.GetDirectoryName(info.FullName)!, raw);
+            return Task.FromResult(Result<StorageLinkInfo>.Success(new StorageLinkInfo(raw, _paths.ToStoragePath(absolute))));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return Task.FromResult(Result<StorageLinkInfo>.Failure(StorageErrors.FromException(error, "Read link")));
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<Result<StorageItem>> AppendAsync(string path, Stream source, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure) return Result<StorageItem>.Failure(resolved.Error!);
+        if (resolved.Value!.StoragePath.Length == 0)
+            return Result<StorageItem>.Failure(StorageErrors.InvalidPath("A file path is required."));
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(resolved.Value.FullPath)!);
+            await using (var target = new FileStream(resolved.Value.FullPath, FileMode.Append, FileAccess.Write, FileShare.None, 65_536, FileOptions.Asynchronous))
+                await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+            return CreateItem(resolved.Value.StoragePath, resolved.Value.FullPath) is { } item
+                ? Result<StorageItem>.Success(item)
+                : Result<StorageItem>.Failure(StorageErrors.NotFound("The appended file disappeared."));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error)
+        {
+            return Result<StorageItem>.Failure(StorageErrors.FromException(error, "Append file"));
+        }
+    }
+
+    /// <inheritdoc />
+    public Task<Result<StorageSpaceInfo>> GetSpaceAsync(string path = "", CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure) return Task.FromResult(Result<StorageSpaceInfo>.Failure(resolved.Error!));
+        try
+        {
+            var drive = DriveFor(resolved.Value!.FullPath);
+            return Task.FromResult(Result<StorageSpaceInfo>.Success(new StorageSpaceInfo(
+                drive.TotalSize, drive.AvailableFreeSpace, drive.TotalSize - drive.TotalFreeSpace)));
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return Task.FromResult(Result<StorageSpaceInfo>.Failure(StorageErrors.FromException(error, "Get free space")));
+        }
+    }
+
+    /// <inheritdoc />
+    public IAsyncEnumerable<Sync.StorageChange> WatchNativeAsync(string path, bool recursive, CancellationToken cancellationToken)
+    {
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure)
+            throw new ArgumentException(resolved.Error!.Message, nameof(path));
+        if (!Directory.Exists(resolved.Value!.FullPath))
+            throw new DirectoryNotFoundException($"Directory '{resolved.Value.StoragePath}' was not found.");
+        return Sync.StorageWatch.WatchFileSystemAsync(resolved.Value.FullPath, recursive, _paths.ToStoragePath, cancellationToken);
+    }
+
+    /// <summary>Finds the mounted volume holding a path: the longest matching mount point on Unix, the drive root on Windows.</summary>
+    private static DriveInfo DriveFor(string fullPath)
+    {
+        if (OperatingSystem.IsWindows())
+            return new DriveInfo(Path.GetPathRoot(fullPath)!);
+        return DriveInfo.GetDrives()
+            .Where(drive => drive.IsReady && fullPath.StartsWith(drive.RootDirectory.FullName, StringComparison.Ordinal))
+            .OrderByDescending(drive => drive.RootDirectory.FullName.Length)
+            .First();
+    }
+
+    private Task<Result> Attribute(string path, string operation, Action<string> change, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var resolved = _paths.Resolve(path);
+        if (resolved.IsFailure) return Task.FromResult(Result.Failure(resolved.Error!));
+        try
+        {
+            change(resolved.Value!.FullPath);
+            return Task.FromResult(Result.Success());
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return Task.FromResult(Result.Failure(StorageErrors.FromException(error, operation)));
+        }
     }
 
     private Result<TransferEndpoints> ResolveTransfer(string sourcePath, string destinationPath, StorageTransferOptions options)

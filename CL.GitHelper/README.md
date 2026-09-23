@@ -1,9 +1,9 @@
 # CodeLogic.GitHelper
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.GitHelper)](https://www.nuget.org/packages/CodeLogic.GitHelper)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
-> Programmatic Git repository management for [CodeLogic 4](https://github.com/Media2A/CodeLogic) — clone, fetch, pull, push, commit, branch, and reset, all from configured repositories.
+> Programmatic Git repository management for [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) — clone, fetch, pull, push, commit, branch, and reset, all from configured repositories.
 
 A thin, async wrapper over [LibGit2Sharp](https://www.nuget.org/packages/LibGit2Sharp) that manages a pool of named repositories. Every operation returns a `GitResult<T>` instead of throwing, carries rich `GitDiagnostics` (timing and transfer counters), and the standout `EnsureUpToDateAsync` gives you one idempotent call that clones a repository if it's missing or hard-resets it to the remote tip if it already exists.
 
@@ -87,13 +87,13 @@ Each repository entry: `Id`, `Name`, `RepositoryUrl` (required), `LocalPath` (re
 
 ## Documentation
 
-Full guide: **[CL.GitHelper documentation](https://media2a.github.io/CodeLogic.Libs/libs/githelper.html)**
+Full guide: **[CL.GitHelper documentation](https://zyntal-com.github.io/CodeLogic.Libs/libs/githelper.html)**
 
 ## Requirements
 
-- [CodeLogic 4](https://github.com/Media2A/CodeLogic) · .NET 10
+- [CodeLogic 4](https://github.com/zyntal-com/CodeLogic) · .NET 10
 - LibGit2Sharp 0.30.x
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE).

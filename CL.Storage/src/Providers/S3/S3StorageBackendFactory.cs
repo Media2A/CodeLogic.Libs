@@ -12,7 +12,7 @@ internal sealed class S3StorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(S3ConnectionConfig);
     public StorageProvider Provider => StorageProvider.S3;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (S3ConnectionConfig)configuration;
         var clientConfig = new AmazonS3Config
@@ -21,6 +21,8 @@ internal sealed class S3StorageBackendFactory : IStorageBackendFactory
             Timeout = TimeSpan.FromSeconds(value.TimeoutSeconds),
             MaxErrorRetry = value.MaxRetries
         };
+        if (value.Proxy?.ToWebProxy() is { } proxy)
+            clientConfig.SetWebProxy(proxy);
         if (!string.IsNullOrWhiteSpace(value.ServiceUrl))
         {
             clientConfig.ServiceURL = value.ServiceUrl;
