@@ -402,8 +402,10 @@ public sealed class NeedsReviewProviderLiveTests
     [SftpFact]
     public async Task Concurrent_SFTP_appends_do_not_overwrite_each_other()
     {
-        await using var first = LiveServers.Create(LiveServers.Sftp());
-        await using var second = LiveServers.Create(LiveServers.Sftp(c => c.Session = new StorageSessionConfig { MaxSessions = 4 }));
+        // Two connections of two sessions each (the keep-alive only keeps them from sharing one pool): enough to append
+        // concurrently without tripping the server's MaxStartups.
+        await using var first = LiveServers.Create(LiveServers.Sftp(c => c.Session = new StorageSessionConfig { MaxSessions = 2, MaxIdleSessions = 2 }));
+        await using var second = LiveServers.Create(LiveServers.Sftp(c => c.Session = new StorageSessionConfig { MaxSessions = 2, MaxIdleSessions = 2, KeepAliveSeconds = 1 }));
         var path = $"append-{Guid.NewGuid():N}.log";
         try
         {

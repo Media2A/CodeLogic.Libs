@@ -245,6 +245,8 @@ public sealed class TlsDiagnosisTests
         var recorder = new ServerIdentityRecorder();
         var started = DateTimeOffset.UtcNow;
         recorder.RecordClientCertificateRequest();
+        // needs-review A27: only a connection that was asked and then failed before the server accepted counts.
+        recorder.RecordClientCertificateRefusal();
 
         var enriched = TlsDiagnosis.Enrich(StorageErrors.ConnectionLost("lost", "httpStatus=0"), recorder, started);
         var unrelated = TlsDiagnosis.Enrich(StorageErrors.ConnectionLost("lost"), recorder, DateTimeOffset.UtcNow.AddSeconds(5));

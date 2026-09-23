@@ -90,8 +90,8 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         _clients = pool.Pool;
         if (observer is not null)
         {
+            // Reported per rent, not through the pool's event: a shared pool serves other registrations too.
             _sessionOpened = () => observer.SessionOpened(connectionId, StorageProvider.Sftp);
-            _clients.SessionOpened += _sessionOpened;
         }
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Sftp, observer);
         _paths = new RemotePathResolver(root);
@@ -794,12 +794,11 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
     /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
-        if (_sessionOpened is not null) _clients.SessionOpened -= _sessionOpened;
         return _pool.ReleaseAsync();
     }
 
     private Task<SftpClient> OpenClientAsync(CancellationToken cancellationToken) =>
-        _clients.RentAsync(cancellationToken);
+        _clients.RentAsync(cancellationToken, _sessionOpened);
 
     /// <summary>Returns a client to the pool so the next operation reuses its SSH session.</summary>
     private ValueTask ReleaseClientAsync(SftpClient client) => _clients.ReturnAsync(client);

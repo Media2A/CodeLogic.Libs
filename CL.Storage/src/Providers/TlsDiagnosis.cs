@@ -1,3 +1,7 @@
+using System.Net.Security;
+using System.Reflection;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using CL.Storage.Errors;
 using CL.Storage.Models;
 using CodeLogic.Core.Results;
@@ -14,6 +18,11 @@ internal static class TlsDiagnosis
     public const string ClientCertificateRejected = "client_certificate_rejected";
     public const string ProtocolMismatch = "protocol_mismatch";
     public const string HandshakeFailed = "handshake_failed";
+    /// <summary>
+    /// The hint on a <c>storage.connection_lost</c> whose TLS record failed after the handshake (a decryption error,
+    /// an unexpected end of stream): an ordinary drop, still worth retrying.
+    /// </summary>
+    public const string ConnectionInterrupted = "connection_interrupted";
 
     private static readonly string[] ServerCertificateSignals =
     [
@@ -57,20 +66,36 @@ internal static class TlsDiagnosis
     private const int SecECertWrongUsage = unchecked((int)0x80090349);
 
     /// <summary>
-    /// Whether an exception chain carries a TLS failure from the platform's TLS stack: an SChannel status
-    /// (Windows) or an OpenSSL error (Linux). Both also arrive after the handshake — TLS 1.3 refuses a client
-    /// certificate then — inside an <see cref="IOException"/> rather than an authentication exception.
+    /// Whether an exception chain carries a failure from the platform's TLS stack: an SChannel status (Windows)
+    /// raised by a TLS stream, or an OpenSSL error (Linux). An SSPI status outside a TLS stream — Negotiate or NTLM
+    /// authentication failing — is not a TLS failure.
     /// </summary>
     public static bool IsPlatformTlsFailure(Exception exception)
     {
-        for (var current = exception; current is not null; current = current.InnerException)
+        Exception? parent = null;
+        for (var current = exception; current is not null; parent = current, current = current.InnerException)
         {
-            if (current is System.ComponentModel.Win32Exception { NativeErrorCode: var code } && (code & unchecked((int)0xFFFFFF00)) == unchecked((int)0x80090300))
+            if (current is System.ComponentModel.Win32Exception { NativeErrorCode: var code } &&
+                (code & unchecked((int)0xFFFFFF00)) == unchecked((int)0x80090300) &&
+                parent is IOException or AuthenticationException && parent is not InvalidCredentialException)
                 return true;
             if (current is System.Security.Cryptography.CryptographicException && current.Message.Contains("SSL routines", StringComparison.OrdinalIgnoreCase))
                 return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Whether a TLS failure belongs to the handshake: raised while it ran (an <see cref="AuthenticationException"/>),
+    /// or an alert the server sent about it (our certificate, the protocol, its certificate) — which TLS 1.3 sends only
+    /// after the handshake completed. Any other TLS error on an established connection (a record that fails to decrypt,
+    /// an unexpected end of stream) is a lost connection, not a credential or trust problem.
+    /// </summary>
+    public static bool IsHandshakeFailure(Exception exception)
+    {
+        if (ProviderErrorMapper.Find<AuthenticationException>(exception) is { } authentication && authentication is not InvalidCredentialException)
+            return true;
+        return Reason(exception) is ClientCertificateRejected or ProtocolMismatch or ServerCertificateRejected;
     }
 
     /// <summary>Classifies a TLS failure by its SChannel status or its message chain.</summary>
@@ -104,17 +129,27 @@ internal static class TlsDiagnosis
     /// </summary>
     public static Error Enrich(Error error, ServerIdentityRecorder? identity, DateTimeOffset attemptStarted)
     {
-        // A connection dropped right after a handshake in which the server asked for a client certificate is the
-        // server refusing that certificate (TLS 1.3 refuses it after the handshake, and SChannel reports the drop).
+        // TLS 1.3 servers refuse a missing or untrusted client certificate only after the handshake, and SChannel
+        // reports the refusal as a dropped connection. It is taken for a refusal only when, during this attempt, a
+        // connection the server asked for a certificate failed before the server sent anything after our reply
+        // (recorded per connection by TlsConnectionWatch). A drop on another connection, or on one whose certificate
+        // the server accepted (a server that requests but does not require one), stays a transient lost connection.
         var unexplained = error.Code == StorageErrors.ConnectionLostCode ||
             (error.Code == StorageErrors.TlsFailureCode && StorageErrorInfo.TryGetDetail(error, StorageErrorInfo.TlsReasonKey, out var why) && why == HandshakeFailed);
         var serverRefused = identity?.Last is { Kind: "tls-certificate", Trusted: false } && identity.LastRecordedAt >= attemptStarted - TimeSpan.FromMilliseconds(50);
-        if (unexplained && !serverRefused && identity?.ClientCertificateRequestedAt is { } requested &&
-            requested >= attemptStarted - TimeSpan.FromMilliseconds(50))
+        if (unexplained && !serverRefused && identity?.ClientCertificateRefusedAt is { } refused &&
+            refused >= attemptStarted - TimeSpan.FromMilliseconds(50))
         {
             return StorageErrors.TlsFailure(
                 $"{error.Message} The server asked for a client certificate and closed the connection: the certificate was missing or refused.",
                 Merge(error.Details, [$"{StorageErrorInfo.TlsReasonKey}={ClientCertificateRejected}", $"transportError={error.Code}"]));
+        }
+        if (error.Code == StorageErrors.ConnectionLostCode && !serverRefused && identity?.ClientCertificateRequestedAt is { } requested &&
+            requested >= attemptStarted - TimeSpan.FromMilliseconds(50) &&
+            !StorageErrorInfo.TryGetDetail(error, StorageErrorInfo.TlsReasonKey, out _))
+        {
+            // Asked for a certificate, but nothing ties the drop to it: a hint only, and still transient.
+            return StorageErrors.ConnectionLost(error.Message, Merge(error.Details, [$"{StorageErrorInfo.TlsReasonKey}={ClientCertificateRejected}"]));
         }
         if (error.Code != StorageErrors.TlsFailureCode || identity?.Last is not { Kind: "tls-certificate", Trusted: false } presented)
             return error;
@@ -150,4 +185,120 @@ internal static class TlsDiagnosis
 
     private static bool Contains(string text, string[] signals) =>
         signals.Any(signal => text.Contains(signal, StringComparison.OrdinalIgnoreCase));
+}
+
+/// <summary>
+/// Watches the transport under one TLS connection, so a server refusing our client certificate can be told from an
+/// ordinary drop. TLS 1.3 servers refuse a missing or untrusted certificate only after the handshake, with an alert on
+/// the first read (SChannel then reports a dropped connection or a decryption error). A refusal is recorded only for a
+/// connection the server actually asked for a certificate, and only when it failed after our reply before the server
+/// sent more than an alert; a connection that carried a response afterwards (the server accepted the certificate, or
+/// only requested one) never records it.
+/// </summary>
+internal sealed class TlsConnectionWatch(Stream inner, ServerIdentityRecorder recorder) : Stream
+{
+    /// <summary>Bytes the server sends after our reply that prove it accepted: an alert record is about 24 bytes; session tickets or a response are more.</summary>
+    internal const int AcceptedAfterBytes = 64;
+    private static readonly PropertyInfo? InnerStreamProperty = typeof(AuthenticatedStream).GetProperty("InnerStream", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    private const int NotAsked = 0;
+    private const int Asked = 1;
+    private const int Replied = 2;
+    private const int Settled = 3;
+    private int _state;
+    private long _readAfterReply;
+
+    /// <summary>
+    /// Called from a TLS stream's client-certificate selection: records a request only when the server asked (it sent its
+    /// certificate or the issuers it accepts), and only on the connection it asked on.
+    /// </summary>
+    public static void OnCertificateSelection(object sender, X509Certificate? remoteCertificate, string[]? acceptableIssuers)
+    {
+        if (remoteCertificate is null && acceptableIssuers is not { Length: > 0 }) return;
+        if (sender is AuthenticatedStream stream && InnerStreamProperty?.GetValue(stream) is TlsConnectionWatch watch)
+            watch.CertificateRequested();
+    }
+
+    /// <summary>The server asked this connection for a client certificate.</summary>
+    public void CertificateRequested() => Interlocked.CompareExchange(ref _state, Asked, NotAsked);
+
+    private void Wrote() => Interlocked.CompareExchange(ref _state, Replied, Asked);
+
+    private void Read(int count)
+    {
+        if (count == 0) { Failed(); return; }
+        if (Volatile.Read(ref _state) == Replied && Interlocked.Add(ref _readAfterReply, count) >= AcceptedAfterBytes)
+            Interlocked.CompareExchange(ref _state, Settled, Replied);
+    }
+
+    private void Failed()
+    {
+        if (Interlocked.CompareExchange(ref _state, Settled, Replied) == Replied)
+            recorder.RecordClientCertificateRefusal();
+    }
+
+    public override bool CanRead => inner.CanRead;
+    public override bool CanSeek => false;
+    public override bool CanWrite => inner.CanWrite;
+    public override long Length => throw new NotSupportedException();
+    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+    public override void Flush() => inner.Flush();
+    public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+    public override int Read(Span<byte> buffer)
+    {
+        int count;
+        try { count = inner.Read(buffer); }
+        catch { Failed(); throw; }
+        Read(count);
+        return count;
+    }
+
+    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+        ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        int count;
+        try { count = await inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false); }
+        catch (Exception error) when (error is not OperationCanceledException) { Failed(); throw; }
+        Read(count);
+        return count;
+    }
+
+    public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+
+    public override void Write(ReadOnlySpan<byte> buffer)
+    {
+        inner.Write(buffer);
+        Wrote();
+    }
+
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+        WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        await inner.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+        Wrote();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        // Closed after our reply without the server having sent more than an alert: SChannel read the alert and
+        // failed, and the connection is being discarded.
+        if (disposing) { Failed(); inner.Dispose(); }
+        base.Dispose(disposing);
+    }
+
+    public override async ValueTask DisposeAsync()
+    {
+        Failed();
+        await inner.DisposeAsync().ConfigureAwait(false);
+        await base.DisposeAsync().ConfigureAwait(false);
+    }
 }

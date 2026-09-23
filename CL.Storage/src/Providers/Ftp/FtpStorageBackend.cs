@@ -89,8 +89,8 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         _clients = pool.Pool;
         if (observer is not null)
         {
+            // Reported per rent, not through the pool's event: a shared pool serves other registrations too.
             _sessionOpened = () => observer.SessionOpened(connectionId, StorageProvider.Ftp);
-            _clients.SessionOpened += _sessionOpened;
         }
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Ftp, observer);
         _retry.Enrich = (error, started) => TlsDiagnosis.Enrich(error, Identity, started);
@@ -99,6 +99,9 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     }
 
     internal ProviderPoolStats PoolStats => _clients.Stats;
+
+    /// <summary>The session pool this backend uses, shared with registrations of the same settings.</summary>
+    internal ProviderClientPool<AsyncFtpClient> Pool => _clients;
 
     /// <summary>Creates the session pool for a client factory; shared pools are created once per settings.</summary>
     internal static ProviderClientPool<AsyncFtpClient> CreatePool(
@@ -873,7 +876,6 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
-        if (_sessionOpened is not null) _clients.SessionOpened -= _sessionOpened;
         return _pool.ReleaseAsync();
     }
 
@@ -1081,7 +1083,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
     }
 
     private Task<AsyncFtpClient> OpenClientAsync(CancellationToken cancellationToken) =>
-        _clients.RentAsync(cancellationToken);
+        _clients.RentAsync(cancellationToken, _sessionOpened);
 
     /// <summary>Returns a client to the pool so the next operation reuses its control connection.</summary>
     private ValueTask ReleaseClientAsync(AsyncFtpClient client) => _clients.ReturnAsync(client);
