@@ -64,6 +64,26 @@ public static class StorageSync
         var destinationRoot = StoragePath.Normalize(destinationPath);
         if (destinationRoot.IsFailure) return Result<StorageSyncPlan>.Failure(destinationRoot.Error!);
 
+        try
+        {
+            return await PlanCoreAsync(source, sourceRoot.Value!, destination, destinationRoot.Value!, options, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // A filter pattern that runs too long, or a provider whose listing throws, fails the plan; only the
+            // caller's cancellation is thrown.
+            return Result<StorageSyncPlan>.Failure(StorageCompare.PlanningError(error, "Plan the sync"));
+        }
+    }
+
+    private static async Task<Result<StorageSyncPlan>> PlanCoreAsync(
+        IStorageService source,
+        string sourceRoot,
+        IStorageService destination,
+        string destinationRoot,
+        StorageSyncOptions options,
+        CancellationToken cancellationToken)
+    {
         var baseline = StorageSyncBaseline.Empty;
         if (options.StateStore is { } store)
         {
@@ -73,9 +93,9 @@ public static class StorageSync
         }
 
         var filter = new PathFilter(options.Compare);
-        var sourceTree = await StorageCompare.ListTreeAsync(source, sourceRoot.Value!, options.Compare, filter, required: true, cancellationToken).ConfigureAwait(false);
+        var sourceTree = await StorageCompare.ListTreeAsync(source, sourceRoot, options.Compare, filter, required: true, cancellationToken).ConfigureAwait(false);
         if (sourceTree.IsFailure) return Result<StorageSyncPlan>.Failure(sourceTree.Error!);
-        var destinationTree = await StorageCompare.ListTreeAsync(destination, destinationRoot.Value!, options.Compare, filter, required: false, cancellationToken).ConfigureAwait(false);
+        var destinationTree = await StorageCompare.ListTreeAsync(destination, destinationRoot, options.Compare, filter, required: false, cancellationToken).ConfigureAwait(false);
         if (destinationTree.IsFailure) return Result<StorageSyncPlan>.Failure(destinationTree.Error!);
         var diff = await StorageCompare.DiffAsync(source, sourceTree.Value!, destination, destinationTree.Value!, options.Compare, cancellationToken).ConfigureAwait(false);
         if (diff.IsFailure) return Result<StorageSyncPlan>.Failure(diff.Error!);
@@ -91,7 +111,7 @@ public static class StorageSync
             (actions, unchanged) = PlanOneWay(diff.Value!, options, scope, warnings);
         actions = ApplyDeletionSafety(actions, baseline, sourceTree.Value!, destinationTree.Value!, options, warnings);
         // A missing destination folder is created first, so parallel copies do not race to create it.
-        if (destinationTree.Value!.Missing && destinationRoot.Value!.Length > 0 && actions.Count > 0)
+        if (destinationTree.Value!.Missing && destinationRoot.Length > 0 && actions.Count > 0)
             actions.Insert(0, new StorageSyncAction { RelativePath = string.Empty, Kind = StorageSyncActionKind.CreateDirectory });
 
         var plan = new StorageSyncPlan
@@ -99,15 +119,15 @@ public static class StorageSync
             SchemaVersion = StorageSyncPlan.CurrentSchemaVersion,
             SourceConnectionId = source.ConnectionId,
             DestinationConnectionId = destination.ConnectionId,
-            SourceRoot = sourceRoot.Value!,
-            DestinationRoot = destinationRoot.Value!,
+            SourceRoot = sourceRoot,
+            DestinationRoot = destinationRoot,
             SyncId = options.SyncId,
             BaselineGeneration = baseline.Generation,
             Direction = options.Direction,
             ConflictPolicy = options.ConflictPolicy,
             CaseInsensitive = diff.Value!.CaseInsensitive,
             OptionsDigest = options.Fingerprint(),
-            Actions = Order(actions),
+            Actions = Order(ReadThroughLinks(actions, diff.Value!)),
             Unchanged = unchanged,
             Agreed = options.StateStore is not null ? agreed : new Dictionary<string, StorageSyncBaselineEntry>(),
             Warnings = warnings,
@@ -346,6 +366,29 @@ public static class StorageSync
 
         /// <summary>Whether the source left the path out, so the destination's copy must not be deleted.</summary>
         public bool LeftOutAtSource(string path) => diff.SourceExclusions.Covers(path);
+
+        /// <summary>Whether the destination left the path out (a hidden item, a skipped link), so nothing is written there.</summary>
+        public bool LeftOutAtDestination(string destinationPath) => diff.DestinationExclusions.Covers(destinationPath);
+
+        /// <summary>
+        /// Whether a path the current filters leave out lies in a folder the filters (or the hidden rule) leave out
+        /// and that neither side has any more: its baseline entry describes files gone from both sides, so there is
+        /// no deletion left to protect and the entry is dropped. A path left out by its own name, or in a folder that
+        /// is still there on either side, keeps its entry, since whether the file is still there is not known.
+        /// </summary>
+        public bool GoneFromBothSides(string path, string destinationPath, bool isDirectory)
+        {
+            if (diff.SourceExclusions.Covers(path) || diff.DestinationExclusions.Covers(destinationPath)) return false;
+            for (var end = path.IndexOf('/'); ; end = path.IndexOf('/', end + 1))
+            {
+                var last = end < 0;
+                if (last && !isDirectory) return false;
+                var folder = last ? path : path[..end];
+                if (filter.Excludes(folder, isDirectory: true) || (!compare.IncludeHidden && folder[(folder.LastIndexOf('/') + 1)..].StartsWith('.')))
+                    return !diff.SourceExclusions.Covers(folder) && !diff.DestinationExclusions.Covers(folder);
+                if (last) return false;
+            }
+        }
     }
 
     private static (List<StorageSyncAction> Actions, int Unchanged) PlanOneWay(StorageDiff diff, StorageSyncOptions options, Scope scope, List<string> warnings)
@@ -363,6 +406,9 @@ public static class StorageSync
                     if (!entry.IsDirectory) unchanged++;
                     break;
                 case StorageDiffKind.OnlyInSource:
+                    // What the destination left out for what it is there (a hidden item, a skipped link, anything
+                    // below a skipped link to a folder) is not missing: nothing is written onto or through it.
+                    if (scope.LeftOutAtDestination(entry.DestinationRelativePath ?? entry.RelativePath)) break;
                     actions.Add(entry.IsDirectory
                         ? new StorageSyncAction { RelativePath = entry.RelativePath, DestinationRelativePath = entry.DestinationRelativePath, Kind = StorageSyncActionKind.CreateDirectory }
                         : Copy(entry, StorageSyncActionKind.CopyToDestination));
@@ -402,6 +448,7 @@ public static class StorageSync
                     break;
             }
         }
+        KeepLinksWhole(actions, diff, null, null, warnings);
         DropUnsafeDirectoryDeletes(actions, diff, null, null);
         return (actions, unchanged);
     }
@@ -471,9 +518,11 @@ public static class StorageSync
         {
             entriesByKey.TryGetValue(key, out var entry);
             var base_ = baselineByKey.TryGetValue(key, out var b) ? b.Entry : null;
-            // Steps name a path as the source spells it: the source's own spelling when it has the item, otherwise
-            // the spelling the baseline recorded, so the baseline entry is found again whatever happens to the step.
-            var path = entry?.Source is not null ? entry.RelativePath : base_ is not null ? b.Path : entry!.RelativePath;
+            // Steps name a path as the source spells it: the diff's spelling whenever it has the path (the source's
+            // own, or for an item only at the destination the source's spelling of its folders), otherwise the one the
+            // baseline recorded. Baseline entries are matched ignoring case where case is ignored, so the entry is
+            // found again whatever happens to the step.
+            var path = entry?.RelativePath ?? b.Path;
             var there = entry?.DestinationRelativePath ?? entry?.RelativePath ?? path;
             var isDirectory = entry?.IsDirectory ?? base_?.IsDirectory ?? false;
             void CarryOver()
@@ -490,7 +539,12 @@ public static class StorageSync
             }
             // Left out on either side, or by the current filters: nothing is known to have changed, so the entry
             // is kept for when the path takes part again.
-            if (scope.LeftOut(path, there, isDirectory)) { CarryOver(); continue; }
+            if (scope.LeftOut(path, there, isDirectory))
+            {
+                if (entry is null && scope.GoneFromBothSides(path, there, isDirectory)) continue;
+                CarryOver();
+                continue;
+            }
             if (isDirectory)
             {
                 PlanDirectory(actions, agreed, entry, path, hasBaseline && base_ is { IsDirectory: true }, options);
@@ -562,6 +616,7 @@ public static class StorageSync
                     break;
             }
         }
+        KeepLinksWhole(actions, diff, baselineByKey, agreed, warnings);
         DropUnsafeDirectoryDeletes(actions, diff, baselineByKey, agreed);
         return (actions, unchanged, agreed);
     }
@@ -602,6 +657,58 @@ public static class StorageSync
                 : new StorageSyncAction { RelativePath = path, Kind = StorageSyncActionKind.CreateDirectoryAtSource });
         }
     }
+
+    /// <summary>
+    /// Takes out every step that would change a side through a link it followed (<see cref="StorageLinkHandling.Follow"/>):
+    /// a delete of the link or of anything below a followed link to a folder, and a copy or rename onto a followed link
+    /// to a file, which would replace the link (or write into its target). The path keeps its baseline entry, so the
+    /// next run sees it the same way. Copies into a followed folder are kept: they land in the link's target.
+    /// </summary>
+    private static void KeepLinksWhole(
+        List<StorageSyncAction> actions,
+        StorageDiff diff,
+        Dictionary<string, (string Path, StorageSyncBaselineEntry Entry)>? baselineByKey,
+        Dictionary<string, StorageSyncBaselineEntry>? agreed,
+        List<string> warnings)
+    {
+        var dropped = new HashSet<string>(diff.CaseInsensitive ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        bool Through(StorageSyncAction action)
+        {
+            var there = action.DestinationRelativePath ?? action.RelativePath;
+            return action.Kind switch
+            {
+                StorageSyncActionKind.DeleteFromDestination => diff.DestinationLinks.Through(there),
+                StorageSyncActionKind.DeleteFromSource => diff.SourceLinks.Through(action.RelativePath),
+                StorageSyncActionKind.CopyToDestination or StorageSyncActionKind.RenameAtDestination => diff.DestinationLinks.IsFileLink(there),
+                StorageSyncActionKind.CopyToSource when action.TargetPath is null => diff.SourceLinks.IsFileLink(action.RelativePath),
+                _ => false
+            };
+        }
+        foreach (var action in actions.Where(Through).ToList())
+        {
+            actions.Remove(action);
+            dropped.Add(action.RelativePath);
+            var side = action.Kind is StorageSyncActionKind.DeleteFromSource or StorageSyncActionKind.CopyToSource ? "source" : "destination";
+            warnings.Add($"'{action.RelativePath}' is a followed link at the {side}, or lies in one; nothing is deleted or replaced through a link, so it was left alone.");
+            if (baselineByKey is not null && agreed is not null &&
+                baselineByKey.TryGetValue(StorageCompare.KeyOf(action.RelativePath, diff.CaseInsensitive), out var previous))
+                agreed[previous.Path] = previous.Entry;
+        }
+        // A kept conflict copy is only brought back to the source when its rename was taken.
+        if (dropped.Count > 0)
+            actions.RemoveAll(action => action.Kind == StorageSyncActionKind.CopyToSource && action.Conflict is not null &&
+                                        action.TargetPath is { } target && dropped.Contains(target));
+    }
+
+    /// <summary>A copy of an item reached through a followed link reads its content where the link leads.</summary>
+    private static List<StorageSyncAction> ReadThroughLinks(List<StorageSyncAction> actions, StorageDiff diff) =>
+        [.. actions.Select(action => action.Kind switch
+        {
+            StorageSyncActionKind.CopyToDestination when diff.SourceLinks.ReadPath(action.RelativePath) is { } read => action with { ReadPath = read },
+            StorageSyncActionKind.CopyToSource when action.TargetPath is null &&
+                diff.DestinationLinks.ReadPath(action.DestinationRelativePath ?? action.RelativePath) is { } read => action with { ReadPath = read },
+            _ => action
+        })];
 
     /// <summary>
     /// Keeps a directory deletion only when everything inside it on that side is deleted in the same plan and
@@ -841,6 +948,8 @@ public static class StorageSync
         {
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var indexes = Enumerable.Range(0, plan.Actions.Count).ToList();
+            // Only for recognising the version a source had; whatever a step deletes, overwrites, or renames must
+            // be exactly the version planned (see DeleteAsync, CopyAsync, RenameAsync).
             var tolerance = options.Compare.TimeTolerance;
 
             // Directories and renames run in order; a rename must land before the copies that follow it.
@@ -906,8 +1015,9 @@ public static class StorageSync
                 result = Result.Failure(StorageErrors.FromException(error, $"Sync '{action.RelativePath}'"));
             }
             var committed = StorageErrorInfo.DestinationCommitted(result.Error);
-            // A step that ended because the run was stopping did not fail on its own: it stays NotRun.
-            if (result.IsFailure && !committed && stop.IsCancellationRequested) return;
+            // A step that ended because the run was stopping did not fail on its own: it stays NotRun. One that
+            // failed for another reason meanwhile is reported as it ended.
+            if (result.IsFailure && !committed && stop.IsCancellationRequested && result.Error!.Code == StorageErrors.CancelledCode) return;
             var outcome = result.IsSuccess || committed
                 ? StorageSyncActionOutcome.Applied
                 : IsStale(result.Error) ? StorageSyncActionOutcome.Stale : StorageSyncActionOutcome.Failed;
@@ -917,6 +1027,7 @@ public static class StorageSync
         }
 
         private string SourcePath(string relative) => Join(plan.SourceRoot, relative);
+        private static string? ReadPath(StorageSyncAction action) => action.ReadPath is { } read ? StoragePath.Normalize(read).Value : null;
         private string DestinationPath(StorageSyncAction action) => Join(plan.DestinationRoot, action.DestinationRelativePath ?? action.RelativePath);
         private string DestinationPath(string relative) => Join(plan.DestinationRoot, relative);
 
@@ -937,9 +1048,9 @@ public static class StorageSync
                     return created;
                 }
                 case StorageSyncActionKind.RenameAtDestination:
-                    return await RenameAsync(action, tolerance, cancellationToken).ConfigureAwait(false);
+                    return await RenameAsync(action, cancellationToken).ConfigureAwait(false);
                 case StorageSyncActionKind.CopyToDestination:
-                    return await CopyAsync(source, SourcePath(action.RelativePath), action.Source, destination, DestinationPath(action), action.Destination,
+                    return await CopyAsync(source, ReadPath(action) ?? SourcePath(action.RelativePath), action.Source, destination, DestinationPath(action), action.Destination,
                         checkFrom: true, towardDestination: true, action.RelativePath, tolerance, cancellationToken).ConfigureAwait(false);
                 case StorageSyncActionKind.CopyToSource:
                 {
@@ -947,19 +1058,19 @@ public static class StorageSync
                     // it a new identity on object stores.
                     var chained = action.Conflict is not null && action.TargetPath is not null;
                     var relative = chained ? _renamed.GetValueOrDefault(action.RelativePath, action.RelativePath) : action.RelativePath;
-                    var from = chained ? DestinationPath(Sibling(action.DestinationRelativePath ?? action.RelativePath, relative)) : DestinationPath(action);
+                    var from = chained ? DestinationPath(Sibling(action.DestinationRelativePath ?? action.RelativePath, relative)) : ReadPath(action) ?? DestinationPath(action);
                     return await CopyAsync(destination, from, action.Destination, source, SourcePath(relative), chained ? null : action.Source,
                         checkFrom: !chained, towardDestination: false, relative, tolerance, cancellationToken).ConfigureAwait(false);
                 }
                 case StorageSyncActionKind.DeleteFromDestination:
                 {
-                    var deleted = await DeleteAsync(destination, DestinationPath(action), action.Destination, tolerance, cancellationToken).ConfigureAwait(false);
+                    var deleted = await DeleteAsync(destination, DestinationPath(action), action.Destination, cancellationToken).ConfigureAwait(false);
                     if (deleted.IsSuccess) Removed[action.RelativePath] = true;
                     return deleted;
                 }
                 case StorageSyncActionKind.DeleteFromSource:
                 {
-                    var deleted = await DeleteAsync(source, SourcePath(action.RelativePath), action.Source, tolerance, cancellationToken).ConfigureAwait(false);
+                    var deleted = await DeleteAsync(source, SourcePath(action.RelativePath), action.Source, cancellationToken).ConfigureAwait(false);
                     if (deleted.IsSuccess) Removed[action.RelativePath] = true;
                     return deleted;
                 }
@@ -974,11 +1085,11 @@ public static class StorageSync
         /// that was planned is moved: the move is pinned to its ETag and version, and where the connection cannot
         /// pin a move, the version is copied (pinned) and then deleted under the same condition.
         /// </summary>
-        private async Task<Result> RenameAsync(StorageSyncAction action, TimeSpan tolerance, CancellationToken cancellationToken)
+        private async Task<Result> RenameAsync(StorageSyncAction action, CancellationToken cancellationToken)
         {
             var current = await Current(destination, DestinationPath(action), cancellationToken).ConfigureAwait(false);
             if (current.IsFailure) return Result.Failure(current.Error!);
-            if (!action.Destination!.Matches(current.Value, tolerance)) return Stale(action.RelativePath);
+            if (!action.Destination!.Matches(current.Value, TimeSpan.Zero)) return Stale(action.RelativePath);
             var there = action.DestinationRelativePath ?? action.RelativePath;
             for (var attempt = 1; attempt <= 20; attempt++)
             {
@@ -988,14 +1099,14 @@ public static class StorageSync
                 var atSource = await Current(source, SourcePath(target), cancellationToken).ConfigureAwait(false);
                 if (atSource.IsFailure) return Result.Failure(atSource.Error!);
                 if (atDestination.Value is not null || atSource.Value is not null) continue;
-                var moved = await MoveVersionAsync(DestinationPath(action), DestinationPath(Sibling(there, target)), current.Value!, tolerance, cancellationToken).ConfigureAwait(false);
+                var moved = await MoveVersionAsync(DestinationPath(action), DestinationPath(Sibling(there, target)), current.Value!, cancellationToken).ConfigureAwait(false);
                 if (moved.IsSuccess || StorageErrorInfo.DestinationCommitted(moved.Error)) _renamed[action.TargetPath!] = target;
                 return moved;
             }
             return Result.Failure(StorageErrors.Conflict($"No free name was found for the conflict copy of '{action.RelativePath}'."));
         }
 
-        private async Task<Result> MoveVersionAsync(string fromPath, string toPath, StorageItem version, TimeSpan tolerance, CancellationToken cancellationToken)
+        private async Task<Result> MoveVersionAsync(string fromPath, string toPath, StorageItem version, CancellationToken cancellationToken)
         {
             var pinned = version.ETag is not null || version.VersionId is not null;
             var moved = await destination.MoveAsync(fromPath, toPath, new StorageTransferOptions
@@ -1005,7 +1116,7 @@ public static class StorageSync
                 SourceVersionId = version.VersionId
             }, cancellationToken).ConfigureAwait(false);
             if (moved.IsFailure && moved.Error!.Code == StorageErrors.UnsupportedCode && pinned)
-                return await CopyThenDeleteAsync(fromPath, toPath, version, tolerance, cancellationToken).ConfigureAwait(false);
+                return await CopyThenDeleteAsync(fromPath, toPath, version, cancellationToken).ConfigureAwait(false);
             if (moved.IsFailure && moved.Error!.Code == StorageErrors.ConflictCode) return Stale(fromPath);
             return moved;
         }
@@ -1015,7 +1126,7 @@ public static class StorageSync
         /// and checked unchanged after it streamed), created only where nothing is, and the original is then
         /// deleted only while it is still that version.
         /// </summary>
-        private async Task<Result> CopyThenDeleteAsync(string fromPath, string toPath, StorageItem version, TimeSpan tolerance, CancellationToken cancellationToken)
+        private async Task<Result> CopyThenDeleteAsync(string fromPath, string toPath, StorageItem version, CancellationToken cancellationToken)
         {
             var written = await StagedWriter.WriteAsync(
                 destination,
@@ -1042,7 +1153,7 @@ public static class StorageSync
                 await StagedWriter.DeleteAsync(destination, written.Content.StagingPath).ConfigureAwait(false);
                 return promoted.Error!.Code == StorageErrors.ConflictCode ? Stale(toPath) : promoted;
             }
-            var removed = await DeleteAsync(destination, fromPath, identity, tolerance, CancellationToken.None).ConfigureAwait(false);
+            var removed = await DeleteAsync(destination, fromPath, identity, CancellationToken.None).ConfigureAwait(false);
             if (removed.IsFailure)
                 return Result.Failure(StorageErrors.Conflict(
                     $"The conflict copy '{toPath}' was made, but '{fromPath}' changed or could not be removed, so it was kept: {removed.Error!.Message}",
@@ -1071,7 +1182,9 @@ public static class StorageSync
                 return Stale(fromPath);
             var target = await Current(to, toPath, cancellationToken).ConfigureAwait(false);
             if (target.IsFailure) return Result.Failure(target.Error!);
-            if (plannedTarget is null ? target.Value is not null : !plannedTarget.Matches(target.Value, tolerance))
+            // What a copy replaces must be exactly the version planned: a same-size edit within the time tolerance
+            // is still an edit (FTP listings keep minutes), and it is never overwritten.
+            if (plannedTarget is null ? target.Value is not null : !plannedTarget.Matches(target.Value, TimeSpan.Zero))
                 return Stale(toPath);
 
             var modified = StorageCompare.EffectiveModified(fromItem);
@@ -1122,7 +1235,7 @@ public static class StorageSync
             {
                 var again = await Current(to, toPath, cancellationToken).ConfigureAwait(false);
                 if (again.IsFailure) return await Abandon(Result.Failure(again.Error!)).ConfigureAwait(false);
-                if (!plannedTarget.Matches(again.Value, tolerance)) return await Abandon(Stale(toPath)).ConfigureAwait(false);
+                if (!plannedTarget.Matches(again.Value, TimeSpan.Zero)) return await Abandon(Stale(toPath)).ConfigureAwait(false);
                 if (plannedTarget.ETag is not null || plannedTarget.VersionId is not null)
                     condition = new StorageMutationCondition { ExpectedETag = plannedTarget.ETag, ExpectedVersionId = plannedTarget.VersionId };
             }
@@ -1152,6 +1265,25 @@ public static class StorageSync
             var total = staged.Bytes + staged.BytesResumed;
             var readIdentity = StorageSyncIdentity.Of(fromItem)! with { Sha256 = staged.Sha256 };
             var planWritten = new StorageSyncIdentity(total, timesSet || keepTimeInMetadata ? modified : null, null, null, staged.Sha256);
+            // The version written, read back: a read that keeps failing is retried, then the planned identity is
+            // recorded only when it has a time to tell a later edit by (size alone would take a same-size edit for
+            // ours); otherwise nothing is recorded, and the next run compares the two sides afresh.
+            async Task<StorageSyncIdentity?> ReadBackAsync()
+            {
+                Result<StorageItem?> result = default!;
+                for (var attempt = 1; attempt <= ReadBackAttempts; attempt++)
+                {
+                    result = await Current(to, toPath, CancellationToken.None).ConfigureAwait(false);
+                    if (result.IsSuccess || !StorageErrorInfo.IsTransient(result.Error) || attempt == ReadBackAttempts) break;
+                    await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt), CancellationToken.None).ConfigureAwait(false);
+                }
+                if (result.IsFailure) return planWritten.Modified is null ? null : planWritten;
+                if (result.Value is { ItemType: not StorageItemType.Directory } item && item.Size == total &&
+                    (!(timesSet || keepTimeInMetadata) || StorageCompare.EffectiveModified(item) is not { } now || (now - modified!.Value).Duration() <= tolerance))
+                    return StorageSyncIdentity.Of(item);
+                return null; // Replaced or removed right after the write: not ours to record.
+            }
+
             StorageSyncIdentity? wrote;
             if (options.Verify)
             {
@@ -1163,17 +1295,11 @@ public static class StorageSync
                         $"'{toPath}' was written but does not hold that content any more; another writer replaced it.",
                         string.Join(';', (confirmed.Error.Details ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries)
                             .Where(part => !part.StartsWith(StorageErrorInfo.DestinationStateKey + "=", StringComparison.Ordinal)))));
-                wrote = confirmed.IsSuccess ? StorageSyncIdentity.Of(confirmed.Value) : planWritten;
+                wrote = confirmed.IsSuccess ? StorageSyncIdentity.Of(confirmed.Value) : await ReadBackAsync().ConfigureAwait(false);
             }
             else
             {
-                var result = await Current(to, toPath, CancellationToken.None).ConfigureAwait(false);
-                if (result.IsFailure) wrote = planWritten;
-                else if (result.Value is { ItemType: not StorageItemType.Directory } item && item.Size == total &&
-                         (!(timesSet || keepTimeInMetadata) || StorageCompare.EffectiveModified(item) is not { } now || (now - modified!.Value).Duration() <= tolerance))
-                    wrote = StorageSyncIdentity.Of(item);
-                else
-                    wrote = null; // Replaced or removed right after the write: not ours to record.
+                wrote = await ReadBackAsync().ConfigureAwait(false);
             }
             if (wrote is not null)
                 Synced[relative] = towardDestination ? new StorageSyncBaselineEntry(readIdentity, wrote) : new StorageSyncBaselineEntry(wrote, readIdentity);
@@ -1181,11 +1307,12 @@ public static class StorageSync
         }
 
         /// <summary>
-        /// Deletes a file while it is the planned version, or a directory only while it is empty: anything that
-        /// appeared in it after the plan keeps it, and the step is reported stale. A path whose type changed since
-        /// the plan (a file where a folder was, or the other way round) is stale too.
+        /// Deletes a file while it is exactly the planned version (no time tolerance: a same-size edit within it is
+        /// still an edit), or a directory only while it is empty: anything that appeared in it after the plan keeps
+        /// it, and the step is reported stale. A path whose type changed since the plan (a file where a folder was, or
+        /// the other way round) is stale too.
         /// </summary>
-        private static async Task<Result> DeleteAsync(IStorageService storage, string path, StorageSyncIdentity? planned, TimeSpan tolerance, CancellationToken cancellationToken)
+        private static async Task<Result> DeleteAsync(IStorageService storage, string path, StorageSyncIdentity? planned, CancellationToken cancellationToken)
         {
             var read = await Current(storage, path, cancellationToken).ConfigureAwait(false);
             if (read.IsFailure) return Result.Failure(read.Error!);
@@ -1194,18 +1321,52 @@ public static class StorageSync
             if ((current.ItemType == StorageItemType.Directory) != plannedDirectory) return Stale(path);
             if (plannedDirectory)
             {
-                var listed = await storage.ListAsync(path, new StorageListOptions { PageSize = 1, IncludeInternal = true, IncludeHidden = true }, cancellationToken).ConfigureAwait(false);
-                if (listed.IsFailure) return Result.Failure(listed.Error!);
-                if (listed.Value!.Items.Count > 0) return Stale(path);
+                var emptied = await RemoveStaleStagingAsync(storage, path, cancellationToken).ConfigureAwait(false);
+                if (emptied.IsFailure) return Result.Failure(emptied.Error!);
+                if (!emptied.Value) return Stale(path);
                 return await storage.DeleteAsync(path, new StorageDeleteOptions { Recursive = false, IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
             }
-            if (!planned!.Matches(current, tolerance))
+            if (!planned!.Matches(current, TimeSpan.Zero))
                 return Stale(path);
             var condition = storage.Capabilities.Supports(StorageFeature.ConditionalDelete) && (planned.ETag is not null || planned.VersionId is not null)
                 ? new StorageMutationCondition { ExpectedETag = planned.ETag, ExpectedVersionId = planned.VersionId }
                 : null;
             var deleted = await storage.DeleteAsync(path, new StorageDeleteOptions { Recursive = false, IgnoreMissing = true, Condition = condition }, cancellationToken).ConfigureAwait(false);
             return deleted.IsFailure && condition is not null && deleted.Error!.Code == StorageErrors.ConflictCode ? Stale(path) : deleted;
+        }
+
+        /// <summary>
+        /// Whether a folder holds nothing but the library's own staging left by an interrupted transfer, removing
+        /// that staging when it is older than <see cref="StaleStagingAge"/>. A folder holding anything else, a
+        /// backup of a replaced file (possibly the only copy of that version), or staging a transfer may still be
+        /// writing, is not empty: false.
+        /// </summary>
+        private static async Task<Result<bool>> RemoveStaleStagingAsync(IStorageService storage, string path, CancellationToken cancellationToken)
+        {
+            var staging = new List<StorageItem>();
+            string? token = null;
+            do
+            {
+                var listed = await storage.ListAsync(path, new StorageListOptions { PageSize = 100, IncludeInternal = true, IncludeHidden = true, ContinuationToken = token }, cancellationToken).ConfigureAwait(false);
+                if (listed.IsFailure) return Result<bool>.Failure(listed.Error!);
+                foreach (var item in listed.Value!.Items)
+                {
+                    if (!Providers.StorageListFilter.IsInternal(item.Name) || item.ItemType != StorageItemType.File ||
+                        item.Name.Contains("backup", StringComparison.OrdinalIgnoreCase) ||
+                        item.LastModified is not { } modified || DateTimeOffset.UtcNow - modified < StaleStagingAge)
+                        return Result<bool>.Success(false);
+                    staging.Add(item);
+                }
+                token = listed.Value.ContinuationToken;
+            }
+            while (token is not null && staging.Count < 1000);
+            if (token is not null) return Result<bool>.Success(false);
+            foreach (var item in staging)
+            {
+                var removed = await storage.DeleteAsync(item.Path, new StorageDeleteOptions { Recursive = false, IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+                if (removed.IsFailure) return Result<bool>.Failure(removed.Error!);
+            }
+            return Result<bool>.Success(true);
         }
 
         /// <summary>The item at a path, or null when it is not there; any other failure to read it is a failure.</summary>
@@ -1226,6 +1387,15 @@ public static class StorageSync
 
     /// <summary>Details key marking a step skipped because its item changed after planning.</summary>
     private const string StaleKey = "stale";
+
+    /// <summary>
+    /// How old the library's staging left in a folder must be before a sync that deletes the folder removes it:
+    /// well above any one transfer, so a transfer still writing there is never disturbed.
+    /// </summary>
+    internal static readonly TimeSpan StaleStagingAge = TimeSpan.FromHours(24);
+
+    /// <summary>How often the version a copy wrote is read back before the step settles for what it knows.</summary>
+    private const int ReadBackAttempts = 3;
 
     // ---------------------------------------------------------------- baseline
 

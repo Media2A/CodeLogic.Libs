@@ -187,7 +187,11 @@ public sealed record StorageSyncOptions
     /// <summary>Gets where baselines are kept; required for three-way two-way syncs.</summary>
     [JsonIgnore]
     public IStorageSyncStateStore? StateStore { get; init; }
-    /// <summary>Gets the name this sync's baseline is stored under.</summary>
+    /// <summary>
+    /// Gets the name this sync's baseline is stored under. The baseline is bound to this name only, not to the
+    /// connections or directories: give each pair of directories its own name, since a baseline read against other
+    /// directories takes their differences for edits and deletions (the empty-side and delete limits still apply).
+    /// </summary>
     public string? SyncId { get; init; }
     /// <summary>Gets whether to only plan: nothing is changed and every action is returned as planned.</summary>
     public bool DryRun { get; init; }
@@ -218,7 +222,8 @@ public sealed record StorageSyncOptions
     public bool ContinueOnError { get; init; } = true;
     /// <summary>
     /// Gets whether a plan with blocked conflicts (<see cref="StorageSyncConflictPolicy.Block"/>) may still apply
-    /// its other steps. It is part of the plan's options digest, so a plan must be made with it to be applied with it.
+    /// its other steps (the conflicts themselves change nothing). It is an apply-time choice, not part of the plan's
+    /// options digest: a plan made without it can be shown, and its other steps applied with it.
     /// </summary>
     public bool ApplyWithConflicts { get; init; }
     /// <summary>Gets an optional progress sink; reports carry the current file.</summary>
@@ -243,7 +248,8 @@ public sealed record StorageSyncOptions
     /// <summary>
     /// A digest of every option that shapes what a plan does when applied — direction, deletes, conflicts,
     /// comparison and time tolerance, safety limits, verification — so a plan is applied only with the options
-    /// it was made (and approved) with. Concurrency, retries, stopping on error, and progress are left out.
+    /// it was made (and approved) with. What only changes how a run goes, not what it does, is left out:
+    /// concurrency (copies and hashing), retries, stopping on error, progress, and <see cref="ApplyWithConflicts"/>.
     /// </summary>
     internal string Fingerprint()
     {
@@ -256,14 +262,16 @@ public sealed record StorageSyncOptions
             SyncId,
             PreserveTimestamps,
             Verify,
-            Compare,
+            // How many files are hashed at once changes how fast a plan is made, not what it holds.
+            Compare = Compare with { HashConcurrency = FingerprintHashConcurrency },
             MaxDeletes,
             MaxDeletePercent,
-            AllowEmptySide,
-            ApplyWithConflicts
+            AllowEmptySide
         };
         return Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(shape, FingerprintJson)));
     }
+
+    private const int FingerprintHashConcurrency = 4;
 
     private static readonly JsonSerializerOptions FingerprintJson = new(JsonSerializerDefaults.Web)
     {
@@ -298,6 +306,12 @@ public sealed record StorageSyncAction
     public string? TargetPath { get; init; }
     /// <summary>Gets why a deletion is held back, when a safety rule applies.</summary>
     public string? WithheldReason { get; init; }
+    /// <summary>
+    /// Gets, for a copy of an item reached through a followed link (<see cref="StorageLinkHandling.Follow"/>), the
+    /// path on the connection copied from where its content is read: the link's target, or the item inside it.
+    /// Null for everything else.
+    /// </summary>
+    public string? ReadPath { get; init; }
 }
 
 /// <summary>A sync plan: every step, the versions they depend on, and a digest to approve it by.</summary>
@@ -314,7 +328,11 @@ public sealed record StorageSyncPlan
 
     /// <summary>Gets the plan format; plans without one (older libraries) are refused at apply.</summary>
     public int SchemaVersion { get; init; }
-    /// <summary>Gets the source connection's id; the plan applies only to the same connections.</summary>
+    /// <summary>
+    /// Gets the source connection's id; the plan applies only to connections with the same ids. The id is the only
+    /// connection identity a plan records: a connection registered again under the same id is taken for the same
+    /// store, and one registered under a new id refuses the plan (plan again). Keep connection ids stable.
+    /// </summary>
     public string? SourceConnectionId { get; init; }
     /// <summary>Gets the destination connection's id.</summary>
     public string? DestinationConnectionId { get; init; }
@@ -344,6 +362,7 @@ public sealed record StorageSyncPlan
     /// a skipped link, under a file/folder clash, or a folder kept by excluded items). The baseline saved after the
     /// run records these and what the run's copies wrote — never what happens to be there afterwards, so an edit
     /// made during the run is still seen next time, and a deletion made while a path was left out is not undone.
+    /// Entries below a folder the filters leave out are dropped once neither side has that folder any more.
     /// </summary>
     public IReadOnlyDictionary<string, StorageSyncBaselineEntry> Agreed { get; init; } = new Dictionary<string, StorageSyncBaselineEntry>();
     /// <summary>Gets notes for a person, such as why deletions are withheld.</summary>
