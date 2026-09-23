@@ -83,7 +83,8 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
     /// Whether names under <paramref name="root"/> compare without regard to case. It depends on the file system and
     /// the mount, not the operating system (APFS and ext4 volumes can be either, a Windows folder can be made
     /// case-sensitive, a Linux mount of NTFS or SMB is not), so it is probed: an entry of the root, named with the
-    /// case of its letters swapped, either resolves or not. A root with no such entry, or one that cannot be read,
+    /// case of its ASCII letters swapped (see <see cref="SwapCase"/>), either resolves or not. A root with no such
+    /// entry, or one that cannot be read,
     /// gets the operating system's default (Windows and macOS insensitive, others sensitive). Subfolders are assumed
     /// to behave like the root.
     /// </summary>
@@ -110,11 +111,20 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         return OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
     }
 
-    private static string SwapCase(string name) =>
+    /// <summary>
+    /// The name with the case of its ASCII letters swapped. Other letters are left alone: file systems fold case by
+    /// their own tables, which differ from .NET's invariant mapping outside ASCII (NTFS does not map Turkish dotless
+    /// <c>ı</c> to <c>I</c>, nor Georgian as .NET does), so only ASCII tells how the file system compares names. A name
+    /// without ASCII letters comes back unchanged and is skipped by the probe.
+    /// </summary>
+    internal static string SwapCase(string name) =>
         string.Create(name.Length, name, static (span, source) =>
         {
             for (var i = 0; i < source.Length; i++)
-                span[i] = char.IsUpper(source[i]) ? char.ToLowerInvariant(source[i]) : char.ToUpperInvariant(source[i]);
+            {
+                var c = source[i];
+                span[i] = char.IsAsciiLetterUpper(c) ? (char)(c + 32) : char.IsAsciiLetterLower(c) ? (char)(c - 32) : c;
+            }
         });
 
     /// <inheritdoc />
@@ -859,11 +869,13 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
             return Result<TransferEndpoints>.Failure(relationship.Error!);
         if (options.ExpectedSourceETag is { } expected)
         {
-            // Compared immediately before the copy or move: a local file has no server to enforce it.
+            // Compared immediately before the copy or move: a local file has no server to enforce it. The local ETag is
+            // weak (see SyntheticETag), so this is a weak comparison: a mismatch proves the file changed, a match is the
+            // best a local file can say and does not prove the content is the same.
             var current = CreateItem(source.Value.StoragePath, source.Value.FullPath);
             if (current is null)
                 return Result<TransferEndpoints>.Failure(StorageErrors.NotFound($"Storage item '{source.Value.StoragePath}' was not found."));
-            if (!StagedWriter.SameETag(expected, current.ETag))
+            if (!StorageETags.WeakEquals(expected, current.ETag))
                 return Result<TransferEndpoints>.Failure(StorageErrors.Conflict(
                     $"The source '{source.Value.StoragePath}' changed since it was read.",
                     $"expectedETag={expected};actualETag={current.ETag}"));
