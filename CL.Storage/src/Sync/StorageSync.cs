@@ -1133,9 +1133,15 @@ public static class StorageSync
             }
 
             // From here the destination may be committed: nothing is cancelled half-way, and nothing rolled back.
-            var (promoted, _) = await StagedWriter.PromoteAsync(to, staged.StagingPath, toPath, overwrite: plannedTarget is not null, condition, createParents: true, CancellationToken.None).ConfigureAwait(false);
+            var promotion = await StagedWriter.PromoteCoreAsync(to, staged.StagingPath, toPath, overwrite: plannedTarget is not null, condition, createParents: true, CancellationToken.None).ConfigureAwait(false);
+            var promoted = promotion.Result;
             if (promoted.IsFailure && !StorageErrorInfo.DestinationCommitted(promoted.Error))
                 return await Abandon(promoted.Error!.Code == StorageErrors.ConflictCode ? Stale(toPath) : promoted).ConfigureAwait(false);
+            if (promoted.IsSuccess && promotion.LeftBehind.Count > 0)
+                // Committed, but the provider left its own backup or staging copy: applied, with the leftover reported.
+                promoted = Result.Failure(StorageErrors.PartialFailure(
+                    $"'{toPath}' was written, but the provider left internal objects behind.",
+                    string.Join(';', [$"{StorageErrorInfo.DestinationStateKey}=complete", .. promotion.LeftBehind.Select(path => $"{StorageErrorInfo.LeftBehindKey}={path}")])));
 
             var timesSet = false;
             if (options.PreserveTimestamps && modified is not null && to.Capabilities.Supports(StorageFeature.SetTimestamps))
@@ -1152,8 +1158,11 @@ public static class StorageSync
                 var confirmed = await StagedWriter.ConfirmPromotedAsync(to, toPath, staged, CancellationToken.None).ConfigureAwait(false);
                 if (confirmed.IsFailure && confirmed.Error!.Code == StorageErrors.ConflictCode)
                     // Committed, and then replaced: the next run sees the other writer's version.
+                    // Not reported as committed: the step failed, as the content it wrote is no longer there.
                     return Result.Failure(StorageErrors.Conflict(
-                        $"'{toPath}' was written but does not hold that content any more; another writer replaced it.", confirmed.Error.Details ?? string.Empty));
+                        $"'{toPath}' was written but does not hold that content any more; another writer replaced it.",
+                        string.Join(';', (confirmed.Error.Details ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries)
+                            .Where(part => !part.StartsWith(StorageErrorInfo.DestinationStateKey + "=", StringComparison.Ordinal)))));
                 wrote = confirmed.IsSuccess ? StorageSyncIdentity.Of(confirmed.Value) : planWritten;
             }
             else
