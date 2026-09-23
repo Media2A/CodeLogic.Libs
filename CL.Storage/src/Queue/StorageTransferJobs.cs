@@ -217,8 +217,9 @@ public sealed record StorageTransferJobRecord
     /// <summary>Gets the record format; a store that serializes records should keep it.</summary>
     public int SchemaVersion { get; init; } = CurrentSchemaVersion;
     /// <summary>
-    /// Gets the store's revision of this record: 1 when added, one more with every save. A save carrying an
-    /// older revision is refused, so a stale copy never overwrites a newer state.
+    /// Gets the store's revision of this record: 1 when added (above any revision of an earlier life of the id),
+    /// one more with every save. A save carrying an older revision is refused, so a stale copy never overwrites a
+    /// newer state.
     /// </summary>
     public long Revision { get; init; }
     /// <summary>Gets the work.</summary>

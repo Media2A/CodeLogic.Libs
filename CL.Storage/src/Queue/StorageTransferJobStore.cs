@@ -8,9 +8,12 @@ namespace CL.Storage.Queue;
 /// <para>Each method must be atomic for its job. Three rules keep concurrent queues from overwriting each other:</para>
 /// <list type="bullet">
 /// <item><b>Revisions.</b> Every stored record has a <see cref="StorageTransferJobRecord.Revision"/>.
-/// <see cref="AddAsync"/> stores revision 1, and every successful <see cref="SaveAsync"/> stores the next one.
-/// A save or remove whose record does not carry the current revision is refused: the caller worked from a stale
-/// copy. Claims, renewals, and releases do not change the revision.</item>
+/// <see cref="AddAsync"/> stores revision 1 for an id never stored before, and every successful
+/// <see cref="SaveAsync"/> stores the next one. A save or remove whose record does not carry the current revision
+/// is refused: the caller worked from a stale copy. Claims, renewals, and releases do not change the revision.
+/// Like fencing tokens, revisions do not restart when an id is removed and added again: the new record starts
+/// above every revision the id had before, so a copy from its earlier life can neither save over nor remove
+/// it. A store keeps the highest revision (and fencing token) per removed id for that.</item>
 /// <item><b>Leases.</b> The store owns <see cref="StorageTransferJobRecord.LeaseOwner"/>,
 /// <see cref="StorageTransferJobRecord.LeaseExpiresAt"/>, and <see cref="StorageTransferJobRecord.FencingToken"/>;
 /// the values in a record passed to <see cref="SaveAsync"/> are ignored. <see cref="TryClaimAsync"/> succeeds
@@ -28,14 +31,22 @@ namespace CL.Storage.Queue;
 /// clock therefore costs a refused claim or an early stop, never two workers holding one job.</para>
 /// <para><b>Schema.</b> Records carry a <see cref="StorageTransferJobRecord.SchemaVersion"/> and their spec a
 /// <see cref="StorageTransferJobSpec.SchemaVersion"/>; a store that serializes them must keep both (or use
-/// <see cref="StorageTransferJobRecord.ToJson"/>). A queue leaves records written by a newer schema alone.</para>
+/// <see cref="StorageTransferJobRecord.ToJson"/>). A queue leaves records written by a newer schema alone. A
+/// store that keeps records as JSON must skip a row it cannot read (<see cref="StorageTransferJobRecord.FromJson"/>
+/// throws for a newer schema) in <see cref="LoadAsync"/> instead of failing the whole load, and may answer null
+/// for it from <see cref="GetAsync"/>, which takes the job out of this queue's view without changing it.</para>
+/// <para><b>Columns win.</b> A store that keeps the revision and the lease fields
+/// (<see cref="StorageTransferJobRecord.Revision"/>, <see cref="StorageTransferJobRecord.LeaseOwner"/>,
+/// <see cref="StorageTransferJobRecord.LeaseExpiresAt"/>, <see cref="StorageTransferJobRecord.FencingToken"/>) in
+/// columns of their own, next to the record's JSON, must return the columns' values: the copies inside the JSON
+/// are only as new as the last save, since claims, renewals, and releases change the columns alone.</para>
 /// </remarks>
 public interface IStorageTransferJobStore
 {
     /// <summary>Returns every stored job.</summary>
     Task<IReadOnlyList<StorageTransferJobRecord>> LoadAsync(CancellationToken cancellationToken);
 
-    /// <summary>Adds a job at revision 1.</summary>
+    /// <summary>Adds a job at revision 1, or above every revision the id had before when it was removed and is added again.</summary>
     /// <returns>The stored record, or null when a job with the same id already exists.</returns>
     Task<StorageTransferJobRecord?> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken);
 
@@ -84,6 +95,8 @@ public sealed class InMemoryStorageTransferJobStore : IStorageTransferJobStore
     private readonly Dictionary<string, StorageTransferJobRecord> _jobs = new(StringComparer.Ordinal);
     // The highest fencing token issued per id; kept after a removal so a re-added id never reuses a token.
     private readonly Dictionary<string, long> _fences = new(StringComparer.Ordinal);
+    // The last revision of each removed id, so a re-added id continues above it.
+    private readonly Dictionary<string, long> _revisions = new(StringComparer.Ordinal);
     private readonly TimeProvider _time;
 
     /// <summary>Creates an empty store.</summary>
@@ -104,7 +117,7 @@ public sealed class InMemoryStorageTransferJobStore : IStorageTransferJobStore
     {
         lock (_gate)
         {
-            var stored = record with { Revision = 1, LeaseOwner = null, LeaseExpiresAt = null, FencingToken = _fences.GetValueOrDefault(record.Id) };
+            var stored = record with { Revision = _revisions.GetValueOrDefault(record.Id) + 1, LeaseOwner = null, LeaseExpiresAt = null, FencingToken = _fences.GetValueOrDefault(record.Id) };
             return Task.FromResult(_jobs.TryAdd(record.Id, stored) ? stored : null);
         }
     }
@@ -178,6 +191,7 @@ public sealed class InMemoryStorageTransferJobStore : IStorageTransferJobStore
             if (!_jobs.TryGetValue(jobId, out var current)) return Task.FromResult(true);
             if (current.Revision != expectedRevision || !MayChange(current, lease)) return Task.FromResult(false);
             _jobs.Remove(jobId);
+            _revisions[jobId] = current.Revision;
             return Task.FromResult(true);
         }
     }
