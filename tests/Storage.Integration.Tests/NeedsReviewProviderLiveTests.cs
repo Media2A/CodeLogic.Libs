@@ -109,4 +109,44 @@ public sealed class NeedsReviewProviderLiveTests
                 await storage.DeleteAsync(name, new StorageDeleteOptions { IgnoreMissing = true });
         }
     }
+
+    // needs-review A2 / B23 (contract C2) on Azure Blob and Google Cloud Storage
+    [AzureFact]
+    public async Task An_Azure_copy_pinned_to_an_old_ETag_is_refused_and_a_move_keeps_nothing_behind() =>
+        await PinnedCopyAndMoveAsync(await CloudEmulators.CreateAsync(CloudEmulators.Azure()));
+
+    // needs-review A2 / B23 (contract C2)
+    [GcsFact]
+    public async Task A_GCS_copy_pinned_to_an_old_ETag_is_refused_and_a_move_keeps_nothing_behind() =>
+        await PinnedCopyAndMoveAsync(await CloudEmulators.CreateAsync(CloudEmulators.Gcs()));
+
+    private static async Task PinnedCopyAndMoveAsync(IStorageBackend backend)
+    {
+        await using var storage = backend;
+        var dir = $"pin-{Guid.NewGuid():N}";
+        var first = (await storage.UploadBytesAsync($"{dir}/a.txt", Encoding.UTF8.GetBytes("one"))).Value!;
+        var second = (await storage.UploadBytesAsync($"{dir}/a.txt", Encoding.UTF8.GetBytes("two"))).Value!;
+        await storage.UploadBytesAsync($"{dir}/other.txt", Encoding.UTF8.GetBytes("other"));
+        try
+        {
+            var stale = await storage.CopyAsync($"{dir}/a.txt", $"{dir}/b.txt", new StorageTransferOptions { ExpectedSourceETag = first.ETag });
+            var wrongDestination = await storage.CopyAsync($"{dir}/a.txt", $"{dir}/other.txt", new StorageTransferOptions
+            {
+                DestinationCondition = new StorageMutationCondition { ExpectedETag = first.ETag }
+            });
+            var moved = await storage.MoveAsync($"{dir}/a.txt", $"{dir}/c.txt", new StorageTransferOptions { ExpectedSourceETag = second.ETag });
+
+            Assert.Equal(StorageErrors.ConflictCode, stale.Error?.Code);
+            Assert.False((await storage.ExistsAsync($"{dir}/b.txt")).Value);
+            Assert.Equal(StorageErrors.ConflictCode, wrongDestination.Error?.Code);
+            Assert.Equal("other", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/other.txt")).Value!));
+            Assert.True(moved.IsSuccess, moved.Error?.ToString());
+            Assert.False((await storage.ExistsAsync($"{dir}/a.txt")).Value);
+            Assert.Equal("two", Encoding.UTF8.GetString((await storage.DownloadBytesAsync($"{dir}/c.txt")).Value!));
+        }
+        finally
+        {
+            await storage.DeleteAsync(dir, new StorageDeleteOptions { Recursive = true, IgnoreMissing = true });
+        }
+    }
 }

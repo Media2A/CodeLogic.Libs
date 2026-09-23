@@ -484,6 +484,12 @@ public sealed class GoogleCloudStorageBackend :
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// An object is copied on the server pinned to the generation it read (<c>ifSourceGenerationMatch</c>, and
+    /// <see cref="StorageTransferOptions.SourceVersionId"/> as the source generation when set); a create-only copy
+    /// carries <c>ifGenerationMatch=0</c> and a <see cref="StorageTransferOptions.DestinationCondition"/> the
+    /// destination's generation.
+    /// </remarks>
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -495,45 +501,146 @@ public sealed class GoogleCloudStorageBackend :
         if (destination.IsFailure) return Result.Failure(destination.Error!);
         var relationship = StorageTransferPath.ValidateDistinct(source.Value!, destination.Value!);
         if (relationship.IsFailure) return relationship;
-        try
+        var info = await SourceInfoAsync(source.Value!, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
+        if (info.IsFailure) return Result.Failure(info.Error!);
+        if (info.Value!.ItemType == StorageItemType.Directory)
         {
-            var info = await GetInfoAsync(source.Value!, cancellationToken).ConfigureAwait(false);
-            if (info.IsFailure) return Result.Failure(info.Error!);
-            if (info.Value!.ItemType == StorageItemType.Directory)
-            {
-                relationship = StorageTransferPath.ValidateDirectoryDestination(source.Value!, destination.Value!);
-                if (relationship.IsFailure) return relationship;
-                var relayed = await StorageTransferCoordinator.CopyAsync(
-                    this,
-                    source.Value!,
-                    this,
-                    destination.Value!,
-                    options,
-                    cancellationToken).ConfigureAwait(false);
-                return relayed.IsSuccess ? Result.Success() : Result.Failure(relayed.Error!);
-            }
-            await CopyObjectAsync(ToKey(source.Value!), ToKey(destination.Value!), options.Overwrite, cancellationToken).ConfigureAwait(false);
-            return Result.Success();
+            relationship = StorageTransferPath.ValidateDirectoryDestination(source.Value!, destination.Value!);
+            if (relationship.IsFailure) return relationship;
+            var relayed = await StorageTransferCoordinator.CopyAsync(
+                this,
+                source.Value!,
+                this,
+                destination.Value!,
+                options,
+                cancellationToken).ConfigureAwait(false);
+            return relayed.IsSuccess ? Result.Success() : Result.Failure(relayed.Error!);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (GoogleApiException error) when (!options.Overwrite && error.HttpStatusCode is HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed)
-        {
-            return Result.Failure(StorageErrors.Conflict("The Google Cloud destination already exists."));
-        }
-        catch (Exception error) { return Result.Failure(Map(error, "Copy Google Cloud object")); }
+        return await CopyFileAsync(source.Value!, destination.Value!, info.Value, options, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// An object is copied as <see cref="CopyAsync"/> does, then deleted only while it is still the generation that
+    /// was copied. Once the copy committed, a failure to delete the source returns <c>storage.partial_failure</c> with
+    /// <c>destinationState=complete</c> and <c>leftBehind</c> naming the source, and cancellation no longer applies.
+    /// A directory is copied through the relay and each copied object deleted under the identity it was listed with.
+    /// </remarks>
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
-        var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
+        options ??= new StorageTransferOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
+        var source = NormalizeRequired(sourcePath);
+        if (source.IsFailure) return Result.Failure(source.Error!);
+        var destination = NormalizeRequired(destinationPath);
+        if (destination.IsFailure) return Result.Failure(destination.Error!);
+        var relationship = StorageTransferPath.ValidateDistinct(source.Value!, destination.Value!);
+        if (relationship.IsFailure) return relationship;
+        var info = await SourceInfoAsync(source.Value!, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
+        if (info.IsFailure) return Result.Failure(info.Error!);
+        if (info.Value!.ItemType == StorageItemType.Directory)
+        {
+            relationship = StorageTransferPath.ValidateDirectoryDestination(source.Value!, destination.Value!);
+            if (relationship.IsFailure) return relationship;
+            return await ObjectStoreMoves.MoveDirectoryAsync(this, source.Value!, destination.Value!, options, cancellationToken).ConfigureAwait(false);
+        }
+        var copied = await CopyFileAsync(source.Value!, destination.Value!, info.Value, options, cancellationToken).ConfigureAwait(false);
         if (copied.IsFailure) return copied;
-        var deleted = await DeleteAsync(sourcePath, new StorageDeleteOptions { Recursive = true }, cancellationToken).ConfigureAwait(false);
-        return deleted.IsSuccess
-            ? Result.Success()
-            : Result.Failure(StorageErrors.PartialFailure(
-                "The Google Cloud destination completed, but the source could not be deleted.",
-                $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+        // Committed: the source goes only while it is the generation that was copied, and a cancel no longer applies.
+        try
+        {
+            await _client.DeleteObjectAsync(
+                _bucket,
+                ToKey(source.Value!),
+                new DeleteObjectOptions { IfGenerationMatch = ParseGeneration(info.Value.VersionId).Value },
+                CancellationToken.None).ConfigureAwait(false);
+            return Result.Success();
+        }
+        catch (GoogleApiException error) when (error.HttpStatusCode == HttpStatusCode.NotFound)
+        {
+            return Result.Success();
+        }
+        catch (GoogleApiException error) when (error.HttpStatusCode == HttpStatusCode.PreconditionFailed)
+        {
+            return Result.Failure(ObjectStoreMoves.SourceKept("Google Cloud", source.Value!,
+                StorageErrors.Conflict("The Google Cloud source changed after it was copied, so it was not deleted.")));
+        }
+        catch (Exception error)
+        {
+            return Result.Failure(ObjectStoreMoves.SourceKept("Google Cloud", source.Value!, Map(error, "Delete moved Google Cloud object")));
+        }
+    }
+
+    /// <summary>A copy or move source: the object (at generation <paramref name="versionId"/> when set), or a directory.</summary>
+    private async Task<Result<StorageItem>> SourceInfoAsync(string path, string? versionId, CancellationToken cancellationToken)
+    {
+        if (versionId is null)
+            return await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        var generation = ParseGeneration(versionId);
+        if (generation.IsFailure) return Result<StorageItem>.Failure(generation.Error!);
+        try
+        {
+            var item = await _client.GetObjectAsync(_bucket, ToKey(path), new GetObjectOptions { Generation = generation.Value }, cancellationToken).ConfigureAwait(false);
+            return Result<StorageItem>.Success(ToItem(path, item));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Google Cloud object generation")); }
+    }
+
+    /// <summary>Copies one object on the server, pinned to the generation <paramref name="source"/> describes.</summary>
+    private async Task<Result> CopyFileAsync(string sourcePath, string destinationPath, StorageItem source, StorageTransferOptions options, CancellationToken cancellationToken)
+    {
+        if (options.ExpectedSourceETag is { } expected && !StagedWriter.SameETag(expected, source.ETag))
+            return Result.Failure(StorageErrors.Conflict(
+                $"The Google Cloud source '{sourcePath}' changed since it was read.",
+                $"expectedETag={expected.Trim('"')};actualETag={source.ETag}"));
+        var sourceGeneration = ParseGeneration(source.VersionId);
+        if (sourceGeneration.IsFailure) return Result.Failure(sourceGeneration.Error!);
+        try
+        {
+            long? destinationGeneration = null;
+            if (!options.Overwrite)
+            {
+                destinationGeneration = 0;
+            }
+            else if (options.DestinationCondition is { IsEmpty: false } condition)
+            {
+                var current = await GetInfoAsync(destinationPath, cancellationToken).ConfigureAwait(false);
+                if (current.IsFailure)
+                    return Result.Failure(current.Error!.Code == StorageErrors.NotFoundCode
+                        ? StorageErrors.Conflict("The Google Cloud destination no longer exists for the requested condition.")
+                        : current.Error!);
+                var check = ValidateCurrentCondition(current.Value!, condition, "Google Cloud object");
+                if (check.IsFailure) return check;
+                var generation = ParseGeneration(condition.ExpectedVersionId ?? current.Value!.VersionId);
+                if (generation.IsFailure) return Result.Failure(generation.Error!);
+                destinationGeneration = generation.Value;
+            }
+            await _client.CopyObjectAsync(
+                _bucket,
+                ToKey(sourcePath),
+                _bucket,
+                ToKey(destinationPath),
+                new CopyObjectOptions
+                {
+                    SourceGeneration = options.SourceVersionId is null ? null : sourceGeneration.Value,
+                    IfSourceGenerationMatch = sourceGeneration.Value,
+                    IfGenerationMatch = destinationGeneration
+                },
+                cancellationToken).ConfigureAwait(false);
+            return Result.Success();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (GoogleApiException error) when (error.HttpStatusCode is HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed)
+        {
+            return Result.Failure(StorageErrors.Conflict(
+                !options.Overwrite
+                    ? "The Google Cloud destination already exists, or the source changed since it was read."
+                    : "The Google Cloud source changed since it was read, or the destination no longer matches its condition.",
+                ProviderErrorMapper.Details(StorageErrorInfo.HttpStatusKey, ((int)error.HttpStatusCode).ToString(CultureInfo.InvariantCulture))));
+        }
+        catch (Exception error) { return Result.Failure(Map(error, "Copy Google Cloud object")); }
     }
 
     /// <inheritdoc />
@@ -801,17 +908,6 @@ public sealed class GoogleCloudStorageBackend :
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Google Cloud directory info")); }
-    }
-
-    private async Task CopyObjectAsync(string sourceName, string destinationName, bool overwrite, CancellationToken cancellationToken)
-    {
-        await _client.CopyObjectAsync(
-            _bucket,
-            sourceName,
-            _bucket,
-            destinationName,
-            new CopyObjectOptions { IfGenerationMatch = overwrite ? null : 0 },
-            cancellationToken).ConfigureAwait(false);
     }
 
     private static string EncodeContinuationToken(GcsContinuationToken token) =>
