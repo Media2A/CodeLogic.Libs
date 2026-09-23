@@ -99,17 +99,26 @@ internal static class StagedWriter
         long offset = 0;
         using var hash = verify ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
         if (request.Resumable)
-        {
             offset = await ResumableOffsetAsync(destination, staging, request.ExpectedLength, cancellationToken).ConfigureAwait(false);
-            if (offset > 0 && hash is not null && !await SeedHashAsync(destination, staging, offset, hash, cancellationToken).ConfigureAwait(false))
+
+        Result<Stream> opened;
+        if (offset > 0 && hash is not null)
+        {
+            // Verification must not take the staged prefix on trust: the source's own first bytes are read and
+            // hashed, and must match what is staged, before only the rest is appended.
+            opened = await OpenVerifiedTailAsync(destination, staging, offset, hash, open, cancellationToken).ConfigureAwait(false);
+            if (opened.IsSuccess && opened.Value is null)
             {
                 await DeleteAsync(destination, staging).ConfigureAwait(false);
                 offset = 0;
                 hash.GetHashAndReset();
+                opened = await open(0, cancellationToken).ConfigureAwait(false);
             }
         }
-
-        var opened = await open(offset, cancellationToken).ConfigureAwait(false);
+        else
+        {
+            opened = await open(offset, cancellationToken).ConfigureAwait(false);
+        }
         if (opened.IsFailure)
             return await FailAsync(destination, request, staging, opened.Error!, contentIsWrong: false).ConfigureAwait(false);
 
@@ -315,23 +324,54 @@ internal static class StagedWriter
         return 0;
     }
 
-    /// <summary>Hashes the already-staged prefix so verification covers the whole resumed file.</summary>
-    private static async Task<bool> SeedHashAsync(IStorageService destination, string staging, long length, IncrementalHash hash, CancellationToken cancellationToken)
+    /// <summary>
+    /// Opens the source from the start, hashes its first <paramref name="length"/> bytes into
+    /// <paramref name="hash"/>, and checks them against the staged prefix. Returns the source positioned at
+    /// <paramref name="length"/>, or a null stream when the prefix does not match (or cannot be read), in
+    /// which case the caller starts over.
+    /// </summary>
+    private static async Task<Result<Stream>> OpenVerifiedTailAsync(
+        IStorageService destination,
+        string staging,
+        long length,
+        IncrementalHash hash,
+        StagedSourceOpener open,
+        CancellationToken cancellationToken)
     {
+        using var stagedHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var download = await destination.DownloadAsync(staging, new StorageDownloadOptions { Length = length }, cancellationToken).ConfigureAwait(false);
-        if (download.IsFailure) return false;
-        await using var stream = download.Value!;
+        if (download.IsFailure) return Result<Stream>.Success(null!);
+        await using (var stagedStream = download.Value!)
+        {
+            if (await HashAsync(stagedStream, stagedHash, length, cancellationToken).ConfigureAwait(false) != length)
+                return Result<Stream>.Success(null!);
+        }
+
+        var opened = await open(0, cancellationToken).ConfigureAwait(false);
+        if (opened.IsFailure) return opened;
+        var source = opened.Value!;
+        if (await HashAsync(source, hash, length, cancellationToken).ConfigureAwait(false) == length &&
+            hash.GetCurrentHash().AsSpan().SequenceEqual(stagedHash.GetHashAndReset()))
+            return Result<Stream>.Success(source);
+        await source.DisposeAsync().ConfigureAwait(false);
+        return Result<Stream>.Success(null!);
+    }
+
+    /// <summary>Hashes up to <paramref name="length"/> bytes of a stream and returns how many there were.</summary>
+    private static async Task<long> HashAsync(Stream stream, IncrementalHash hash, long length, CancellationToken cancellationToken)
+    {
         var buffer = ArrayPool<byte>.Shared.Rent(SegmentSize);
         try
         {
             long read = 0;
-            int count;
-            while ((count = await stream.ReadAsync(buffer.AsMemory(0, SegmentSize), cancellationToken).ConfigureAwait(false)) > 0)
+            while (read < length)
             {
+                var count = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(SegmentSize, length - read)), cancellationToken).ConfigureAwait(false);
+                if (count == 0) break;
                 hash.AppendData(buffer, 0, count);
                 read += count;
             }
-            return read == length;
+            return read;
         }
         finally
         {

@@ -122,10 +122,15 @@ internal static class StorageTransferPipeline
         {
             if (!source.CanSeek)
                 return Result<StorageItem>.Failure(StorageErrors.Unsupported("Resuming an upload needs a seekable source stream."));
+            // Staged bytes are reused only for the same source; a length alone would let a different stream
+            // of the same size continue an old prefix.
+            if (options.SourceIdentity is null && options.SourceLastModified is null)
+                return Result<StorageItem>.Failure(StorageErrors.InvalidContent(
+                    "Resuming an upload needs SourceIdentity or SourceLastModified to identify the source."));
             overwrite = true;
             var existing = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
             if (existing.IsSuccess && existing.Value!.ItemType == StorageItemType.File && existing.Value.Size == remaining &&
-                options.ExpectedSha256 is null && !options.Verify)
+                await HoldsContentAsync(destination, path, source, start, cancellationToken).ConfigureAwait(false))
                 return Result<StorageItem>.Success(existing.Value);
         }
         if (!overwrite)
@@ -149,7 +154,7 @@ internal static class StorageTransferPipeline
                 ExpectedLength = options.ExpectedLength ?? (resume ? remaining : null),
                 Verify = options.Verify,
                 ExpectedSha256 = options.ExpectedSha256,
-                ResumeKey = resume ? StagedWriter.SourceKey(null, remaining, options.SourceLastModified, null, null) : null
+                ResumeKey = resume ? StagedWriter.SourceKey(options.SourceIdentity, remaining, options.SourceLastModified, null, null) : null
             },
             (offset, _) =>
             {
@@ -170,6 +175,20 @@ internal static class StorageTransferPipeline
             return Result<StorageItem>.Failure(promoted.Error!);
         }
         return await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Whether the destination already holds exactly the source's content: its SHA-256 (the server's, or else
+    /// read back) equals the source's. Size alone is not trusted.
+    /// </summary>
+    private static async Task<bool> HoldsContentAsync(IStorageService destination, string path, Stream source, long start, CancellationToken cancellationToken)
+    {
+        var server = await destination.ComputeChecksumAsync(path, StorageChecksumAlgorithm.Sha256, mode: StorageChecksumMode.PreferServer, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (server.IsFailure) return false;
+        source.Position = start;
+        var local = await System.Security.Cryptography.SHA256.HashDataAsync(new NonClosingStream(source), cancellationToken).ConfigureAwait(false);
+        source.Position = start;
+        return string.Equals(Convert.ToHexStringLower(local), server.Value!.HexValue, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Hands a caller's stream to a reader that disposes what it is given.</summary>

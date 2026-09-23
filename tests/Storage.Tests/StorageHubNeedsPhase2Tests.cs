@@ -175,7 +175,8 @@ public sealed class GuaranteedTransferTests
 
         Assert.True(second.IsSuccess, second.Error?.ToString());
         Assert.Equal(first.ResumeToken.BytesStaged, second.BytesResumed);
-        Assert.Equal(first.ResumeToken.BytesStaged, offsets[^1]);
+        // Verify reads the staged part back from the source to check it; only its upload is saved.
+        Assert.Equal(0, offsets[^1]);
         Assert.Equal(Sha(content), second.Sha256);
         Assert.Equal(content, (await library.GetStorage("B").DownloadBytesAsync("big.bin")).Value!);
         Assert.Equal(["big.bin"], await ListAllAsync(library.GetStorage("B")));

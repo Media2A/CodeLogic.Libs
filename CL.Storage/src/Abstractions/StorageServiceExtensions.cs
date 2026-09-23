@@ -84,6 +84,8 @@ public static class StorageServiceExtensions
             // Newer-only conflict policies compare against the local file's modification time.
             if (options?.ConflictPolicy is not null && options.SourceLastModified is null)
                 options = options with { SourceLastModified = new DateTimeOffset(File.GetLastWriteTimeUtc(fullPath)) };
+            if (options?.ConflictPolicy == StorageConflictPolicy.Resume && options.SourceIdentity is null)
+                options = options with { SourceIdentity = fullPath };
             return await storage.UploadAsync(destinationPath, source, options, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }

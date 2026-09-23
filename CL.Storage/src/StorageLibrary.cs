@@ -1106,7 +1106,10 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     return FailedTransferReport(report, copied.Error!, state, move);
                 summary = copied.Value!;
                 report = SummaryReport(report, summary, move);
-                if (summary.SkippedFiles > 0 && summary.Files == 0 && summary.SourceType == StorageItemType.File)
+                // A resumed move whose destination already holds the content (for example after a crash between
+                // commit and source deletion) still has to delete its source; any other skip leaves it.
+                var alreadyMoved = move && summary.SkipReason == StorageSkipReason.AlreadyComplete;
+                if (summary.SkippedFiles > 0 && summary.Files == 0 && summary.SourceType == StorageItemType.File && !alreadyMoved)
                     return report with { Outcome = StorageTransferOutcome.Skipped, SourceDeleted = move ? false : null };
 
                 if (move && options.PhaseChanged is { } deleting)
@@ -1236,6 +1239,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 if (current.IsFailure)
                     return Result.Failure(current.Error!);
                 if (current.Value!.Size != copied.Size || current.Value.LastModified != copied.LastModified ||
+                    (copied.VersionId is not null && copied.VersionId != current.Value.VersionId) ||
                     (copied.ETag is not null && !StagedWriter.SameETag(copied.ETag, current.Value.ETag)))
                     return Result.Failure(StorageErrors.Conflict($"The source '{path}' changed after it was copied, so it was not deleted."));
             }

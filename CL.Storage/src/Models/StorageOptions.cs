@@ -52,6 +52,13 @@ public sealed record StorageUploadOptions
     public StorageConflictPolicy? ConflictPolicy { get; init; }
     /// <summary>Gets the source's modification time, compared by <see cref="StorageConflictPolicy.OverwriteIfNewer"/>.</summary>
     public DateTimeOffset? SourceLastModified { get; init; }
+    /// <summary>
+    /// Gets a caller-chosen identity for the source content, such as a local path or a content id. With
+    /// <see cref="StorageConflictPolicy.Resume"/> it keys the staged bytes together with the length and
+    /// <see cref="SourceLastModified"/>, so only the same source continues them; resume needs this or
+    /// <see cref="SourceLastModified"/>. <c>UploadFileAsync</c> sets both.
+    /// </summary>
+    public string? SourceIdentity { get; init; }
     /// <summary>Gets an optional progress sink, reported at most every 250 ms with speed and remaining time.</summary>
     public IProgress<StorageTransferProgress>? Progress { get; init; }
     /// <summary>Set once progress, speed limits, and conflict policy have been applied, so they are not applied twice.</summary>

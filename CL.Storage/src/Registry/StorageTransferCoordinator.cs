@@ -31,7 +31,7 @@ internal static class StorageTransferCoordinator
         cancellationToken.ThrowIfCancellationRequested();
         state ??= new TransferState();
 
-        var sourceInfo = await source.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+        var sourceInfo = await ResolveSourceAsync(source, sourcePath, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
         if (sourceInfo.IsFailure)
             return Result<StorageTransferSummary>.Failure(sourceInfo.Error!);
         state.Source = sourceInfo.Value;
@@ -121,6 +121,49 @@ internal static class StorageTransferCoordinator
             aggregate?.Complete();
         }
         return result;
+    }
+
+    /// <summary>
+    /// Describes the source as it will be read: the latest item, or with <paramref name="versionId"/> the pinned
+    /// version's size, ETag, and time, so every check, the resume key, and a move's source deletion refer to the
+    /// version that is actually copied.
+    /// </summary>
+    internal static async Task<Result<StorageItem>> ResolveSourceAsync(
+        IStorageService source,
+        string path,
+        string? versionId,
+        CancellationToken cancellationToken)
+    {
+        var latest = await source.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        if (versionId is null || latest.IsFailure)
+            return latest;
+        if (latest.Value!.ItemType != StorageItemType.File)
+            return Result<StorageItem>.Failure(StorageErrors.InvalidContent("SourceVersionId applies to single-file transfers only."));
+        if (latest.Value.VersionId == versionId)
+            return latest;
+        if (source is not IStorageVersionService versions || !source.Capabilities.Supports(StorageFeature.Versioning))
+            return Result<StorageItem>.Failure(StorageErrors.Unsupported("The source connection cannot read a specific version."));
+        string? token = null;
+        do
+        {
+            var page = await versions.ListVersionsAsync(path, new StorageVersionListOptions { ContinuationToken = token }, cancellationToken).ConfigureAwait(false);
+            if (page.IsFailure)
+                return Result<StorageItem>.Failure(page.Error!);
+            if (page.Value!.Versions.FirstOrDefault(version => version.VersionId == versionId) is { } pinned)
+            {
+                return pinned.IsDeleteMarker
+                    ? Result<StorageItem>.Failure(StorageErrors.NotFound($"The source version '{versionId}' of '{path}' is a delete marker."))
+                    : Result<StorageItem>.Success(latest.Value with
+                    {
+                        Size = pinned.Size,
+                        ETag = pinned.ETag,
+                        LastModified = pinned.LastModified,
+                        VersionId = pinned.VersionId
+                    });
+            }
+            token = page.Value.ContinuationToken;
+        } while (token is not null);
+        return Result<StorageItem>.Failure(StorageErrors.NotFound($"The source version '{versionId}' of '{path}' was not found."));
     }
 
     /// <summary>
@@ -512,9 +555,10 @@ internal static class StorageTransferCoordinator
                     $"The transfer destination '{destinationPath}' is not a file."));
         }
         if (resumable && destinationItem is not null && options.ResumeToken is null &&
-            destinationItem.Size is { } present && present == sourceFile.Size)
+            destinationItem.Size is { } present && present == sourceFile.Size &&
+            await SameContentAsync(source, sourceFile, destination, destinationItem, options.SourceVersionId is not null, cancellationToken).ConfigureAwait(false))
         {
-            // Resume: a destination of the source's full size is already complete.
+            // Resume: the destination already holds this content (equal digests, not merely an equal size).
             aggregate?.FileDone(sourceFile.Path, 0);
             return Result<StorageTransferSummary>.Success(new StorageTransferSummary(StorageItemType.File, 0, 0, 0, SkippedFiles: 1, TransferredSources: [])
             {
@@ -617,15 +661,18 @@ internal static class StorageTransferCoordinator
         {
             string? resumeKey = null;
             string? tokenStaging = null;
-            if (resumable)
+            // Staged bytes are only reused for a source that can be identified (an ETag, a time, or a version);
+            // otherwise a different source of the same length would be appended onto an old prefix.
+            if (resumable && HasIdentity(sourceFile))
             {
-                resumeKey = StagedWriter.SourceKey(sourceFile.Path, sourceFile.Size, sourceFile.LastModified, sourceFile.ETag, options.SourceVersionId ?? sourceFile.VersionId);
+                resumeKey = StagedWriter.SourceKey(sourceFile.Path, sourceFile.Size, sourceFile.LastModified, sourceFile.ETag, sourceFile.VersionId);
+                var expectedStaging = StagedWriter.ResumableStagingPath(destinationPath, resumeKey);
                 if (options.ResumeToken is { } token)
                 {
-                    if (token.DestinationPath == destinationPath && IsSameSource(token, sourceFile, options.SourceVersionId) &&
-                        Parent(token.StagingPath) == parent && Name(token.StagingPath).StartsWith(StagedWriter.ResumablePrefix, StringComparison.Ordinal))
+                    var ours = Parent(token.StagingPath) == parent && Name(token.StagingPath).StartsWith(StagedWriter.ResumablePrefix, StringComparison.Ordinal);
+                    if (token.DestinationPath == destinationPath && IsSameSource(token, sourceFile) && token.StagingPath == expectedStaging)
                         tokenStaging = token.StagingPath;
-                    else if (Parent(token.StagingPath) == parent && Name(token.StagingPath).StartsWith(StagedWriter.ResumablePrefix, StringComparison.Ordinal))
+                    else if (ours && token.StagingPath != expectedStaging)
                         await DeleteStagingAsync(destination, token.StagingPath).ConfigureAwait(false);
                 }
             }
@@ -734,7 +781,7 @@ internal static class StorageTransferCoordinator
         {
             await DeleteStagingAsync(destination, staged.StagingPath).ConfigureAwait(false);
             if (backupPath is not null)
-                await RestoreReplacementAsync(destination, destinationPath, backupPath).ConfigureAwait(false);
+                await RecoverReplacementAsync(destination, destinationPath, backupPath).ConfigureAwait(false);
             throw;
         }
         state.ConditionEnforcement = enforcement;
@@ -744,7 +791,7 @@ internal static class StorageTransferCoordinator
             if (stagingCleanup.IsFailure) state.StagingLeftBehind = staged.StagingPath;
             if (backupPath is not null)
             {
-                var restored = await RestoreReplacementAsync(destination, destinationPath, backupPath).ConfigureAwait(false);
+                var restored = await RecoverReplacementAsync(destination, destinationPath, backupPath).ConfigureAwait(false);
                 state.BackupRestored = restored.IsSuccess;
                 if (restored.IsFailure) state.BackupLeftBehind = backupPath;
                 return FailureAfterCleanup(
@@ -778,13 +825,47 @@ internal static class StorageTransferCoordinator
         });
     }
 
-    /// <summary>Whether a resume token's staged bytes came from the current source.</summary>
-    private static bool IsSameSource(StorageResumeToken token, StorageItem source, string? versionId) =>
+    /// <summary>Whether an item carries anything that tells one version of its content from another.</summary>
+    private static bool HasIdentity(StorageItem item) =>
+        item.ETag is not null || item.LastModified is not null || item.VersionId is not null;
+
+    /// <summary>
+    /// Whether a resume token's staged bytes came from the current source: every identity field must match
+    /// exactly, and a field missing on one side only is a mismatch, not a wildcard.
+    /// </summary>
+    private static bool IsSameSource(StorageResumeToken token, StorageItem source) =>
+        HasIdentity(source) &&
         token.SourcePath == source.Path &&
         token.SourceLength == source.Size &&
-        (versionId is not null ? token.SourceVersionId == versionId : true) &&
-        (token.SourceETag is null || StagedWriter.SameETag(token.SourceETag, source.ETag)) &&
-        (token.SourceLastModified is null || token.SourceLastModified == source.LastModified);
+        token.SourceVersionId == source.VersionId &&
+        (token.SourceETag is null ? source.ETag is null : StagedWriter.SameETag(token.SourceETag, source.ETag)) &&
+        token.SourceLastModified == source.LastModified;
+
+    /// <summary>
+    /// Whether the destination provably holds the source's content: both sides report the same digest for
+    /// a common algorithm. Without that evidence the content is written again rather than assumed complete.
+    /// </summary>
+    internal static async Task<bool> SameContentAsync(
+        IStorageService source,
+        StorageItem sourceFile,
+        IStorageService destination,
+        StorageItem destinationItem,
+        bool pinnedVersion,
+        CancellationToken cancellationToken)
+    {
+        // A server digest describes the latest version, so it proves nothing about a pinned older one.
+        if (pinnedVersion)
+            return false;
+        foreach (var algorithm in new[] { StorageChecksumAlgorithm.Sha256, StorageChecksumAlgorithm.Md5 })
+        {
+            var ours = await destination.GetServerChecksumAsync(destinationItem.Path, algorithm, cancellationToken).ConfigureAwait(false);
+            if (ours.IsFailure) continue;
+            var theirs = await source.GetServerChecksumAsync(sourceFile.Path, algorithm, cancellationToken).ConfigureAwait(false);
+            if (theirs.IsFailure) continue;
+            return string.Equals(ours.Value!.HexValue, theirs.Value!.HexValue, StringComparison.OrdinalIgnoreCase);
+        }
+        return false;
+    }
 
     private static string Name(string path)
     {
@@ -871,6 +952,43 @@ internal static class StorageTransferCoordinator
             : Result<StorageTransferSummary>.Failure(StorageErrors.PartialFailure(
                 $"{message}, and cleanup was incomplete.",
                 $"primaryError={primary.Code};cleanupErrors={string.Join(',', cleanupErrors)}"));
+    }
+
+    /// <summary>
+    /// Settles the backup after a promote that did not complete. The promote may never have touched the
+    /// destination (a refused condition), or someone else may have written it since it was backed up, so
+    /// the backup is copied back only when the destination is gone; a destination that is still the
+    /// backed-up version, or someone else's newer write, is left alone and the backup removed.
+    /// </summary>
+    private static async Task<Result> RecoverReplacementAsync(
+        IStorageBackend destination,
+        string destinationPath,
+        string backupPath)
+    {
+        try
+        {
+            var current = await destination.GetInfoAsync(destinationPath, CancellationToken.None).ConfigureAwait(false);
+            if (current.IsFailure && current.Error!.Code != StorageErrors.NotFoundCode)
+                return Result.Failure(current.Error);
+            if (current.IsFailure)
+            {
+                var restored = await destination.CopyAsync(
+                    backupPath,
+                    destinationPath,
+                    new StorageTransferOptions { Overwrite = false, CreateParents = false },
+                    CancellationToken.None).ConfigureAwait(false);
+                if (restored.IsFailure)
+                    return restored;
+            }
+            return await destination.DeleteAsync(
+                backupPath,
+                new StorageDeleteOptions { IgnoreMissing = true },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            return Result.Failure(StorageErrors.FromException(error, "Restore transfer destination"));
+        }
     }
 
     private static async Task<Result> RestoreReplacementAsync(
