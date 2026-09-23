@@ -1,7 +1,7 @@
 # CodeLogic.MySQL2
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.MySQL2)](https://www.nuget.org/packages/CodeLogic.MySQL2)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
 > A typed MySQL data layer for CodeLogic 4: repositories, LINQ-shaped SQL, cursor paging, schema synchronization, migrations, caching, resilience, and operational diagnostics in one library.
 
@@ -374,7 +374,7 @@ The library generates `config.mysql.json` (`mysql`) and `config.mysql.cache.json
 }
 ```
 
-Applied database settings include endpoint and credentials, pooling, connection and command timeouts, SSL mode and CA path, connection charset, sync mode, the transient retry policy, the slow-query threshold and its optional `EXPLAIN` capture, the query timeout, the insert batch size, the backup directory, the N+1 detector threshold, the default string size, and the per-database cache override. Two fields are `[Obsolete]` and ignored: `PreparedStatementCacheSize` (configure statement caching on the connection string) and the cache section's `MaxMemoryMb` (the store evicts by entry count — use `MaxEntries`). `MaxInClauseValues` is advisory: an oversized generated `IN (...)` list warns rather than chunking. `Collation` remains informational. See the [overview](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/index.html) for the per-field status.
+Applied database settings include endpoint and credentials, pooling, connection and command timeouts, SSL mode and CA path, connection charset, sync mode, the transient retry policy, the slow-query threshold and its optional `EXPLAIN` capture, the query timeout, the insert batch size, the backup directory, the N+1 detector threshold, the default string size, and the per-database cache override. Two fields are `[Obsolete]` and ignored: `PreparedStatementCacheSize` (configure statement caching on the connection string) and the cache section's `MaxMemoryMb` (the store evicts by entry count — use `MaxEntries`). `MaxInClauseValues` is advisory: an oversized generated `IN (...)` list warns rather than chunking. `Collation` remains informational. See the [overview](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/index.html) for the per-field status.
 
 The cache configuration's global switch, entry limit, `DateTime` quantization window, default TTL (used by the parameterless `.WithCache()`), and hit/miss event switch are all applied at startup.
 
@@ -395,11 +395,11 @@ The cache configuration's global switch, entry limit, `DateTime` quantization wi
 
 ## Documentation
 
-- [Overview](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/index.html)
-- [Queries, joins, paging, raw SQL, and transactions](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/queries.html)
-- [Schema synchronization, migrations, backups, and retention](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/schema-migrations.html)
-- [Caching, performance, resilience, and diagnostics](https://media2a.github.io/CodeLogic.Libs/libs/mysql2/performance.html)
-- [Generated API reference](https://media2a.github.io/CodeLogic.Libs/api/CL.MySQL2.html)
+- [Overview](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/index.html)
+- [Queries, joins, paging, raw SQL, and transactions](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/queries.html)
+- [Schema synchronization, migrations, backups, and retention](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/schema-migrations.html)
+- [Caching, performance, resilience, and diagnostics](https://zyntal-com.github.io/CodeLogic.Libs/libs/mysql2/performance.html)
+- [Generated API reference](https://zyntal-com.github.io/CodeLogic.Libs/api/CL.MySQL2.html)
 
 ## Requirements
 
@@ -410,4 +410,4 @@ The cache configuration's global switch, entry limit, `DateTime` quantization wi
 
 ## License
 
-MIT — see [LICENSE](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE).
+MIT — see [LICENSE](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE).

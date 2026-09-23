@@ -96,4 +96,4 @@ pull / fetch / reset.
 ### Notes
 
 - Earlier history is retained in the
-  [git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.GitHelper).
+  [git log](https://github.com/zyntal-com/CodeLogic.Libs/commits/main/CL.GitHelper).

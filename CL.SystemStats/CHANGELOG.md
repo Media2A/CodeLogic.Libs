@@ -94,4 +94,4 @@ backed by Windows performance counters and Linux `/proc`.
 ### Notes
 
 - Earlier history is retained in the
-  [git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.SystemStats).
+  [git log](https://github.com/zyntal-com/CodeLogic.Libs/commits/main/CL.SystemStats).

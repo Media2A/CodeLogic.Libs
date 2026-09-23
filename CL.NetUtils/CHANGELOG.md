@@ -84,4 +84,4 @@ unified v4 baseline. GeoIP, DNSBL, and IP/CIDR utilities.
 ### Notes
 
 - Earlier history is retained in the
-  [git log](https://github.com/Media2A/CodeLogic.Libs/commits/main/CL.NetUtils).
+  [git log](https://github.com/zyntal-com/CodeLogic.Libs/commits/main/CL.NetUtils).

@@ -7,7 +7,7 @@ _layout: landing
   <h1>CodeLogic Libraries</h1>
   <p class="lead">
     Twelve production-ready .NET 10 libraries for the
-    <a href="https://github.com/Media2A/CodeLogic">CodeLogic 4</a> framework.
+    <a href="https://github.com/zyntal-com/CodeLogic">CodeLogic 4</a> framework.
     Databases, email, storage, security, monitoring, and more — each a self-contained
     <code>ILibrary</code> that manages its own configuration, lifecycle, and health checks.
   </p>

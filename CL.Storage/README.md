@@ -1,7 +1,7 @@
 # CodeLogic.Storage
 
 [![NuGet](https://img.shields.io/nuget/v/CodeLogic.Storage)](https://www.nuget.org/packages/CodeLogic.Storage)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Media2A/CodeLogic.Libs/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/LICENSE)
 
 Provider-neutral, root-scoped storage for CodeLogic 4 and .NET 10. One API mounts local/UNC,
 S3-compatible, FTP/FTPS, SFTP, WebDAV, Azure Blob, Google Cloud Storage, and OpenStack Swift

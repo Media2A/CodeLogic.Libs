@@ -7,12 +7,12 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/.NET-10-512bd4" alt=".NET 10">
-  <a href="https://media2a.github.io/CodeLogic.Libs/"><img src="https://img.shields.io/badge/docs-media2a.github.io-2f86ad" alt="Documentation"></a>
+  <a href="https://zyntal-com.github.io/CodeLogic.Libs/"><img src="https://img.shields.io/badge/docs-zyntal-com.github.io-2f86ad" alt="Documentation"></a>
 </p>
 
 <p align="center">
   Twelve production-ready .NET 10 library integrations for
-  <a href="https://github.com/Media2A/CodeLogic">CodeLogic 4</a>.
+  <a href="https://github.com/zyntal-com/CodeLogic">CodeLogic 4</a>.
   Each is a self-contained <code>ILibrary</code> with auto-generated configuration,
   lifecycle management, and health checks.
 </p>
@@ -113,17 +113,17 @@ Most operations return `Result` / `Result<T>` rather than throwing for expected 
 
 ## Documentation
 
-📖 **Full documentation: [media2a.github.io/CodeLogic.Libs](https://media2a.github.io/CodeLogic.Libs/)**
+📖 **Full documentation: [zyntal-com.github.io/CodeLogic.Libs](https://zyntal-com.github.io/CodeLogic.Libs/)**
 
-- [Getting Started](https://media2a.github.io/CodeLogic.Libs/getting-started.html)
-- [All Libraries](https://media2a.github.io/CodeLogic.Libs/libs/) — per-library guides
-- [API Reference](https://media2a.github.io/CodeLogic.Libs/api/) — generated from source XML docs
+- [Getting Started](https://zyntal-com.github.io/CodeLogic.Libs/getting-started.html)
+- [All Libraries](https://zyntal-com.github.io/CodeLogic.Libs/libs/) — per-library guides
+- [API Reference](https://zyntal-com.github.io/CodeLogic.Libs/api/) — generated from source XML docs
 
 Each package also ships a focused `README.md` and `CHANGELOG.md` in its folder.
 
 ## Requirements
 
-- [CodeLogic 4](https://github.com/Media2A/CodeLogic)
+- [CodeLogic 4](https://github.com/zyntal-com/CodeLogic)
 - .NET 10 SDK or later
 
 ## License

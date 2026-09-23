@@ -165,5 +165,5 @@ Optional features return `storage.unsupported` on connections that lack them. Fl
 The legacy `CodeLogic.StorageS3` package accepted a bucket on every operation. `CodeLogic.Storage`
 mounts a bucket/prefix per connection and uses relative paths. This release also renames several
 error codes, adds `ConflictPolicy`, and extends `StorageItem` and `StorageConnectionInfo`. See the
-package [`MIGRATION.md`](https://github.com/Media2A/CodeLogic.Libs/blob/main/CL.Storage/MIGRATION.md)
+package [`MIGRATION.md`](https://github.com/zyntal-com/CodeLogic.Libs/blob/main/CL.Storage/MIGRATION.md)
 for every mapping.
