@@ -73,13 +73,18 @@ public sealed class ConnectionExtrasTests
         await foreach (var item in storage.EnumerateItemsAsync("", new StorageListOptions { Recursive = true }))
             baseline[item.Value!.Path] = item.Value;
 
-        await Task.Delay(50);
         await storage.UploadBytesAsync("top.txt", [1]);                  // root changes: found at once
         await storage.UploadBytesAsync("sub/deep/new.txt", [1]);         // only "sub/deep" changes: waits
+        await storage.UploadBytesAsync("other/new.txt", [1]);            // "other" is new: listed at once
+        // needs-review E: folder times are set explicitly instead of relying on the file system's time
+        // granularity: "sub" keeps the time the baseline saw, "sub/deep" moves on.
+        Directory.SetLastWriteTimeUtc(Path.Combine(directory.Path, "sub"), baseline["sub"].LastModified!.Value.UtcDateTime);
+        Directory.SetLastWriteTimeUtc(Path.Combine(directory.Path, "sub", "deep"), baseline["sub/deep"].LastModified!.Value.UtcDateTime.AddMinutes(5));
 
         var incremental = (await StorageWatch.IncrementalSnapshotAsync(storage, "", baseline, CancellationToken.None))!;
 
         Assert.Contains("top.txt", incremental.Keys);
+        Assert.Contains("other/new.txt", incremental.Keys);
         Assert.DoesNotContain("sub/deep/new.txt", incremental.Keys);
         Assert.Contains("sub/deep/old.txt", incremental.Keys);
     }
