@@ -40,6 +40,14 @@ internal static class StorageTransferPipeline
 
     public static TransferLimits LimitsFor(object backend) => Limits.TryGetValue(backend, out var limits) ? limits : TransferLimits.None;
 
+    private static readonly ConditionalWeakTable<object, StrongBox<int>> SessionLimits = new();
+
+    /// <summary>Records how many sessions a session-pooled backend (FTP, SFTP) may open at once.</summary>
+    public static void SetSessionLimit(object backend, int maxSessions) => SessionLimits.AddOrUpdate(backend, new StrongBox<int>(maxSessions));
+
+    /// <summary>The session limit of a pooled backend, or null for backends without one.</summary>
+    public static int? SessionLimitFor(object backend) => SessionLimits.TryGetValue(backend, out var limit) ? limit.Value : null;
+
     /// <summary>Whether an upload call must go through <see cref="UploadAsync"/> first.</summary>
     public static bool Applies(object backend, StorageUploadOptions? options) =>
         options?.PipelineApplied != true &&
@@ -85,7 +93,7 @@ internal static class StorageTransferPipeline
         try
         {
             if (NeedsStaging(inner) || NeedsConditionStaging(destination, inner))
-                return await StagedUploadAsync(destination, path, stream, inner, cancellationToken).ConfigureAwait(false);
+                return await StagedUploadAsync(destination, path, stream, inner, cancellationToken, unmetered: source).ConfigureAwait(false);
             return inner.ConflictPolicy is not null
                 ? await StorageConflictResolver.UploadAsync(destination, path, stream, inner, cancellationToken).ConfigureAwait(false)
                 : await destination.UploadAsync(path, stream, inner, cancellationToken).ConfigureAwait(false);
@@ -107,7 +115,8 @@ internal static class StorageTransferPipeline
         string path,
         Stream source,
         StorageUploadOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Stream? unmetered = null)
     {
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
@@ -139,8 +148,10 @@ internal static class StorageTransferPipeline
                     "Resuming an upload needs SourceIdentity or SourceLastModified to identify the source."));
             overwrite = true;
             var existing = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+            // The check reads the caller's stream directly: hashing is not an upload, so neither speed limits nor
+            // progress apply to it.
             if (existing.IsSuccess && existing.Value!.ItemType == StorageItemType.File && existing.Value.Size == remaining &&
-                await HoldsContentAsync(destination, path, source, start, cancellationToken).ConfigureAwait(false))
+                await HoldsContentAsync(destination, path, unmetered is { CanSeek: true } ? unmetered : source, start, cancellationToken).ConfigureAwait(false))
                 return Result<StorageItem>.Success(existing.Value);
         }
         if (!overwrite)
@@ -175,23 +186,28 @@ internal static class StorageTransferPipeline
         if (written.Cancelled) cancellationToken.ThrowIfCancellationRequested();
         if (!written.IsSuccess)
         {
-            var details = written.StagingLeft is { } left ? $"stagingPath={left};bytesStaged={written.BytesStaged}" : written.Error!.Details ?? string.Empty;
-            return Result<StorageItem>.Failure(written.Error!.WithDetails(details));
+            // The provider's details (retry delay, HTTP status, TLS reason) stay; the staging state is added.
+            var details = written.StagingLeft is { } left ? $"stagingPath={left};bytesStaged={written.BytesStaged}" : string.Empty;
+            return Result<StorageItem>.Failure(StagedWriter.AppendDetails(written.Error!, details));
         }
         Result promoted;
         try
         {
+            // The condition goes to the provider's move, which enforces it atomically where it can.
             (promoted, _) = await StagedWriter.PromoteAsync(
                 destination, written.Content!.StagingPath, path, overwrite, options.Condition, options.CreateParents, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await StagedWriter.DeleteAsync(destination, written.Content!.StagingPath).ConfigureAwait(false);
+            // A resumed upload keeps its complete part file, so retrying it only promotes.
+            if (!written.Resumable)
+                await StagedWriter.DeleteAsync(destination, written.Content!.StagingPath).ConfigureAwait(false);
             throw;
         }
         if (promoted.IsFailure)
         {
-            await StagedWriter.DeleteAsync(destination, written.Content.StagingPath).ConfigureAwait(false);
+            if (!written.Resumable)
+                await StagedWriter.DeleteAsync(destination, written.Content.StagingPath).ConfigureAwait(false);
             return Result<StorageItem>.Failure(promoted.Error!);
         }
         // Committed: report the result even if the caller cancels now.
