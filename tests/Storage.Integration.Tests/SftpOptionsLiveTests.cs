@@ -213,7 +213,7 @@ public sealed class SftpOptionsLiveTests
     private static async Task<(string KeyType, string Key)> CaptureHostKeyAsync()
     {
         var config = LiveServers.Sftp();
-        using var client = new SftpClient(config.Host, config.Port, config.Username, config.Password);
+        using var client = new SftpClient(config.Host, config.Port, config.Username, config.Password ?? string.Empty);
         string? keyType = null;
         byte[]? key = null;
         client.HostKeyReceived += (_, e) =>
