@@ -79,7 +79,8 @@ internal static class StorageTransferCoordinator
                     destinationPath,
                     options,
                     cleanup,
-                    cancellationToken).ConfigureAwait(false),
+                    cancellationToken,
+                    state).ConfigureAwait(false),
                 _ => await TransferLinkAsync(
                     source,
                     sourceInfo.Value,
@@ -115,6 +116,7 @@ internal static class StorageTransferCoordinator
 
         if (result.IsFailure)
         {
+            state.DirectoriesCreated = cleanup.CreatedDirectories;
             var rollback = await cleanup.RollbackAsync(KeptStaging(state)).ConfigureAwait(false);
             if (cleanup.HadReplacements)
                 state.BackupRestored = rollback.IsSuccess;
@@ -274,7 +276,8 @@ internal static class StorageTransferCoordinator
         string destinationPath,
         StorageTransferOptions options,
         TransferCleanupTracker cleanup,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TransferState state)
     {
         // A directory changes the destination as soon as its first folder or file lands.
         if (options.PhaseChanged is { } committing)
@@ -295,6 +298,9 @@ internal static class StorageTransferCoordinator
         var transferred = new List<string>();
         var transferredItems = new List<StorageItem>();
         var skippedSources = new List<string>();
+        string? stagingLeft = null;
+        string? backupLeft = null;
+        var enforcement = StorageConditionEnforcement.None;
         string? continuationToken = null;
         var seenTokens = new HashSet<string>(StringComparer.Ordinal);
         var seenItems = new HashSet<string>(StringComparer.Ordinal);
@@ -359,6 +365,7 @@ internal static class StorageTransferCoordinator
                                 if (directory.IsFailure)
                                     return Result<StorageTransferSummary>.Failure(directory.Error!);
                             }
+                            var fileState = new TransferState();
                             var copied = await CopyFileAsync(
                                 source,
                                 item with { Path = itemPath.Value! },
@@ -366,9 +373,21 @@ internal static class StorageTransferCoordinator
                                 mappedPath,
                                 options,
                                 cleanup,
-                                cancellationToken).ConfigureAwait(false);
+                                cancellationToken,
+                                fileState).ConfigureAwait(false);
+                            // What each file committed, left behind, and how its condition held is the directory's too.
+                            state.FilesCommitted += fileState.FilesCommitted;
+                            state.BytesCommitted += fileState.BytesCommitted;
+                            state.ConditionEnforcement = Weakest(state.ConditionEnforcement, fileState.ConditionEnforcement);
+                            state.BackupLeftBehind ??= fileState.BackupLeftBehind;
+                            if (!fileState.StagingResumable)
+                                state.StagingLeftBehind ??= fileState.StagingLeftBehind;
                             if (copied.IsFailure)
                                 return Result<StorageTransferSummary>.Failure(copied.Error!);
+                            var file = copied.Value!;
+                            stagingLeft ??= file.StagingLeftBehind;
+                            backupLeft ??= file.BackupLeftBehind;
+                            enforcement = Weakest(enforcement, file.ConditionEnforcement);
                             files += copied.Value!.Files;
                             bytes += copied.Value.Bytes;
                             skipped += copied.Value.SkippedFiles;
@@ -449,9 +468,18 @@ internal static class StorageTransferCoordinator
             transferred)
         {
             TransferredItems = transferredItems,
-            SkippedSources = skippedSources
+            SkippedSources = skippedSources,
+            StagingLeftBehind = stagingLeft,
+            BackupLeftBehind = backupLeft,
+            ConditionEnforcement = enforcement
         });
     }
+
+    /// <summary>The weaker of two enforcements: a check just before the commit outranks an atomic one, which outranks none.</summary>
+    private static StorageConditionEnforcement Weakest(StorageConditionEnforcement a, StorageConditionEnforcement b) =>
+        a == StorageConditionEnforcement.CheckedBeforeCommit || b == StorageConditionEnforcement.CheckedBeforeCommit
+            ? StorageConditionEnforcement.CheckedBeforeCommit
+            : a == StorageConditionEnforcement.Atomic || b == StorageConditionEnforcement.Atomic ? StorageConditionEnforcement.Atomic : StorageConditionEnforcement.None;
 
     /// <summary>
     /// Applies <see cref="StorageTransferOptions.LinkHandling"/> to one link. <c>treeRoot</c> is the source
@@ -670,6 +698,7 @@ internal static class StorageTransferCoordinator
 
         StagedContent staged;
         var stagedResumable = false;
+        PartLease? lease = null;
         var canUseNativeStagingCopy = ReferenceEquals(source, destination) &&
             source.Capabilities.Supports(StorageFeature.FileCopy | StorageFeature.ServerSideCopy) &&
             options.MetadataPreservation != StorageMetadataPreservation.Discard &&
@@ -730,7 +759,7 @@ internal static class StorageTransferCoordinator
                 {
                     if (token.DestinationPath == destinationPath && IsSameSource(token, sourceFile) && token.StagingPath == expectedStaging)
                         tokenStaging = token.StagingPath;
-                    else if (token.StagingPath != expectedStaging && IsOwnPartFile(token, destinationPath) && !StagedWriter.IsPartInUse(destination, token.StagingPath))
+                    else if (token.StagingPath != expectedStaging && IsOwnPartFile(token, destinationPath) && !await StagedWriter.IsPartInUseAsync(destination, token.StagingPath).ConfigureAwait(false))
                         // The token's own part file for this destination, staged from a source version that is gone.
                         // A token naming any other file is ignored, never followed: it may be another job's.
                         await DeleteStagingAsync(destination, token.StagingPath).ConfigureAwait(false);
@@ -776,6 +805,7 @@ internal static class StorageTransferCoordinator
             }
             staged = written.Content!;
             stagedResumable = written.Resumable;
+            lease = written.Lease;
         }
 
         var committed = false;
@@ -803,17 +833,35 @@ internal static class StorageTransferCoordinator
                 }
             }
 
+            if (lease is not null)
+            {
+                // The part file is promoted only while this transfer still holds it: one taken over by another
+                // transfer (its owner was judged gone) is theirs, and is neither promoted nor removed.
+                var owned = await lease.StillOwnedAsync(cancellationToken).ConfigureAwait(false);
+                if (owned.IsFailure)
+                {
+                    var kept = await SettleStagingAsync(destination, staged, stagedResumable, state).ConfigureAwait(false);
+                    return FailureAfterCleanup(owned.Error!, "The transfer could not confirm its hold on the staged data", kept);
+                }
+                if (!owned.Value)
+                    return Result<StorageTransferSummary>.Failure(StorageErrors.Conflict(
+                        $"The staged data for '{destinationPath}' was taken over by another transfer, so it was not committed.",
+                        $"stagingPath={staged.StagingPath}"));
+            }
+
             if (options.PhaseChanged is { } committing)
                 await committing(Queue.StorageTransferPhase.Committing, cancellationToken).ConfigureAwait(false);
 
             if (destinationExists)
             {
                 // The previous destination is kept until the new one is committed. Where the server copies, the
-                // backup costs no transfer; on FTP and SFTP (no server-side copy) a single file needs none, as
-                // their replace keeps the old file until the new one is in place, and a directory transfer (which
-                // may roll back) renames it aside instead of copying it through the client.
+                // backup costs no transfer; on FTP and SFTP (no server-side copy, but a replace that keeps the old
+                // file until the new one is in place) a single file needs none, and a directory transfer (which may
+                // roll back) renames it aside instead of copying it through the client. Any other connection
+                // without a server-side copy renames it aside too: its replace is not known to restore anything.
                 var serverCopy = destination.Capabilities.Supports(StorageFeature.FileCopy | StorageFeature.ServerSideCopy);
-                var renameAside = !serverCopy && cleanup.ForDirectory && destination.Capabilities.Supports(StorageFeature.FileMove);
+                var restoringReplace = destination is Providers.IStorageRestoringReplace;
+                var renameAside = !serverCopy && (cleanup.ForDirectory || !restoringReplace) && destination.Capabilities.Supports(StorageFeature.FileMove);
                 if (serverCopy || renameAside)
                 {
                     var allocatedBackup = await AllocateStagingPathAsync(
@@ -863,7 +911,7 @@ internal static class StorageTransferCoordinator
                 options.CreateParents,
                 cancellationToken).ConfigureAwait(false);
             // Rename: a name taken between the choice and the commit is not a failure; the next free one is used.
-            for (var retry = 0; renamedFrom is not null && retry < RenameRetries && outcome.Touched &&
+            for (var retry = 0; renamedFrom is not null && retry < RenameRetries &&
                 outcome.Result.IsFailure && outcome.Result.Error!.Code == StorageErrors.ConflictCode; retry++)
             {
                 var next = await StorageConflictResolver.ResolveAsync(
@@ -902,6 +950,8 @@ internal static class StorageTransferCoordinator
 
             committed = true;
             state.DestinationCommitted = true;
+            state.FilesCommitted = 1;
+            state.BytesCommitted = staged.Bytes;
             // What the provider could not remove after it committed: our staging object or its own backup.
             var stagingLeft = outcome.LeftBehind.FirstOrDefault(path => path == staged.StagingPath);
             var providerLeft = outcome.LeftBehind.FirstOrDefault(path => path != staged.StagingPath);
@@ -912,7 +962,9 @@ internal static class StorageTransferCoordinator
             var confirmed = await StagedWriter.ConfirmPromotedAsync(destination, destinationPath, staged, CancellationToken.None).ConfigureAwait(false);
             if (confirmed.IsFailure && confirmed.Error!.Code == StorageErrors.ConflictCode)
             {
-                if (backupPath is not null && (await DeleteStagingAsync(destination, backupPath).ConfigureAwait(false)).IsFailure)
+                // The mismatch may be a concurrent writer or a broken promote: either way the previous version is
+                // kept, never deleted and never put back, and the report names it.
+                if (backupPath is not null)
                     state.BackupLeftBehind = backupPath;
                 state.BackupLeftBehind ??= providerLeft;
                 state.StagingLeftBehind = stagingLeft;
@@ -956,6 +1008,12 @@ internal static class StorageTransferCoordinator
             return Result<StorageTransferSummary>.Failure(error is OperationCanceledException && cancellationToken.IsCancellationRequested
                 ? StorageErrors.Cancelled("The transfer was cancelled.")
                 : StorageErrors.FromException(error, "Commit transfer"));
+        }
+        finally
+        {
+            // Held until the part file was promoted or settled, so nobody appended to it in between.
+            if (lease is not null)
+                await lease.ReleaseAsync().ConfigureAwait(false);
         }
     }
 
@@ -1294,33 +1352,44 @@ internal static class StorageTransferCoordinator
         }
 
         /// <summary>
-        /// Reads the destination and says whether it is still what this transfer committed. An unknown
-        /// committed identity (the read after the commit failed) is taken as ours.
+        /// Reads the destination and says whether it is still what this transfer committed. A committed identity
+        /// that is not known (the read after the commit failed) is not taken as ours: such a file is left and
+        /// reported rather than undone on a guess. The current item is null when it is gone.
         /// </summary>
-        private async Task<Result<bool>> StillOursAsync(string path, StorageItem? committed)
+        private async Task<Result<(bool Ours, StorageItem? Current)>> StillOursAsync(string path, StorageItem? committed)
         {
             Result<StorageItem> current;
             try { current = await destination.GetInfoAsync(path, CancellationToken.None).ConfigureAwait(false); }
-            catch (Exception error) { return Result<bool>.Failure(StorageErrors.FromException(error, "Rollback transfer destination")); }
+            catch (Exception error) { return Result<(bool, StorageItem?)>.Failure(StorageErrors.FromException(error, "Rollback transfer destination")); }
             if (current.IsFailure)
-                return current.Error!.Code == StorageErrors.NotFoundCode ? Result<bool>.Success(false) : Result<bool>.Failure(current.Error);
-            return Result<bool>.Success(committed is null || SameVersion(committed, current.Value!));
+                return current.Error!.Code == StorageErrors.NotFoundCode
+                    ? Result<(bool, StorageItem?)>.Success((false, null))
+                    : Result<(bool, StorageItem?)>.Failure(current.Error);
+            return Result<(bool, StorageItem?)>.Success((committed is not null && SameVersion(committed, current.Value!), current.Value));
         }
+
+        /// <summary>
+        /// The committed version as a condition the provider can enforce in the same request, or null when it
+        /// cannot (the destination was then compared immediately before).
+        /// </summary>
+        private static StorageMutationCondition? ConditionFor(StorageItem committed) =>
+            committed.ETag is not null || committed.VersionId is not null
+                ? new StorageMutationCondition { ExpectedETag = committed.ETag, ExpectedVersionId = committed.VersionId }
+                : null;
 
         private async Task<Result> DeleteIfStillOursAsync(string path, StorageItem? committed)
         {
             var ours = await StillOursAsync(path, committed).ConfigureAwait(false);
             if (ours.IsFailure)
                 return Result.Failure(ours.Error!);
-            if (!ours.Value)
-            {
-                // Gone (fine), or replaced by someone else after the commit: theirs is left in place.
-                var exists = await StillOursAsync(path, null).ConfigureAwait(false);
-                return exists.IsSuccess && exists.Value
-                    ? Result.Failure(StorageErrors.Conflict($"The destination '{path}' changed after it was committed, so it was not rolled back."))
-                    : Result.Success();
-            }
-            return await DeleteAsync(path).ConfigureAwait(false);
+            if (ours.Value.Current is null)
+                return Result.Success();
+            if (!ours.Value.Ours)
+                // Replaced by someone else after the commit, or not known to be ours: it is left in place.
+                return Result.Failure(StorageErrors.Conflict($"The destination '{path}' changed after it was committed, or its committed version is unknown, so it was not rolled back."));
+            // Deleted only while it is still that version: in the same request where the server can enforce it.
+            var condition = destination.Capabilities.Supports(StorageFeature.ConditionalDelete) ? ConditionFor(committed!) : null;
+            return await DeleteAsync(path, condition).ConfigureAwait(false);
         }
 
         private async Task<Result> RestoreIfStillOursAsync(string destinationPath, string backupPath, bool renamed, StorageItem? committed)
@@ -1328,17 +1397,19 @@ internal static class StorageTransferCoordinator
             var ours = await StillOursAsync(destinationPath, committed).ConfigureAwait(false);
             if (ours.IsFailure)
                 return Result.Failure(ours.Error!);
-            if (!ours.Value)
-                // Changed or deleted by someone else after the commit: that is not undone, and the previous
-                // version stays in the backup, which is reported.
+            if (!ours.Value.Ours)
+                // Changed or deleted by someone else after the commit (or not known to be ours): that is not undone,
+                // and the previous version stays in the backup, which is reported.
                 return Result.Failure(StorageErrors.Conflict(
                     $"The destination '{destinationPath}' changed after it was committed, so the previous version was not restored over it."));
             try
             {
-                var options = new StorageTransferOptions { Overwrite = true, CreateParents = false };
-                var restored = renamed
-                    ? await destination.MoveAsync(backupPath, destinationPath, options, CancellationToken.None).ConfigureAwait(false)
-                    : await destination.CopyAsync(backupPath, destinationPath, options, CancellationToken.None).ConfigureAwait(false);
+                // The previous version replaces the committed one only while it is still that version: the
+                // provider enforces it in the same request where it can; otherwise it was compared just before.
+                var options = new StorageTransferOptions { Overwrite = true, CreateParents = false, DestinationCondition = ConditionFor(committed!) };
+                var restored = await PutBackAsync(options).ConfigureAwait(false);
+                if (restored.IsFailure && options.DestinationCondition is not null && restored.Error!.Code == StorageErrors.UnsupportedCode)
+                    restored = await PutBackAsync(options with { DestinationCondition = null }).ConfigureAwait(false);
                 if (restored.IsFailure && !StorageErrorInfo.DestinationCommitted(restored.Error))
                     return restored;
                 if (renamed)
@@ -1352,15 +1423,19 @@ internal static class StorageTransferCoordinator
             {
                 return Result.Failure(StorageErrors.FromException(error, "Restore transfer destination"));
             }
+
+            Task<Result> PutBackAsync(StorageTransferOptions options) => renamed
+                ? destination.MoveAsync(backupPath, destinationPath, options, CancellationToken.None)
+                : destination.CopyAsync(backupPath, destinationPath, options, CancellationToken.None);
         }
 
-        private async Task<Result> DeleteAsync(string path)
+        private async Task<Result> DeleteAsync(string path, StorageMutationCondition? condition = null)
         {
             try
             {
                 return await destination.DeleteAsync(
                     path,
-                    new StorageDeleteOptions { IgnoreMissing = true },
+                    new StorageDeleteOptions { IgnoreMissing = true, Condition = condition },
                     CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception error)
@@ -1435,4 +1510,12 @@ internal sealed class TransferState
     public bool RollbackIncomplete { get; set; }
     /// <summary>How a destination condition was enforced, even when the promote was refused.</summary>
     public StorageConditionEnforcement ConditionEnforcement { get; set; }
+    /// <summary>Files committed at the destination so far (a directory transfer that stopped part-way).</summary>
+    public long FilesCommitted { get; set; }
+    /// <summary>Bytes of the files committed so far.</summary>
+    public long BytesCommitted { get; set; }
+    /// <summary>Directories created at the destination so far.</summary>
+    public long DirectoriesCreated { get; set; }
+    /// <summary>Source items a move already deleted, when it stopped before deleting them all.</summary>
+    public long SourceItemsDeleted { get; set; }
 }

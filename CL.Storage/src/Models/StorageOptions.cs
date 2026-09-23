@@ -55,12 +55,17 @@ public sealed record StorageUploadOptions
     /// <summary>
     /// Gets a caller-chosen identity for the source content. With <see cref="StorageConflictPolicy.Resume"/> it
     /// keys the staged bytes together with the length and <see cref="SourceLastModified"/>, so only the same
-    /// source continues them; resume needs this or <see cref="SourceLastModified"/>. The key must change
-    /// whenever the content changes: use a content id or version, or a path only together with
-    /// <see cref="SourceLastModified"/>. A path alone lets an edited file of the same length continue the old
-    /// prefix (only <see cref="Verify"/> would catch it). <c>UploadFileAsync</c> sets the path and the time.
+    /// source continues them. Resume needs <see cref="SourceLastModified"/>, or this identity marked with
+    /// <see cref="SourceIdentityIsContentVersion"/>; a path alone is refused, as an edited file of the same length
+    /// would continue the old prefix. <c>UploadFileAsync</c> sets the path and the time.
     /// </summary>
     public string? SourceIdentity { get; init; }
+    /// <summary>
+    /// Gets whether <see cref="SourceIdentity"/> changes whenever the content changes (a content hash, an ETag, a
+    /// version id), so it identifies the content on its own and resume needs no <see cref="SourceLastModified"/>.
+    /// Never set it for a name or a path.
+    /// </summary>
+    public bool SourceIdentityIsContentVersion { get; init; }
     /// <summary>Gets an optional progress sink, reported at most every 250 ms with speed and remaining time.</summary>
     public IProgress<StorageTransferProgress>? Progress { get; init; }
     /// <summary>Set once progress, speed limits, and conflict policy have been applied, so they are not applied twice.</summary>

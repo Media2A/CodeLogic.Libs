@@ -49,6 +49,12 @@ internal sealed record StagedWriteResult(StagedContent? Content, Error? Error, s
     /// </summary>
     public bool Resumable { get; init; }
 
+    /// <summary>
+    /// The hold on a resumable part file, on success only: the caller keeps it until the part file has been
+    /// promoted (or settled) and then releases it, so no other transfer appends to it in between.
+    /// </summary>
+    public PartLease? Lease { get; init; }
+
     public bool IsSuccess => Content is not null;
 }
 
@@ -113,16 +119,22 @@ internal static class StagedWriter
     {
         var parent = Parent(request.Path);
         var staging = request.StagingPath ?? (request.ResumeKey is { } key ? ResumableStagingPath(request.Path, key) : null);
-        string? part = null;
+        PartLease? lease = null;
+        StagedWriteResult? outcome = null;
         if (staging is not null)
         {
-            // One writer per part file in this process. A second transfer of the same source to the same
-            // destination (two queued jobs for one file) writes a private staging object instead of appending
-            // into the bytes the first one is writing; it is not resumable, but neither corrupts the other.
-            part = PartKey(destination, staging);
-            if (!ActiveParts.TryAdd(part, 0))
+            // One writer per part file, in this process and across processes (a lock marker beside it). A second
+            // transfer of the same source to the same destination (two queued jobs for one file, or two workers)
+            // writes a private staging object instead of appending into the bytes the first one is writing; it is
+            // not resumable, but neither corrupts the other.
+            Result<PartLease?> acquired;
+            try { acquired = await PartLease.AcquireAsync(destination, staging, request.Upload.CreateParents, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return CancelledResult(null, 0); }
+            if (acquired.IsFailure)
+                return new StagedWriteResult(null, acquired.Error, null, 0);
+            lease = acquired.Value;
+            if (lease is null)
             {
-                part = null;
                 staging = null;
                 request = request with { ResumeKey = null, StagingPath = null };
             }
@@ -158,22 +170,22 @@ internal static class StagedWriter
                 // resumable write) exactly as for a failure it reported.
                 result = await FailAsync(destination, request, staging, StorageErrors.FromException(error, "Write transfer staging object"), contentIsWrong: false).ConfigureAwait(false);
             }
-            return result with { Resumable = request.Resumable };
+            // A successful write hands its hold on the part file to the caller, who releases it after the promote.
+            outcome = result with { Resumable = request.Resumable, Lease = result.IsSuccess ? lease : null };
+            return outcome;
         }
         finally
         {
-            if (part is not null) ActiveParts.TryRemove(part, out _);
+            if (lease is not null && outcome?.Lease is null)
+                await lease.ReleaseAsync().ConfigureAwait(false);
         }
     }
 
-    /// <summary>Part files being written in this process, so two writers never append into one.</summary>
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ActiveParts = new(StringComparer.Ordinal);
-
-    private static string PartKey(IStorageService destination, string staging) =>
-        $"{destination.Provider}\n{destination.Root}\n{staging}";
-
-    /// <summary>Whether a resumable part file is being written by a transfer in this process.</summary>
-    internal static bool IsPartInUse(IStorageService destination, string staging) => ActiveParts.ContainsKey(PartKey(destination, staging));
+    /// <summary>
+    /// Whether a resumable part file is being written by a transfer, in this process or (by its lock marker)
+    /// in another one. A marker that cannot be read counts as in use.
+    /// </summary>
+    internal static Task<bool> IsPartInUseAsync(IStorageService destination, string staging) => PartLease.InUseAsync(destination, staging);
 
     private static StagedWriteResult CancelledResult(string? stagingLeft, long bytes) =>
         new(null, StorageErrors.Cancelled("The write was cancelled."), stagingLeft, bytes) { Cancelled = true };
@@ -387,11 +399,16 @@ internal static class StagedWriter
             // The provider cannot enforce the condition in its move: it was checked just before, which is all
             // this connection offers.
             enforcement = StorageConditionEnforcement.CheckedBeforeCommit;
-            moved = await destination.MoveAsync(stagingPath, path, options with { DestinationCondition = null }, cancellationToken).ConfigureAwait(false);
+            options = options with { DestinationCondition = null };
+            moved = await destination.MoveAsync(stagingPath, path, options, cancellationToken).ConfigureAwait(false);
         }
         if (moved.IsFailure && StorageErrorInfo.DestinationCommitted(moved.Error))
             return new PromoteOutcome(Result.Success(), enforcement, Touched: true, LeftBehind(moved.Error));
-        return new PromoteOutcome(moved, enforcement, Touched: true, []);
+        // A conditional move the provider refused (a 412, or a create-only move onto a name that exists) moved
+        // nothing: the destination is exactly as the refusal found it, even if someone else deleted it meanwhile.
+        var refused = moved.IsFailure && moved.Error!.Code == StorageErrors.ConflictCode &&
+            (options.DestinationCondition is not null || !options.Overwrite);
+        return new PromoteOutcome(moved, enforcement, Touched: !refused, []);
     }
 
     /// <summary>Every <see cref="StorageErrorInfo.LeftBehindKey"/> entry in an error's details.</summary>
@@ -402,6 +419,33 @@ internal static class StagedWriter
         return [.. details.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(part => part.StartsWith(prefix, StringComparison.Ordinal) && part.Length > prefix.Length)
             .Select(part => part[prefix.Length..])];
+    }
+
+    /// <summary>
+    /// Completes a committed staged upload or streamed write whose provider reported internal objects left behind
+    /// (its own backup or staging copy). Those still there are reported: as a <c>storage.partial_failure</c> that
+    /// carries <c>destinationState=complete</c> and one <c>leftBehind</c> entry each, since the result of an upload
+    /// has no other place for them. None still there (or none reported) is the confirmed result as it is.
+    /// </summary>
+    internal static async Task<Result<StorageItem>> ReportLeftBehindAsync(IStorageService destination, string path, Result<StorageItem> confirmed, IReadOnlyList<string> leftBehind)
+    {
+        var remaining = new List<string>();
+        foreach (var left in leftBehind)
+        {
+            Result<bool> exists;
+            try { exists = await destination.ExistsAsync(left, CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception error) { exists = Result<bool>.Failure(StorageErrors.FromException(error, "Read transfer leftover")); }
+            if (exists.IsFailure || exists.Value)
+                remaining.Add(left);
+        }
+        if (remaining.Count == 0)
+            return confirmed;
+        var details = string.Join(';', remaining.Select(left => $"{StorageErrorInfo.LeftBehindKey}={left}"));
+        return Result<StorageItem>.Failure(confirmed.IsFailure
+            ? AppendDetails(confirmed.Error!, details)
+            : StorageErrors.PartialFailure(
+                $"'{path}' was written, but the provider left internal objects behind.",
+                $"{StorageErrorInfo.DestinationStateKey}=complete;{details}"));
     }
 
     /// <summary>Appends <c>key=value</c> details to an error, keeping what the provider put there.</summary>

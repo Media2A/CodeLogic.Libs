@@ -142,7 +142,7 @@ public sealed class ReviewTransferTests
         await storage.UploadBytesAsync(stagedForA, [.. "AAAA"u8]);
 
         var uploaded = await storage.UploadAsync("f.bin", new MemoryStream(content),
-            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "b" });
+            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "b", SourceIdentityIsContentVersion = true });
 
         Assert.True(uploaded.IsSuccess, uploaded.Error?.ToString());
         Assert.Equal(content, (await storage.DownloadBytesAsync("f.bin")).Value!);
@@ -159,7 +159,7 @@ public sealed class ReviewTransferTests
         await storage.UploadBytesAsync(staged, [.. "XXXX"u8]);
 
         var uploaded = await storage.UploadAsync("f.bin", new MemoryStream(content),
-            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "a", Verify = true });
+            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "a", SourceIdentityIsContentVersion = true, Verify = true });
 
         Assert.True(uploaded.IsSuccess, uploaded.Error?.ToString());
         Assert.Equal(content, (await storage.DownloadBytesAsync("f.bin")).Value!);
@@ -174,7 +174,7 @@ public sealed class ReviewTransferTests
         byte[] content = [.. "AAAAAAAA"u8];
 
         var uploaded = await storage.UploadAsync("f.bin", new MemoryStream(content),
-            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "a" });
+            new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "a", SourceIdentityIsContentVersion = true });
 
         Assert.True(uploaded.IsSuccess, uploaded.Error?.ToString());
         Assert.Equal(content, (await storage.DownloadBytesAsync("f.bin")).Value!);

@@ -199,7 +199,7 @@ public sealed class S3EmulatorTests
         var path = $"resume-{Guid.NewGuid():N}.bin";
         await storage.UploadBytesAsync(path, [1, 2]);
         var resumed = await storage.UploadAsync(path, new MemoryStream([1, 2, 3, 4]),
-            new CL.Storage.Models.StorageUploadOptions { ConflictPolicy = CL.Storage.Models.StorageConflictPolicy.Resume, SourceIdentity = "resume-test" });
+            new CL.Storage.Models.StorageUploadOptions { ConflictPolicy = CL.Storage.Models.StorageConflictPolicy.Resume, SourceIdentity = "resume-test", SourceIdentityIsContentVersion = true });
         Assert.True(resumed.IsSuccess, resumed.Error?.ToString());
         Assert.Equal([1, 2, 3, 4], (await storage.DownloadBytesAsync(path)).Value!);
         await storage.DeleteAsync(path);

@@ -141,11 +141,11 @@ internal static class StorageTransferPipeline
         {
             if (!source.CanSeek)
                 return Result<StorageItem>.Failure(StorageErrors.Unsupported("Resuming an upload needs a seekable source stream."));
-            // Staged bytes are reused only for the same source; a length alone would let a different stream
-            // of the same size continue an old prefix.
-            if (options.SourceIdentity is null && options.SourceLastModified is null)
+            // Staged bytes are reused only for the same content; a length alone, or a name alone (an edited file
+            // of the same length keeps its path), would let different content continue an old prefix.
+            if (options.SourceLastModified is null && !(options.SourceIdentity is not null && options.SourceIdentityIsContentVersion))
                 return Result<StorageItem>.Failure(StorageErrors.InvalidContent(
-                    "Resuming an upload needs SourceIdentity or SourceLastModified to identify the source."));
+                    "Resuming an upload needs SourceLastModified, or a SourceIdentity marked SourceIdentityIsContentVersion, so that changed content is never appended to an old prefix."));
             overwrite = true;
             var existing = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
             // The check reads the caller's stream directly: hashing is not an upload, so neither speed limits nor
@@ -190,28 +190,49 @@ internal static class StorageTransferPipeline
             var details = written.StagingLeft is { } left ? $"stagingPath={left};bytesStaged={written.BytesStaged}" : string.Empty;
             return Result<StorageItem>.Failure(StagedWriter.AppendDetails(written.Error!, details));
         }
-        Result promoted;
         try
         {
-            // The condition goes to the provider's move, which enforces it atomically where it can.
-            (promoted, _) = await StagedWriter.PromoteAsync(
-                destination, written.Content!.StagingPath, path, overwrite, options.Condition, options.CreateParents, cancellationToken).ConfigureAwait(false);
+            if (written.Lease is { } lease)
+            {
+                // Promoted only while this upload still holds its part file; one taken over is someone else's.
+                var owned = await lease.StillOwnedAsync(cancellationToken).ConfigureAwait(false);
+                if (owned.IsFailure) return Result<StorageItem>.Failure(owned.Error!);
+                if (!owned.Value)
+                    return Result<StorageItem>.Failure(StorageErrors.Conflict(
+                        $"The staged data for '{path}' was taken over by another transfer, so it was not committed."));
+            }
+            PromoteOutcome promoted;
+            try
+            {
+                // The condition goes to the provider's move, which enforces it atomically where it can.
+                promoted = await StagedWriter.PromoteCoreAsync(
+                    destination, written.Content!.StagingPath, path, overwrite, options.Condition, options.CreateParents, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // A resumed upload keeps its complete part file, so retrying it only promotes.
+                if (!written.Resumable)
+                    await StagedWriter.DeleteAsync(destination, written.Content!.StagingPath).ConfigureAwait(false);
+                throw;
+            }
+            if (promoted.Result.IsFailure)
+            {
+                if (written.Resumable)
+                    return Result<StorageItem>.Failure(promoted.Result.Error!);
+                var removed = await StagedWriter.DeleteAsync(destination, written.Content.StagingPath).ConfigureAwait(false);
+                return Result<StorageItem>.Failure(removed.IsFailure
+                    ? StagedWriter.AppendDetails(promoted.Result.Error!, $"{StorageErrorInfo.LeftBehindKey}={written.Content.StagingPath}")
+                    : promoted.Result.Error!);
+            }
+            // Committed: report the result even if the caller cancels now, and what the provider left behind.
+            var confirmed = await StagedWriter.ConfirmPromotedAsync(destination, path, written.Content, CancellationToken.None).ConfigureAwait(false);
+            return await StagedWriter.ReportLeftBehindAsync(destination, path, confirmed, promoted.LeftBehind).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        finally
         {
-            // A resumed upload keeps its complete part file, so retrying it only promotes.
-            if (!written.Resumable)
-                await StagedWriter.DeleteAsync(destination, written.Content!.StagingPath).ConfigureAwait(false);
-            throw;
+            if (written.Lease is { } held)
+                await held.ReleaseAsync().ConfigureAwait(false);
         }
-        if (promoted.IsFailure)
-        {
-            if (!written.Resumable)
-                await StagedWriter.DeleteAsync(destination, written.Content.StagingPath).ConfigureAwait(false);
-            return Result<StorageItem>.Failure(promoted.Error!);
-        }
-        // Committed: report the result even if the caller cancels now.
-        return await StagedWriter.ConfirmPromotedAsync(destination, path, written.Content, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>

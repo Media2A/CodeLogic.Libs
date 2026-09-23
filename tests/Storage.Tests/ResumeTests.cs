@@ -120,7 +120,7 @@ public sealed class ResumeTests
         Assert.True((await storage.ExistsAsync("sub/user.txt")).Value);
     }
 
-    private static StorageUploadOptions Resume() => new() { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "test-source" };
+    private static StorageUploadOptions Resume() => new() { ConflictPolicy = StorageConflictPolicy.Resume, SourceIdentity = "test-source", SourceIdentityIsContentVersion = true };
 
     private static LocalStorageBackend Local(string root) => new("local", new LocalConnectionConfig { RootPath = root });
 
