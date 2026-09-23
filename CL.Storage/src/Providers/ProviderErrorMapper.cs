@@ -59,7 +59,9 @@ internal static class ProviderErrorMapper
             return StorageErrors.ServerBusy(
                 $"{operation}: all {exhausted.MaxSessions} {service} sessions are in use.",
                 "reason=session_limit");
-        if (Find<AuthenticationException>(exception) is not null)
+        // A TLS stack error also arrives after the handshake (TLS 1.3 refuses a client certificate then), inside
+        // an IOException rather than an AuthenticationException; it is still a TLS failure, not a lost connection.
+        if (Find<AuthenticationException>(exception) is not null || TlsDiagnosis.IsPlatformTlsFailure(exception))
             return StorageErrors.TlsFailure($"{operation}: the {service} TLS handshake or certificate validation failed.", TlsDiagnosis.Details(exception));
         if (IsDiskFull(exception))
             return StorageErrors.QuotaExceeded($"{operation}: insufficient storage space.");

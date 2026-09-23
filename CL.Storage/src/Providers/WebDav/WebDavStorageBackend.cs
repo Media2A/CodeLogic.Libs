@@ -77,7 +77,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.WebDav, observer);
-        _retry.Enrich = error => TlsDiagnosis.Enrich(error, Identity);
+        _retry.Enrich = (error, started) => TlsDiagnosis.Enrich(error, Identity, started);
         _http = http;
         _endpoint = endpoint;
         _client = client;
@@ -92,6 +92,9 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
 
     /// <summary>Identifies the listing snapshots continuation tokens refer to; settings-based so tokens outlive a registration.</summary>
     internal string? ListingScope { get; init; }
+
+    /// <summary>A resource the HTTP stack uses (a client certificate), disposed with the backend.</summary>
+    internal IDisposable? Owned { get; init; }
     /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.WebDav;
     /// <inheritdoc />
@@ -534,6 +537,7 @@ public sealed class WebDavStorageBackend : IStorageBackend, IStorageMetadataServ
         {
             _client.Dispose();
             _http?.Dispose();
+            Owned?.Dispose();
         }
         return ValueTask.CompletedTask;
     }

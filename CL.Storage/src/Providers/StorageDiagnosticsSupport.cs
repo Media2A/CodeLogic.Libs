@@ -68,6 +68,19 @@ internal sealed class ServerIdentityRecorder
         }
     }
 
+    private long _clientCertificateRequestTicks;
+
+    /// <summary>Gets when a server last asked for a client certificate during a TLS handshake.</summary>
+    public DateTimeOffset? ClientCertificateRequestedAt =>
+        Interlocked.Read(ref _clientCertificateRequestTicks) is var ticks and > 0 ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
+
+    /// <summary>
+    /// Records that the server asked for a client certificate. TLS 1.3 servers refuse a missing or untrusted
+    /// one only after the handshake, and some platforms (SChannel) then report a dropped connection rather
+    /// than the alert; this lets that drop be recognised.
+    /// </summary>
+    public void RecordClientCertificateRequest() => Interlocked.Exchange(ref _clientCertificateRequestTicks, DateTimeOffset.UtcNow.UtcTicks);
+
     public void RecordHostKey(string? algorithm, string fingerprintSha256, bool trusted) =>
         Set(new StorageServerIdentity(
             "ssh-host-key",

@@ -22,8 +22,17 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
         var shared = SharedResources.Acquire(key, () =>
         {
             var recorder = new ServerIdentityRecorder();
-            return new SharedPool<AsyncFtpClient>(FtpStorageBackend.CreatePool(() => CreateClient(value, recorder), value.Session, AfterConnect(value)), recorder);
-        }, pool => pool.Pool.DisposeAsync());
+            // One client certificate for every session of the pool, disposed with it.
+            var certificate = ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword);
+            return new SharedPool<AsyncFtpClient>(FtpStorageBackend.CreatePool(() => CreateClient(value, recorder, certificate), value.Session, AfterConnect(value)), recorder)
+            {
+                Owned = certificate
+            };
+        }, async pool =>
+        {
+            await pool.Pool.DisposeAsync().ConfigureAwait(false);
+            pool.Owned?.Dispose();
+        });
         var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new FtpStorageBackend(
             connectionId,
@@ -39,7 +48,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
         };
     }
 
-    private static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null)
+    private static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
     {
         var config = new FtpConfig
         {
@@ -101,7 +110,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             config.NoopInterval = checked(session.KeepAliveSeconds * 1000);
         }
 
-        if (ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword) is { } certificate)
+        if (certificate is not null)
             config.ClientCertificates.Add(certificate);
 
         var client = CreateProxiedClient(value, config);

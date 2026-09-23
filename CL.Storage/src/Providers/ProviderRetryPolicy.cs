@@ -65,8 +65,11 @@ internal sealed class ProviderRetryPolicy
     public static ProviderRetryPolicy None(string connectionId, StorageProvider provider) =>
         new(new StorageRetryConfig { RetryCount = 0 }, connectionId, provider);
 
-    /// <summary>Gets or sets a hook that adds context to every failed attempt, such as the certificate a TLS failure refused.</summary>
-    public Func<Error, Error>? Enrich { get; set; }
+    /// <summary>
+    /// Gets or sets a hook that adds context to every failed attempt, such as the certificate a TLS failure
+    /// refused; it receives the error and when the attempt started.
+    /// </summary>
+    public Func<Error, DateTimeOffset, Error>? Enrich { get; set; }
 
     public Task<Result> ExecuteAsync(
         string operation,
@@ -75,8 +78,9 @@ internal sealed class ProviderRetryPolicy
         CancellationToken cancellationToken) =>
         ExecuteCoreAsync(operation, kind, async (number, token) =>
         {
+            var started = DateTimeOffset.UtcNow;
             var result = await attempt(number, token).ConfigureAwait(false);
-            return result.IsFailure && Enrich is { } enrich ? Result.Failure(enrich(result.Error!)) : result;
+            return result.IsFailure && Enrich is { } enrich ? Result.Failure(enrich(result.Error!, started)) : result;
         }, static result => result.Error, cancellationToken);
 
     public Task<Result<T>> ExecuteAsync<T>(
@@ -86,8 +90,9 @@ internal sealed class ProviderRetryPolicy
         CancellationToken cancellationToken) =>
         ExecuteCoreAsync(operation, kind, async (number, token) =>
         {
+            var started = DateTimeOffset.UtcNow;
             var result = await attempt(number, token).ConfigureAwait(false);
-            return result.IsFailure && Enrich is { } enrich ? Result<T>.Failure(enrich(result.Error!)) : result;
+            return result.IsFailure && Enrich is { } enrich ? Result<T>.Failure(enrich(result.Error!, started)) : result;
         }, static result => result.Error, cancellationToken);
 
     /// <summary>Runs an upload, replaying the source from its starting position on retry.</summary>

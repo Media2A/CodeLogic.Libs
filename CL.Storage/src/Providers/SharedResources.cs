@@ -104,6 +104,8 @@ internal sealed class SharedPool<TClient>(ProviderClientPool<TClient> pool, Serv
 {
     public ProviderClientPool<TClient> Pool { get; } = pool;
     public ServerIdentityRecorder Identity { get; } = identity;
+    /// <summary>A resource the pool's sessions use (a client certificate), disposed with the pool.</summary>
+    public IDisposable? Owned { get; init; }
 }
 
 /// <summary>A backend's use of a <see cref="SharedPool{TClient}"/>.</summary>

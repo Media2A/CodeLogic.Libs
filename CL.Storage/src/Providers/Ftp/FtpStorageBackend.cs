@@ -93,7 +93,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             _clients.SessionOpened += _sessionOpened;
         }
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Ftp, observer);
-        _retry.Enrich = error => TlsDiagnosis.Enrich(error, Identity);
+        _retry.Enrich = (error, started) => TlsDiagnosis.Enrich(error, Identity, started);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }

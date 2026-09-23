@@ -200,24 +200,95 @@ public sealed class TlsDiagnosisTests
     [InlineData("error:0A00045C:SSL routines::tlsv13 alert certificate required:SSL alert number 116", "client_certificate_rejected")]
     [InlineData("error:0A00042E:SSL routines::tlsv1 alert protocol version:SSL alert number 70", "protocol_mismatch")]
     [InlineData("Authentication failed because the remote party has closed the transport stream.", "handshake_failed")]
+    // SChannel (Windows) and macOS name the alert instead.
+    [InlineData("Authentication failed because the remote party sent a TLS alert: 'BadCertificate'.", "client_certificate_rejected")]
+    [InlineData("Authentication failed because the remote party sent a TLS alert: 'CertificateRequired'.", "client_certificate_rejected")]
+    [InlineData("Authentication failed because the remote party sent a TLS alert: 'UnknownCA'.", "client_certificate_rejected")]
+    [InlineData("Authentication failed because the remote party sent a TLS alert: 'ProtocolVersion'.", "protocol_mismatch")]
+    [InlineData("Authentication failed because the remote party sent a TLS alert: 'HandshakeFailure'.", "handshake_failed")]
     public void Tls_failures_are_classified(string message, string reason) =>
         Assert.Equal(reason, TlsDiagnosis.Reason(new System.Security.Authentication.AuthenticationException("Authentication failed", new Exception(message))));
 
+    [Theory]
+    // SChannel statuses are matched by code, since Windows localizes their messages.
+    [InlineData(unchecked((int)0x80090302), "protocol_mismatch")]        // SEC_E_UNSUPPORTED_FUNCTION: no protocol in common
+    [InlineData(unchecked((int)0x80090331), "protocol_mismatch")]        // SEC_E_ALGORITHM_MISMATCH
+    [InlineData(unchecked((int)0x80090325), "client_certificate_rejected")] // the server's unknown_ca alert about our certificate
+    [InlineData(unchecked((int)0x8009030D), "client_certificate_rejected")] // SEC_E_UNKNOWN_CREDENTIALS: our key cannot be used
+    [InlineData(unchecked((int)0x80090326), "handshake_failed")]         // SEC_E_ILLEGAL_MESSAGE says nothing specific
+    public void SChannel_statuses_are_classified_by_code(int status, string reason)
+    {
+        var error = new IOException("The decryption operation failed, see inner exception.", new System.ComponentModel.Win32Exception(status));
+
+        Assert.True(TlsDiagnosis.IsPlatformTlsFailure(error));
+        Assert.Equal(reason, TlsDiagnosis.Reason(error));
+    }
+
+    [Theory]
+    // OpenSSL reports a post-handshake refusal inside an IOException, with the alert in a CryptographicException.
+    [InlineData("error:0A00045C:SSL routines::tlsv13 alert certificate required", "client_certificate_rejected")]
+    [InlineData("error:0A000418:SSL routines::tlsv1 alert unknown ca", "client_certificate_rejected")]
+    public void OpenSsl_errors_after_the_handshake_are_tls_failures(string message, string reason)
+    {
+        var error = new HttpRequestException("An error occurred while sending the request.",
+            new IOException("The decryption operation failed, see inner exception.",
+                new Exception("Decrypt failed with OpenSSL error - SSL_ERROR_SSL.", new CryptographicException(message))));
+
+        Assert.True(TlsDiagnosis.IsPlatformTlsFailure(error));
+        Assert.Equal(reason, TlsDiagnosis.Reason(error));
+        Assert.Equal(StorageErrors.TlsFailureCode, ProviderErrorMapper.FromTransport(error, "Check", "WebDAV")!.Code);
+    }
+
     [Fact]
-    public void A_recent_refused_certificate_is_attached_to_the_failure()
+    public void A_dropped_connection_after_a_client_certificate_request_is_a_refused_client_certificate()
+    {
+        var recorder = new ServerIdentityRecorder();
+        var started = DateTimeOffset.UtcNow;
+        recorder.RecordClientCertificateRequest();
+
+        var enriched = TlsDiagnosis.Enrich(StorageErrors.ConnectionLost("lost", "httpStatus=0"), recorder, started);
+        var unrelated = TlsDiagnosis.Enrich(StorageErrors.ConnectionLost("lost"), recorder, DateTimeOffset.UtcNow.AddSeconds(5));
+
+        Assert.Equal(StorageErrors.TlsFailureCode, enriched.Code);
+        Assert.True(StorageErrorInfo.TryGetDetail(enriched, StorageErrorInfo.TlsReasonKey, out var reason));
+        Assert.Equal("client_certificate_rejected", reason);
+        Assert.True(StorageErrorInfo.TryGetDetail(enriched, StorageErrorInfo.HttpStatusKey, out _));
+        Assert.Equal(StorageErrors.ConnectionLostCode, unrelated.Code);
+    }
+
+    [Fact]
+    public void A_certificate_refused_during_the_attempt_is_attached_and_other_details_are_kept()
+    {
+        var recorder = new ServerIdentityRecorder();
+        using var key = RSA.Create(2048);
+        using var certificate = new CertificateRequest("CN=test", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+            .CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        var started = DateTimeOffset.UtcNow;
+        recorder.RecordCertificate(certificate, trusted: false);
+
+        var enriched = TlsDiagnosis.Enrich(StorageErrors.TlsFailure("refused", "tlsReason=handshake_failed;httpStatus=0"), recorder, started);
+
+        Assert.True(StorageErrorInfo.TryGetDetail(enriched, StorageErrorInfo.TlsReasonKey, out var reason));
+        Assert.Equal("server_certificate_rejected", reason);
+        Assert.True(StorageErrorInfo.TryGetDetail(enriched, StorageErrorInfo.PresentedPublicKeyKey, out var pin));
+        Assert.Equal(TlsPins.PublicKeyPin(certificate), pin);
+        Assert.True(StorageErrorInfo.TryGetDetail(enriched, StorageErrorInfo.HttpStatusKey, out var status));
+        Assert.Equal("0", status);
+    }
+
+    [Fact]
+    public void A_certificate_refused_before_the_attempt_is_not_blamed_for_it()
     {
         var recorder = new ServerIdentityRecorder();
         using var key = RSA.Create(2048);
         using var certificate = new CertificateRequest("CN=test", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
             .CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
         recorder.RecordCertificate(certificate, trusted: false);
+        var original = StorageErrors.TlsFailure("refused", "tlsReason=protocol_mismatch");
 
-        var enriched = TlsDiagnosis.Enrich(StorageErrors.TlsFailure("refused", "tlsReason=handshake_failed"), recorder);
+        var enriched = TlsDiagnosis.Enrich(original, recorder, DateTimeOffset.UtcNow.AddSeconds(5));
 
-        Assert.True(StorageErrorInfo.TryGetDetail(enriched, StorageErrorInfo.TlsReasonKey, out var reason));
-        Assert.Equal("server_certificate_rejected", reason);
-        Assert.True(StorageErrorInfo.TryGetDetail(enriched, StorageErrorInfo.PresentedPublicKeyKey, out var pin));
-        Assert.Equal(TlsPins.PublicKeyPin(certificate), pin);
+        Assert.Same(original, enriched);
     }
 }
 

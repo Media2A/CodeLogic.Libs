@@ -18,7 +18,9 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
         var value = (WebDavConnectionConfig)configuration;
         var endpoint = new Uri(value.Endpoint, UriKind.Absolute);
         var identity = new ServerIdentityRecorder();
-        var http = CreateHttpClient(value, endpoint, identity);
+        // Owned by the backend, which disposes it with its HTTP stack.
+        var certificate = ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword);
+        var http = CreateHttpClient(value, endpoint, identity, certificate);
         var client = new Client(http)
         {
             Server = endpoint.GetLeftPart(UriPartial.Authority) + "/",
@@ -39,7 +41,8 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             new Uri(endpoint.GetLeftPart(UriPartial.Authority)))
         {
             Identity = identity,
-            ListingScope = ProviderSettingsKey.For(value)
+            ListingScope = ProviderSettingsKey.For(value),
+            Owned = certificate
         };
     }
 
@@ -47,7 +50,7 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
     /// Builds the HTTP stack directly so TLS pinning, client certificates, proxies, connection limits,
     /// and Digest/NTLM/Negotiate all apply; the WebDAV client's own constructors expose none of them.
     /// </summary>
-    internal static HttpClient CreateHttpClient(WebDavConnectionConfig value, Uri endpoint, ServerIdentityRecorder? identity = null)
+    internal static HttpClient CreateHttpClient(WebDavConnectionConfig value, Uri endpoint, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
     {
         var handler = new SocketsHttpHandler
         {
@@ -75,8 +78,17 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             identity?.RecordCertificate(certificate, accepted);
             return accepted;
         };
-        if (ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword) is { } certificate)
+        if (certificate is not null)
             handler.SslOptions.ClientCertificates = [certificate];
+        if (identity is not null)
+        {
+            // Asked for during the handshake whether or not a certificate is configured; see RecordClientCertificateRequest.
+            handler.SslOptions.LocalCertificateSelectionCallback = (_, _, _, _, _) =>
+            {
+                identity.RecordClientCertificateRequest();
+                return certificate!;
+            };
+        }
 
         switch (value.AuthenticationMode)
         {

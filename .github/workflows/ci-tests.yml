@@ -178,6 +178,7 @@ jobs:
       CL_STORAGE_TEST_FTPS_PASS: cltest-pw
       CL_STORAGE_TEST_WEBDAV_DIGEST_URL: http://127.0.0.1:8081/
       CL_STORAGE_TEST_WEBDAV_TLS_URL: https://localhost:8443/
+      CL_STORAGE_TEST_WEBDAV_MTLS_URL: https://localhost:8444/
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -191,7 +192,7 @@ jobs:
         shell: bash
         run: |
           docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d --build
-          for port in 2021 2022 2023 2024 8080 8081 8443 9010 10000 4443 8082 3128 1080; do
+          for port in 2021 2022 2023 2024 8080 8081 8443 8444 9010 10000 4443 8082 3128 1080; do
             for i in {1..120}; do
               if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi
               sleep 1

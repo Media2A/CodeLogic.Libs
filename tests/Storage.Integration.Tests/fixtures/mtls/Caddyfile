@@ -1,0 +1,15 @@
+# WebDAV over TLS 1.3 only, requiring a client certificate issued by client-ca.crt.
+{
+	auto_https disable_redirects
+}
+
+https://localhost:443 {
+	tls internal {
+		protocols tls1.3
+		client_auth {
+			mode require_and_verify
+			trust_pool file /mtls/client-ca.crt
+		}
+	}
+	reverse_proxy webdav:80
+}

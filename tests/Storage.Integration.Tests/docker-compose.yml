@@ -141,3 +141,13 @@ services:
     command: caddy reverse-proxy --from https://localhost:443 --to webdav:80 --internal-certs
     ports:
       - "8443:443"
+
+  # WebDAV over TLS 1.3 only that requires a client certificate from fixtures/mtls/client-ca.crt, for
+  # mutual TLS, refused-client-certificate, and protocol-mismatch tests.
+  webdav-mtls:
+    image: caddy:2-alpine
+    command: caddy run --config /mtls/Caddyfile --adapter caddyfile
+    volumes:
+      - ./fixtures/mtls:/mtls:ro
+    ports:
+      - "8444:443"
