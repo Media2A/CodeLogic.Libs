@@ -429,6 +429,13 @@ public sealed class AzureBlobStorageBackend :
     /// copied. Once the copy committed, a failure to delete the source returns <c>storage.partial_failure</c> with
     /// <c>destinationState=complete</c> and <c>leftBehind</c> naming the source, and cancellation no longer applies.
     /// A directory is copied through the relay and each copied blob deleted under the identity it was listed with.
+    /// <para>
+    /// Snapshots do not move: the copy carries only the blob's current content, and deleting the source deletes its
+    /// snapshots with it, as <see cref="DeleteAsync"/> does (Azure deletes a blob with snapshots only when told to
+    /// delete them too).
+    /// Previous versions on an account with blob versioning are kept by Azure as usual. To keep snapshots, copy the
+    /// blob and delete the source yourself.
+    /// </para>
     /// </remarks>
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -474,6 +481,9 @@ public sealed class AzureBlobStorageBackend :
             return Result.Failure(ObjectStoreMoves.SourceKept("Azure Blob", source.Value!, Map(error, "Delete moved Azure blob")));
         }
     }
+
+    /// <summary>Runs right after a server-side copy started, so a test can cancel while it is pending.</summary>
+    internal Func<Task>? AfterCopyStarted { get; init; }
 
     /// <summary>A copy or move source: the blob (at <paramref name="versionId"/> when set), or a directory.</summary>
     private async Task<Result<StorageItem>> SourceInfoAsync(string path, string? versionId, CancellationToken cancellationToken)
@@ -525,7 +535,12 @@ public sealed class AzureBlobStorageBackend :
                 SourceConditions = source.ETag is null ? null : new BlobRequestConditions { IfMatch = new ETag(source.ETag) },
                 DestinationConditions = destinationConditions
             }, cancellationToken).ConfigureAwait(false);
-            await operation.WaitForCompletionAsync(cancellationToken).ConfigureAwait(false);
+            if (AfterCopyStarted is { } started) await started().ConfigureAwait(false);
+            // Once started, the copy has already replaced the destination (a pending copy has no old content to go
+            // back to), so it is waited for whatever the caller's token says: abandoning it would leave a failed copy
+            // over the old content, and the caller would report nothing committed. (The started operation keeps the
+            // caller's token for its polls, so a fresh one follows the copy by its id.)
+            await new CopyFromUriOperation(operation.Id, Blob(destinationPath)).WaitForCompletionAsync(CancellationToken.None).ConfigureAwait(false);
             return Result.Success();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
