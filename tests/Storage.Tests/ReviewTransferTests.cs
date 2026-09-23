@@ -56,6 +56,9 @@ public sealed class ReviewTransferTests
 
         Assert.Equal(StorageErrors.ConflictCode, report.Error?.Code);
         Assert.False(report.DestinationCommitted);
+        // needs-review E: nothing was replaced, so nothing was restored (the concurrent-delete case is
+        // NeedsReviewTransferTests.A_destination_deleted_while_its_condition_is_checked_is_not_brought_back).
+        Assert.Null(report.BackupRestored);
         Assert.Equal([7, 7, 7], (await local.DownloadBytesAsync("target.bin")).Value!);
         Assert.Equal(["target.bin"], await ListAllAsync(local));
     }
@@ -65,13 +68,13 @@ public sealed class ReviewTransferTests
     {
         var (library, directory, _) = await TwoConnectionsAsync();
         using var __ = library; using var ___ = directory;
-        var deletes = 0;
+        var deletes = new System.Collections.Concurrent.ConcurrentQueue<string?>();
         var versions = new[]
         {
             new StorageVersion { Path = "f.bin", VersionId = "v1", ETag = "\"e1\"", Size = 3, LastModified = DateTimeOffset.UnixEpoch },
             new StorageVersion { Path = "f.bin", VersionId = "v2", ETag = "\"e2\"", Size = 5, LastModified = DateTimeOffset.UnixEpoch.AddDays(1), IsLatest = true }
         };
-        var source = new FakeStorageBackend(
+        var versioned = new FakeStorageBackend(
             "Src",
             capabilities: new StorageCapabilities(new StorageCapabilities(true, true, true, true, true, true).Features | StorageFeature.Versioning | StorageFeature.ConditionalDelete),
             getInfo: (path, _) => Task.FromResult(Result<StorageItem>.Success(new StorageItem
@@ -80,8 +83,19 @@ public sealed class ReviewTransferTests
             })),
             listVersions: (_, _, _) => Task.FromResult(Result<StorageVersionPage>.Success(new StorageVersionPage(versions, null))),
             downloadWithOptions: (_, options, _) => Task.FromResult(Result<Stream>.Success(
-                options?.VersionId == "v1" ? new MemoryStream([1, 2, 3]) : new MemoryStream([5, 5, 5, 5, 5]))),
-            delete: (_, _) => { Interlocked.Increment(ref deletes); return Task.FromResult(Result.Failure(StorageErrors.Conflict("not the expected version"))); });
+                options?.VersionId == "v1" ? new MemoryStream([1, 2, 3]) : new MemoryStream([5, 5, 5, 5, 5]))));
+        // needs-review E: the delete honours its condition like a server would (the current version is e2/v2), and
+        // every delete is recorded, so the test sees which version the move asked to delete.
+        var source = new InterceptBackend(versioned)
+        {
+            Delete = (_, options, _) =>
+            {
+                deletes.Enqueue(options?.Condition?.ExpectedETag);
+                return Task.FromResult(options?.Condition is { ExpectedETag: "\"e2\"" } or { ExpectedVersionId: "v2" }
+                    ? Result.Success()
+                    : Result.Failure(StorageErrors.Conflict("not the expected version")));
+            }
+        };
         Assert.True(library.RegisterBackend("Src", source).IsSuccess);
 
         var copied = await library.CopyAsync("Src", "f.bin", "B", "old.bin",
@@ -93,6 +107,14 @@ public sealed class ReviewTransferTests
         var moved = await library.MoveAsync("Src", "f.bin", "B", "moved.bin", new StorageTransferOptions { SourceVersionId = "v1" });
         Assert.Equal(StorageTransferOutcome.NeedsReconciliation, moved.Outcome);
         Assert.False(moved.SourceDeleted);
+        Assert.Equal(["\"e1\""], deletes);
+
+        // The latest version is moved and deleted under its own identity.
+        var latest = await library.MoveAsync("Src", "f.bin", "B", "latest.bin");
+        Assert.True(latest.IsSuccess, latest.Error?.ToString());
+        Assert.True(latest.SourceDeleted);
+        Assert.Equal(["\"e1\"", "\"e2\""], deletes);
+        Assert.Equal([5, 5, 5, 5, 5], (await library.GetStorage("B").DownloadBytesAsync("latest.bin")).Value!);
 
         var missing = await library.CopyAsync("Src", "f.bin", "B", "x.bin", new StorageTransferOptions { SourceVersionId = "v9" });
         Assert.Equal(StorageErrors.NotFoundCode, missing.Error?.Code);
@@ -184,9 +206,12 @@ public sealed class ReviewTransferTests
         var second = await library.CopyAsync("Src", "big.bin", "B", "big.bin",
             options with { ResumeToken = first.ResumeToken! with { StagingPath = foreign } });
 
+        // needs-review E, B3: the token is not followed, and the file it names is not the library's to delete (it
+        // may be another job's part file); the transfer's own part file is continued and promoted.
         Assert.True(second.IsSuccess, second.Error?.ToString());
         Assert.Equal(content, (await library.GetStorage("B").DownloadBytesAsync("big.bin")).Value!);
-        Assert.Equal(["big.bin"], await ListAllAsync(library.GetStorage("B")));
+        Assert.Equal(new[] { foreign, "big.bin" }.Order(), await ListAllAsync(library.GetStorage("B")));
+        Assert.Equal("junk"u8.ToArray(), (await library.GetStorage("B").DownloadBytesAsync(foreign)).Value!);
     }
 
     [Fact]

@@ -32,12 +32,28 @@ public sealed class ResumeTests
     {
         using var directory = new TestDirectory();
         var storage = Local(directory.Path);
-        await storage.UploadBytesAsync("big.bin", Full[..7]);
+        // An earlier upload of the same source dropped after 7 bytes; its part file keeps them.
+        var dropped = await storage.UploadAsync("big.bin", new DroppingStream(Full, 7), Resume());
+        Assert.False(dropped.IsSuccess);
+        var source = new CountingStream(Full);
 
-        var resumed = await storage.UploadAsync("big.bin", new MemoryStream(Full), Resume());
+        var resumed = await storage.UploadAsync("big.bin", source, Resume());
 
         Assert.True(resumed.IsSuccess, resumed.Error?.ToString());
         Assert.Equal(Full, (await storage.DownloadBytesAsync("big.bin")).Value);
+        // needs-review E: only the tail was read; a full re-upload would read all 20 bytes.
+        Assert.Equal(Full.Length - 7, source.BytesRead);
+    }
+
+    /// <summary>A seekable source that delivers a given number of bytes and then fails, as a dropped upload would.</summary>
+    private sealed class DroppingStream(byte[] content, int dropAt) : MemoryStream(content)
+    {
+        // MemoryStream routes a derived stream's span and async reads here.
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (Position >= dropAt) throw new IOException("The connection was reset.");
+            return base.Read(buffer, offset, (int)Math.Min(count, dropAt - Position));
+        }
     }
 
     [Fact]
