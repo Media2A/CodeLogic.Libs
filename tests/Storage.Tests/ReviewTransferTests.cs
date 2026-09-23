@@ -208,7 +208,7 @@ public sealed class ReviewTransferTests
 }
 
 /// <summary>Passes every call to an inner backend, runs a hook after each copy, and can answer uploads itself.</summary>
-internal sealed class HookedBackend(IStorageBackend inner, Func<string, string, Task> afterCopy, Func<string, Result<StorageItem>?>? upload = null) : IStorageBackend
+internal class HookedBackend(IStorageBackend inner, Func<string, string, Task> afterCopy, Func<string, Result<StorageItem>?>? upload = null) : IStorageBackend
 {
     public string ConnectionId => inner.ConnectionId;
     public StorageProvider Provider => inner.Provider;

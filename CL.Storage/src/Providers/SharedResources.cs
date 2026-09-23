@@ -49,6 +49,8 @@ internal static class SharedResources
         public Func<object, ValueTask> Dispose { get; } = dispose;
         public int Users { get; set; }
         public long Generation { get; set; }
+        /// <summary>Cancels the linger of a resource nobody uses, so it is disposed at once.</summary>
+        public CancellationTokenSource? Linger { get; set; }
     }
 
     /// <summary>Returns the shared resource for a key, creating it for the first user.</summary>
@@ -63,6 +65,8 @@ internal static class SharedResources
             }
             holder.Users++;
             holder.Generation++;
+            holder.Linger?.Cancel();
+            holder.Linger = null;
             return (T)holder.Value;
         }
     }
@@ -71,28 +75,56 @@ internal static class SharedResources
     public static async ValueTask ReleaseAsync(string key, TimeSpan linger)
     {
         long generation;
+        Holder released;
+        CancellationTokenSource? lingering = null;
         lock (Gate)
         {
-            if (!Resources.TryGetValue(key, out var holder)) return;
-            holder.Users--;
-            if (holder.Users > 0) return;
-            generation = holder.Generation;
+            if (!Resources.TryGetValue(key, out released!)) return;
+            released.Users--;
+            if (released.Users > 0) return;
+            generation = released.Generation;
+            if (linger > TimeSpan.Zero)
+                released.Linger = lingering = new CancellationTokenSource();
         }
-        if (linger > TimeSpan.Zero)
+        if (lingering is not null)
         {
-            try { await Task.Delay(linger).ConfigureAwait(false); }
-            catch (ObjectDisposedException) { }
+            // Cut short by a new user (which keeps the resource) or by FlushIdleAsync (which disposes it).
+            try { await Task.Delay(linger, lingering.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            finally { lingering.Dispose(); }
         }
         Holder? retired = null;
         lock (Gate)
         {
-            if (Resources.TryGetValue(key, out var holder) && holder.Users == 0 && holder.Generation == generation)
+            // The same holder, still unused since this release: a newer one under the key is left alone.
+            if (Resources.TryGetValue(key, out var holder) && ReferenceEquals(holder, released) && holder.Users == 0 && holder.Generation == generation)
             {
                 Resources.Remove(key);
                 retired = holder;
             }
         }
         if (retired is not null) await retired.Dispose(retired.Value).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Disposes every resource no one is using, instead of letting it linger; called when a storage library
+    /// stops, so its idle sessions do not outlive it. Resources other libraries still use are kept.
+    /// </summary>
+    public static async ValueTask FlushIdleAsync()
+    {
+        Holder[] idle;
+        lock (Gate)
+        {
+            idle = [.. Resources.Values.Where(holder => holder.Users == 0)];
+            foreach (var key in Resources.Where(pair => pair.Value.Users == 0).Select(pair => pair.Key).ToList())
+                Resources.Remove(key);
+            foreach (var holder in idle) holder.Linger?.Cancel();
+        }
+        foreach (var holder in idle)
+        {
+            try { await holder.Dispose(holder.Value).ConfigureAwait(false); }
+            catch (Exception) { /* Closing an idle session is best effort. */ }
+        }
     }
 
     /// <summary>How many resources are alive, for tests.</summary>

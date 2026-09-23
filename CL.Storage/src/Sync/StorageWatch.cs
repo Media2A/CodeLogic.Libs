@@ -18,8 +18,9 @@ public enum StorageChangeKind
     /// <summary>The item was renamed (native watching only; polling reports a delete and a create).</summary>
     Renamed,
     /// <summary>
-    /// Changes were lost because notifications arrived faster than they could be buffered (native watching
-    /// only). <see cref="StorageChange.Path"/> is the watched directory; list it again to catch up.
+    /// Changes may have been missed (native watching only): notifications arrived faster than they could be
+    /// buffered, or native watching stopped — the folder was removed or a network share dropped — and watching
+    /// continues by polling. <see cref="StorageChange.Path"/> is the watched directory; list it again to catch up.
     /// </summary>
     Overflow
 }
@@ -45,7 +46,8 @@ public sealed record StorageWatchOptions
     /// Gets whether polls are incremental: a folder is listed again only when its modification time changed,
     /// which is when entries were added, removed, or renamed in it. Edits to a file's content, and changes
     /// deep inside a folder whose own time did not change, are caught by the full rescan every
-    /// <see cref="FullRescanEvery"/> polls. Providers without folder times (object stores) list everything.
+    /// <see cref="FullRescanEvery"/> polls. Where folders have no times (object stores), listing them one by one
+    /// would cost more than one recursive listing, so every poll is a full listing there.
     /// </summary>
     public bool Incremental { get; init; }
     /// <summary>Gets how many polls pass between full rescans in incremental mode.</summary>
@@ -89,23 +91,68 @@ public static class StorageWatch
         if (options.FullRescanEvery < 1)
             throw new ArgumentOutOfRangeException(nameof(options), "FullRescanEvery must be at least 1.");
         return !options.ForcePolling && storage is IStorageWatchService native && storage.Capabilities.Supports(StorageFeature.ChangeNotifications)
-            ? native.WatchNativeAsync(path, options.Recursive, cancellationToken)
+            ? WatchNativeThenPollAsync(storage, native, path, options, cancellationToken)
             : PollAsync(storage, path, options, cancellationToken);
+    }
+
+    /// <summary>
+    /// Streams native notifications; if native watching fails (the folder was removed, a share dropped), reports
+    /// <see cref="StorageChangeKind.Overflow"/> so the caller rescans, and goes on by polling.
+    /// </summary>
+    private static async IAsyncEnumerable<StorageChange> WatchNativeThenPollAsync(
+        IStorageService storage,
+        IStorageWatchService native,
+        string path,
+        StorageWatchOptions options,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var failed = false;
+        var changes = native.WatchNativeAsync(path, options.Recursive, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        try
+        {
+            while (true)
+            {
+                try
+                {
+                    if (!await changes.MoveNextAsync().ConfigureAwait(false)) break;
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    failed = true;
+                    break;
+                }
+                yield return changes.Current;
+            }
+        }
+        finally
+        {
+            await changes.DisposeAsync().ConfigureAwait(false);
+        }
+        if (!failed) yield break;
+        // The polling baseline is taken before the caller is told to rescan, so nothing between the two is lost.
+        var baseline = await SnapshotAsync(storage, path, options.Recursive, cancellationToken).ConfigureAwait(false) ?? [];
+        var root = StoragePath.Normalize(path);
+        yield return new StorageChange(StorageChangeKind.Overflow, root.IsSuccess ? root.Value! : path, null, StorageItemType.Directory, DateTimeOffset.UtcNow);
+        await foreach (var change in PollAsync(storage, path, options, cancellationToken, baseline).ConfigureAwait(false))
+            yield return change;
     }
 
     private static async IAsyncEnumerable<StorageChange> PollAsync(
         IStorageService storage,
         string path,
         StorageWatchOptions options,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        Dictionary<string, StorageItem>? baseline = null)
     {
-        var previous = await SnapshotAsync(storage, path, options.Recursive, cancellationToken).ConfigureAwait(false) ?? [];
+        var previous = baseline ?? await SnapshotAsync(storage, path, options.Recursive, cancellationToken).ConfigureAwait(false) ?? [];
         using var timer = new PeriodicTimer(options.PollInterval);
         var polls = 0;
         while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
         {
             polls++;
-            var full = !options.Incremental || !options.Recursive || polls % options.FullRescanEvery == 0;
+            // Incremental polling only pays where folders carry their own modification times.
+            var foldersHaveTimes = previous.Values.Any(item => item.ItemType == StorageItemType.Directory && item.LastModified is not null);
+            var full = !options.Incremental || !options.Recursive || !foldersHaveTimes || polls % options.FullRescanEvery == 0;
             var current = full
                 ? await SnapshotAsync(storage, path, options.Recursive, cancellationToken).ConfigureAwait(false)
                 : await IncrementalSnapshotAsync(storage, path, previous, cancellationToken).ConfigureAwait(false);
@@ -219,8 +266,15 @@ public static class StorageWatch
         watcher.Deleted += (_, e) => Post(StorageChangeKind.Deleted, e.FullPath, null);
         watcher.Renamed += (_, e) => Post(StorageChangeKind.Renamed, e.FullPath, e.OldFullPath);
         // A full buffer drops notifications silently unless the error is handled; report it so the caller rescans.
-        watcher.Error += (_, _) =>
-            channel.Writer.TryWrite(new StorageChange(StorageChangeKind.Overflow, toStoragePath(fullPath) ?? string.Empty, null, StorageItemType.Directory, DateTimeOffset.UtcNow));
+        // Any other error stops the watcher for good (the folder was removed, a share dropped): end the stream
+        // with it, so the caller can fall back to polling.
+        watcher.Error += (_, e) =>
+        {
+            if (e.GetException() is InternalBufferOverflowException)
+                channel.Writer.TryWrite(new StorageChange(StorageChangeKind.Overflow, toStoragePath(fullPath) ?? string.Empty, null, StorageItemType.Directory, DateTimeOffset.UtcNow));
+            else
+                channel.Writer.TryComplete(e.GetException());
+        };
         watcher.EnableRaisingEvents = true;
         await foreach (var change in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             yield return change;

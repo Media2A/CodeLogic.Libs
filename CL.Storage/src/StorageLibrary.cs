@@ -295,6 +295,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 throw new InvalidOperationException(
                     $"Failed to dispose storage backend(s): {string.Join(", ", failedIds)}.");
             }
+            // Sessions kept warm for re-registration (LingerSeconds) do not outlive the library.
+            await Providers.SharedResources.FlushIdleAsync().ConfigureAwait(false);
         }
         finally
         {

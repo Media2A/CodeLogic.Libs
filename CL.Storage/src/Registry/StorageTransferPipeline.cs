@@ -43,7 +43,17 @@ internal static class StorageTransferPipeline
     /// <summary>Whether an upload call must go through <see cref="UploadAsync"/> first.</summary>
     public static bool Applies(object backend, StorageUploadOptions? options) =>
         options?.PipelineApplied != true &&
-        (options?.ConflictPolicy is not null || options?.Progress is not null || LimitsFor(backend).LimitsUploads || NeedsStaging(options));
+        (options?.ConflictPolicy is not null || options?.Progress is not null || LimitsFor(backend).LimitsUploads || NeedsStaging(options) ||
+         NeedsConditionStaging(backend, options));
+
+    /// <summary>
+    /// Whether an upload's <see cref="StorageUploadOptions.Condition"/> must be checked by the library: the
+    /// destination cannot enforce it itself, so the content is staged and the condition checked right before the
+    /// staged file replaces the destination.
+    /// </summary>
+    public static bool NeedsConditionStaging(object backend, StorageUploadOptions? options) =>
+        options?.Condition is { IsEmpty: false } &&
+        backend is IStorageService service && !service.Capabilities.Supports(StorageFeature.ConditionalUpdate);
 
     /// <summary>Whether an upload must go through a staging object: verification, an exact length, or a resume.</summary>
     public static bool NeedsStaging(StorageUploadOptions? options) =>
@@ -74,7 +84,7 @@ internal static class StorageTransferPipeline
         var inner = options with { Progress = null, PipelineApplied = true };
         try
         {
-            if (NeedsStaging(inner))
+            if (NeedsStaging(inner) || NeedsConditionStaging(destination, inner))
                 return await StagedUploadAsync(destination, path, stream, inner, cancellationToken).ConfigureAwait(false);
             return inner.ConflictPolicy is not null
                 ? await StorageConflictResolver.UploadAsync(destination, path, stream, inner, cancellationToken).ConfigureAwait(false)
