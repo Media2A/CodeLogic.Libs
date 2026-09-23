@@ -27,6 +27,22 @@ public static class StorageErrors
     public const string PartialFailureCode = "storage.partial_failure";
     /// <summary>Stable code for sanitized provider failures that have no narrower mapping.</summary>
     public const string ProviderErrorCode = "storage.provider_error";
+    /// <summary>Stable code for rejected credentials (bad password, key, or token).</summary>
+    public const string AuthenticationFailedCode = "storage.authentication_failed";
+    /// <summary>Stable code for an authenticated session that lacks permission for the operation.</summary>
+    public const string PermissionDeniedCode = "storage.permission_denied";
+    /// <summary>Stable code for TLS handshake, certificate pin, or certificate policy failures.</summary>
+    public const string TlsFailureCode = "storage.tls_failure";
+    /// <summary>Stable code for an SSH host key that is not trusted by the configured pins.</summary>
+    public const string HostKeyRejectedCode = "storage.host_key_rejected";
+    /// <summary>Stable code for a connection that could not be established (DNS, refused, unreachable, proxy).</summary>
+    public const string ConnectionFailedCode = "storage.connection_failed";
+    /// <summary>Stable code for an established connection that dropped during an operation.</summary>
+    public const string ConnectionLostCode = "storage.connection_lost";
+    /// <summary>Stable code for a server that is rate limiting or refusing more sessions.</summary>
+    public const string ServerBusyCode = "storage.server_busy";
+    /// <summary>Stable code for exhausted disk space or storage quota on the server.</summary>
+    public const string QuotaExceededCode = "storage.quota_exceeded";
 
     /// <summary>Creates an invalid-path error.</summary>
     /// <param name="message">Safe caller-facing explanation.</param>
@@ -83,6 +99,46 @@ public static class StorageErrors
     /// <param name="details">Optional sanitized diagnostics.</param>
     /// <returns>An internal error with <see cref="ProviderErrorCode"/>.</returns>
     public static Error ProviderError(string message, string details = "") => Error.Internal(ProviderErrorCode, message, details);
+    /// <summary>Creates a rejected-credentials error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics.</param>
+    /// <returns>An authorization error with <see cref="AuthenticationFailedCode"/>.</returns>
+    public static Error AuthenticationFailed(string message, string details = "") => Error.Unauthorized(AuthenticationFailedCode, message, details);
+    /// <summary>Creates a permission-denied error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics.</param>
+    /// <returns>An authorization error with <see cref="PermissionDeniedCode"/>.</returns>
+    public static Error PermissionDenied(string message, string details = "") => Error.Unauthorized(PermissionDeniedCode, message, details);
+    /// <summary>Creates a TLS failure error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics.</param>
+    /// <returns>An unavailable error with <see cref="TlsFailureCode"/>.</returns>
+    public static Error TlsFailure(string message, string details = "") => Error.Unavailable(TlsFailureCode, message, details);
+    /// <summary>Creates an untrusted-host-key error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics.</param>
+    /// <returns>An authorization error with <see cref="HostKeyRejectedCode"/>.</returns>
+    public static Error HostKeyRejected(string message, string details = "") => Error.Unauthorized(HostKeyRejectedCode, message, details);
+    /// <summary>Creates a connection-establishment error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics.</param>
+    /// <returns>An unavailable error with <see cref="ConnectionFailedCode"/>.</returns>
+    public static Error ConnectionFailed(string message, string details = "") => Error.Unavailable(ConnectionFailedCode, message, details);
+    /// <summary>Creates a dropped-connection error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics.</param>
+    /// <returns>An unavailable error with <see cref="ConnectionLostCode"/>.</returns>
+    public static Error ConnectionLost(string message, string details = "") => Error.Unavailable(ConnectionLostCode, message, details);
+    /// <summary>Creates a rate-limited or too-many-sessions error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics; include <c>retryAfterMs=</c> when the server supplied a delay.</param>
+    /// <returns>An unavailable error with <see cref="ServerBusyCode"/>.</returns>
+    public static Error ServerBusy(string message, string details = "") => Error.Unavailable(ServerBusyCode, message, details);
+    /// <summary>Creates a quota or disk-full error.</summary>
+    /// <param name="message">Safe caller-facing explanation.</param>
+    /// <param name="details">Optional sanitized diagnostics.</param>
+    /// <returns>A validation error with <see cref="QuotaExceededCode"/>.</returns>
+    public static Error QuotaExceeded(string message, string details = "") => Error.Validation(QuotaExceededCode, message, details);
 
     /// <summary>Maps common filesystem exceptions without exposing exception messages or secrets.</summary>
     /// <param name="exception">Exception to classify.</param>
@@ -94,9 +150,10 @@ public static class StorageErrors
         return exception switch
         {
             FileNotFoundException or DirectoryNotFoundException => NotFound($"{operation}: item was not found."),
-            UnauthorizedAccessException => Unauthorized($"{operation}: access was denied."),
+            UnauthorizedAccessException => PermissionDenied($"{operation}: access was denied."),
             TimeoutException => Timeout($"{operation}: operation timed out."),
             PathTooLongException or ArgumentException or NotSupportedException => InvalidPath($"{operation}: the path is invalid."),
+            IOException when Providers.ProviderErrorMapper.IsDiskFull(exception) => QuotaExceeded($"{operation}: insufficient storage space."),
             IOException => ProviderError($"{operation}: filesystem operation failed."),
             _ => ProviderError($"{operation}: provider operation failed.")
         };

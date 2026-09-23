@@ -1,6 +1,6 @@
 using System.Net;
-using System.Net.Security;
-using System.Security.Cryptography;
+using System.Net.Http.Headers;
+using System.Security.Cryptography.X509Certificates;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Models;
@@ -13,45 +13,110 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(WebDavConnectionConfig);
     public StorageProvider Provider => StorageProvider.WebDav;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (WebDavConnectionConfig)configuration;
         var endpoint = new Uri(value.Endpoint, UriKind.Absolute);
-        var timeout = TimeSpan.FromSeconds(value.TimeoutSeconds);
-        var client = value.AuthenticationMode switch
+        var identity = new ServerIdentityRecorder();
+        var http = CreateHttpClient(value, endpoint, identity);
+        var client = new Client(http)
         {
-            WebDavAuthenticationMode.BearerToken => new Client(value.BearerToken!, timeout, proxy: null),
-            WebDavAuthenticationMode.Windows => new Client(
-                CredentialCache.DefaultNetworkCredentials, timeout, proxy: null),
-            WebDavAuthenticationMode.Basic => new Client(
-                new NetworkCredential(value.Username, value.Password), timeout, proxy: null),
-            _ => new Client(new NetworkCredential(), timeout, proxy: null)
+            Server = endpoint.GetLeftPart(UriPartial.Authority) + "/",
+            BasePath = NormalizeBasePath(endpoint.AbsolutePath),
+            Port = endpoint.IsDefaultPort ? null : endpoint.Port,
+            CustomHeaders = value.Headers.ToArray()
         };
-        client.Server = endpoint.GetLeftPart(UriPartial.Authority) + "/";
-        client.BasePath = NormalizeBasePath(endpoint.AbsolutePath);
-        client.Port = endpoint.IsDefaultPort ? null : endpoint.Port;
-        client.CustomHeaders = value.Headers.ToArray();
-        var pins = value.TrustedCertificateSha256
-            .Select(fingerprint => CertificateFingerprint.TryNormalizeSha256(fingerprint, out var normalized) ? normalized : null)
-            .Where(fingerprint => fingerprint is not null)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (pins.Count > 0)
-        {
-            client.ServerCertificateValidationCallback = (_, certificate, _, _) =>
-            {
-                if (certificate is null)
-                    return false;
-                var hash = Convert.ToHexString(SHA256.HashData(certificate.GetRawCertData()));
-                return pins.Contains(hash);
-            };
-        }
         return new WebDavStorageBackend(
             connectionId,
             client,
             value.Root,
             client.BasePath,
             ownsClient: true,
-            maxBufferedDownloadBytes);
+            maxBufferedDownloadBytes,
+            value.Retry,
+            observer,
+            http,
+            new Uri(endpoint.GetLeftPart(UriPartial.Authority)))
+        {
+            Identity = identity
+        };
+    }
+
+    /// <summary>
+    /// Builds the HTTP stack directly so TLS pinning, client certificates, proxies, connection limits,
+    /// and Digest/NTLM/Negotiate all apply; the WebDAV client's own constructors expose none of them.
+    /// </summary>
+    internal static HttpClient CreateHttpClient(WebDavConnectionConfig value, Uri endpoint, ServerIdentityRecorder? identity = null)
+    {
+        var handler = new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            AutomaticDecompression = DecompressionMethods.All
+        };
+        if (value.MaxConnectionsPerServer is { } limit)
+            handler.MaxConnectionsPerServer = limit;
+        if (value.Proxy?.ToWebProxy() is { } proxy)
+        {
+            handler.Proxy = proxy;
+            handler.UseProxy = true;
+        }
+        else
+        {
+            handler.UseProxy = false;
+        }
+
+        var pins = new TlsPins(value.TrustedCertificateSha256, value.TrustedPublicKeySha256);
+        // Installed even without pins (where it keeps the default rule of no policy errors) so the
+        // presented certificate is recorded for diagnostics.
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
+        {
+            var accepted = pins.Accepts(certificate, errors, value.RequireValidCertificateChain);
+            identity?.RecordCertificate(certificate, accepted);
+            return accepted;
+        };
+        if (!string.IsNullOrWhiteSpace(value.ClientCertificatePath))
+        {
+            handler.SslOptions.ClientCertificates =
+            [
+                X509CertificateLoader.LoadPkcs12FromFile(value.ClientCertificatePath, value.ClientCertificatePassword)
+            ];
+        }
+
+        switch (value.AuthenticationMode)
+        {
+            case WebDavAuthenticationMode.Windows:
+                handler.Credentials = CredentialCache.DefaultNetworkCredentials;
+                handler.PreAuthenticate = true;
+                break;
+            case WebDavAuthenticationMode.Digest or WebDavAuthenticationMode.Ntlm or WebDavAuthenticationMode.Negotiate:
+                var scheme = value.AuthenticationMode switch
+                {
+                    WebDavAuthenticationMode.Digest => "Digest",
+                    WebDavAuthenticationMode.Ntlm => "NTLM",
+                    _ => "Negotiate"
+                };
+                // Scoping the credential to one scheme stops the handler from downgrading to Basic.
+                handler.Credentials = new CredentialCache
+                {
+                    { new Uri(endpoint.GetLeftPart(UriPartial.Authority)), scheme, new NetworkCredential(value.Username, value.Password) }
+                };
+                handler.PreAuthenticate = true;
+                break;
+        }
+
+        var http = new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(value.TimeoutSeconds) };
+        switch (value.AuthenticationMode)
+        {
+            case WebDavAuthenticationMode.Basic:
+                // Sent up front: waiting for a 401 challenge doubles every request.
+                var basic = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{value.Username}:{value.Password}"));
+                http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", basic);
+                break;
+            case WebDavAuthenticationMode.BearerToken:
+                http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", value.BearerToken);
+                break;
+        }
+        return http;
     }
 
     private static string NormalizeBasePath(string path)

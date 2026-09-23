@@ -73,11 +73,13 @@ internal static class ProviderPaging
             walked = true;
         }
 
-        var start = cursor.Value.LastPath is null ? 0 : FirstAfter(items, cursor.Value.LastPath);
-        var length = Math.Min(options.PageSize, items.Length - start);
+        // The snapshot is cached unfiltered, so the same walk serves any filter and pages stay full.
+        var visible = StorageListFilter.IsActive(options) ? [.. StorageListFilter.Apply(items, options)] : items;
+        var start = cursor.Value.LastPath is null ? 0 : FirstAfter(visible, cursor.Value.LastPath);
+        var length = Math.Min(options.PageSize, visible.Length - start);
         var page = new StorageItem[length];
-        Array.Copy(items, start, page, 0, length);
-        var next = start + length < items.Length ? EncodeToken(snapshotId, page[^1].Path) : null;
+        Array.Copy(visible, start, page, 0, length);
+        var next = start + length < visible.Length ? EncodeToken(snapshotId, page[^1].Path) : null;
 
         // Only a listing that continues can ever be resumed, so a listing that fits in one page is
         // not stored at all. The cache is process-wide and bounded, and a caller walking many small

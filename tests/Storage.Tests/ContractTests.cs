@@ -154,7 +154,15 @@ public sealed class StorageErrorTests
             StorageErrors.Unsupported("nope"),
             StorageErrors.TooLarge("large"),
             StorageErrors.PartialFailure("partial"),
-            StorageErrors.ProviderError("failed")
+            StorageErrors.ProviderError("failed"),
+            StorageErrors.AuthenticationFailed("auth"),
+            StorageErrors.PermissionDenied("denied"),
+            StorageErrors.TlsFailure("tls"),
+            StorageErrors.HostKeyRejected("host key"),
+            StorageErrors.ConnectionFailed("connect"),
+            StorageErrors.ConnectionLost("lost"),
+            StorageErrors.ServerBusy("busy"),
+            StorageErrors.QuotaExceeded("quota")
         ];
 
         Assert.Equal(
@@ -162,7 +170,9 @@ public sealed class StorageErrorTests
             {
                 "storage.invalid_path", "storage.invalid_content", "storage.not_found", "storage.unauthorized", "storage.timeout",
                 "storage.conflict", "storage.unavailable", "storage.unsupported", "storage.too_large",
-                "storage.partial_failure", "storage.provider_error"
+                "storage.partial_failure", "storage.provider_error", "storage.authentication_failed",
+                "storage.permission_denied", "storage.tls_failure", "storage.host_key_rejected", "storage.connection_failed",
+                "storage.connection_lost", "storage.server_busy", "storage.quota_exceeded"
             },
             errors.Select(error => error.Code));
     }

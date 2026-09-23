@@ -87,10 +87,16 @@ public sealed record StorageSignedUrl(
 /// <param name="BytesTransferred">Cumulative content bytes consumed or produced.</param>
 /// <param name="TotalBytes">Expected total byte count when known.</param>
 /// <param name="IsCompleted">Whether the transfer reached successful completion.</param>
+/// <param name="BytesPerSecond">Average speed since the transfer started.</param>
+/// <param name="EstimatedRemaining">Estimated time left when the total is known.</param>
+/// <param name="ItemPath">File being transferred, for directory transfers.</param>
 public sealed record StorageTransferProgress(
     long BytesTransferred,
     long? TotalBytes,
-    bool IsCompleted);
+    bool IsCompleted,
+    double BytesPerSecond = 0,
+    TimeSpan? EstimatedRemaining = null,
+    string? ItemPath = null);
 
 /// <summary>Controls one provider page of versions for an exact object path.</summary>
 public sealed record StorageVersionListOptions
@@ -156,10 +162,32 @@ public enum StorageChecksumAlgorithm
 /// <param name="Algorithm">Digest algorithm used.</param>
 /// <param name="HexValue">Lowercase hexadecimal digest.</param>
 /// <param name="BytesProcessed">Number of content bytes included in the digest.</param>
+/// <param name="Source">Whether the digest was reported by the server or computed from downloaded content.</param>
 public sealed record StorageChecksum(
     StorageChecksumAlgorithm Algorithm,
     string HexValue,
-    long BytesProcessed);
+    long BytesProcessed,
+    StorageChecksumSource Source = StorageChecksumSource.Computed);
+
+/// <summary>Where a checksum came from.</summary>
+public enum StorageChecksumSource
+{
+    /// <summary>Computed by streaming the content through the client.</summary>
+    Computed,
+    /// <summary>Reported by the server without downloading the content; <see cref="StorageChecksum.BytesProcessed"/> is zero.</summary>
+    Server
+}
+
+/// <summary>Chooses between a server-reported checksum and computing one from the content.</summary>
+public enum StorageChecksumMode
+{
+    /// <summary>Uses the server's checksum when available and falls back to computing it.</summary>
+    PreferServer,
+    /// <summary>Uses only the server's checksum; fails with <c>storage.unsupported</c> when there is none.</summary>
+    ServerOnly,
+    /// <summary>Always downloads and computes the checksum.</summary>
+    ComputeOnly
+}
 
 /// <summary>The actual digest and constant-time comparison outcome for an expected digest.</summary>
 /// <param name="Actual">Digest calculated from storage content.</param>
@@ -172,10 +200,12 @@ public sealed record StorageChecksumVerification(
 /// <param name="Files">Number of transferred files.</param>
 /// <param name="Directories">Number of transferred directories.</param>
 /// <param name="Bytes">Total file-content bytes transferred.</param>
+/// <param name="SkippedFiles">Files left untouched by the conflict policy.</param>
 public sealed record StorageDirectoryTransferReport(
     long Files,
     long Directories,
-    long Bytes);
+    long Bytes,
+    long SkippedFiles = 0);
 
 /// <summary>Controls whether a tag update merges with or replaces existing tags.</summary>
 public enum StorageTagUpdateMode

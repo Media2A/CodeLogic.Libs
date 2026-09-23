@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Text.Json;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
@@ -32,8 +34,11 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private readonly Dictionary<string, StorageConnectionInfo> _connectionInfos = new(StringComparer.OrdinalIgnoreCase);
     private readonly IReadOnlyDictionary<Type, IStorageBackendFactory> _factories;
     private readonly Action? _defaultConnectionSnapshotCaptured;
+    private readonly StorageConnectionObserver _connectionObserver;
+    private readonly ConcurrentDictionary<string, StorageConnectionHealth> _health = new(StringComparer.OrdinalIgnoreCase);
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
+    private TransferLimits _libraryLimits = TransferLimits.None;
     private LocalStorageConfig? _localConfig;
     private LocalStorageConfig? _persistedLocalConfig;
     private readonly Dictionary<string, LocalConnectionConfig?> _runtimeLocalOverrides = new(StringComparer.OrdinalIgnoreCase);
@@ -63,6 +68,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(factories);
         _factories = factories.ToDictionary(factory => factory.ConfigurationType);
         _defaultConnectionSnapshotCaptured = defaultConnectionSnapshotCaptured;
+        _connectionObserver = new StorageConnectionObserver(TryCaptureEventPublisher, TryCaptureLogger);
         if (_factories.Count == 0)
             throw new ArgumentException("At least one storage backend factory is required.", nameof(factories));
     }
@@ -136,6 +142,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         EnsureValid("storage.azure", azure.Validate());
         EnsureValid("storage.gcs", gcs.Validate());
         EnsureValid("storage.swift", swift.Validate());
+        var libraryLimits = StorageTransferPipeline.LibraryLimits(storage.MaxTotalUploadBytesPerSecond, storage.MaxTotalDownloadBytesPerSecond);
 
         ValidateGlobalIds(local, s3, ftp, sftp, webDav, azure, gcs, swift);
 
@@ -150,20 +157,20 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     infos.Add(id, new StorageConnectionInfo(id, StorageProvider.Local, configuration.RootPath, configuration.Enabled));
                     if (!configuration.Enabled)
                         continue;
-                    var backend = _factories[typeof(LocalConnectionConfig)].Create(
+                    var backend = WithLimits(_factories[typeof(LocalConnectionConfig)].Create(
                         id,
                         configuration,
-                        storage.MaxBufferedDownloadBytes);
+                        storage.MaxBufferedDownloadBytes), configuration, libraryLimits);
                     builtEntries.Add(id, new BackendEntry(backend, ownsBackend: true));
                 }
 
-                AddProviderConnections(builtEntries, infos, s3, StorageProvider.S3, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, ftp, StorageProvider.Ftp, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, sftp, StorageProvider.Sftp, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, webDav, StorageProvider.WebDav, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, azure, StorageProvider.AzureBlob, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, gcs, StorageProvider.GoogleCloudStorage, storage.MaxBufferedDownloadBytes);
-                AddProviderConnections(builtEntries, infos, swift, StorageProvider.OpenStackSwift, storage.MaxBufferedDownloadBytes);
+                AddProviderConnections(builtEntries, infos, s3, StorageProvider.S3, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, ftp, StorageProvider.Ftp, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, sftp, StorageProvider.Sftp, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, webDav, StorageProvider.WebDav, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, azure, StorageProvider.AzureBlob, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, gcs, StorageProvider.GoogleCloudStorage, storage.MaxBufferedDownloadBytes, libraryLimits);
+                AddProviderConnections(builtEntries, infos, swift, StorageProvider.OpenStackSwift, storage.MaxBufferedDownloadBytes, libraryLimits);
 
                 if (!builtEntries.ContainsKey(storage.DefaultConnection))
                     throw new InvalidOperationException(
@@ -184,6 +191,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 }
 
                 _storageConfig = storage;
+                _libraryLimits = libraryLimits;
                 _localConfig = local;
                 _persistedLocalConfig = CloneLocalConfig(local);
                 _runtimeLocalOverrides.Clear();
@@ -341,6 +349,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
         var probes = await Task.WhenAll(
             targets.Select(target => ProbeHealthAsync(target, timeoutSeconds, logger))).ConfigureAwait(false);
+        foreach (var probe in probes)
+            RecordHealth(probe.Id, probe.Provider, probe.Healthy, probe.Healthy ? null : probe.Detail, probe.Latency);
 
         state = GetLifecycleState();
         if (state is not (LifecycleState.Initialized or LifecycleState.Started))
@@ -422,13 +432,25 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         using var lease = AcquireOperation(connectionId);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds));
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        var started = Stopwatch.GetTimestamp();
+        var result = await CheckConnectionHealthCoreAsync(lease.Backend, linked.Token, timeout, cancellationToken).ConfigureAwait(false);
+        RecordHealth(lease.Backend.ConnectionId, lease.Backend.Provider, result.IsSuccess, result.Error?.Code, Stopwatch.GetElapsedTime(started));
+        return result;
+    }
+
+    private static async Task<Result<HealthStatus>> CheckConnectionHealthCoreAsync(
+        IStorageBackend backend,
+        CancellationToken probeToken,
+        CancellationTokenSource timeout,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            var health = await lease.Backend.CheckHealthAsync(linked.Token).ConfigureAwait(false);
+            var health = await backend.CheckHealthAsync(probeToken).ConfigureAwait(false);
             if (health.IsFailure)
                 return Result<HealthStatus>.Failure(health.Error!);
             return Result<HealthStatus>.Success(HealthStatus.Healthy(
-                $"Storage connection '{lease.Backend.ConnectionId}' is healthy"));
+                $"Storage connection '{backend.ConnectionId}' is healthy"));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -437,17 +459,215 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
         {
             return Result<HealthStatus>.Failure(StorageErrors.Timeout(
-                $"Storage connection '{lease.Backend.ConnectionId}' timed out during health check."));
+                $"Storage connection '{backend.ConnectionId}' timed out during health check."));
         }
         catch (TimeoutException)
         {
             return Result<HealthStatus>.Failure(StorageErrors.Timeout(
-                $"Storage connection '{lease.Backend.ConnectionId}' timed out during health check."));
+                $"Storage connection '{backend.ConnectionId}' timed out during health check."));
         }
         catch (Exception)
         {
             return Result<HealthStatus>.Failure(StorageErrors.ProviderError(
-                $"Storage connection '{lease.Backend.ConnectionId}' failed its health check."));
+                $"Storage connection '{backend.ConnectionId}' failed its health check."));
+        }
+    }
+
+    /// <summary>Stores a health result and publishes <see cref="StorageConnectionHealthChangedEvent"/> when the state flips.</summary>
+    private void RecordHealth(string id, StorageProvider provider, bool healthy, string? errorCode, TimeSpan latency)
+    {
+        var current = new StorageConnectionHealth(healthy, healthy ? null : errorCode, latency, DateTimeOffset.UtcNow);
+        StorageConnectionHealth? previous = null;
+        _health.AddOrUpdate(id, current, (_, existing) =>
+        {
+            previous = existing;
+            return current;
+        });
+        if (previous?.Healthy != healthy)
+            _connectionObserver.HealthChanged(id, provider, previous, current);
+    }
+
+    /// <summary>
+    /// Describes a registered connection and the server behind it: address, transport security, the
+    /// certificate or host key presented, negotiated algorithms, server software and features, session
+    /// pool counters, and the last health check. Opens a session when the provider needs one to answer.
+    /// </summary>
+    /// <param name="connectionId">Connection to describe.</param>
+    /// <param name="cancellationToken">Token used to cancel the request.</param>
+    /// <returns>The diagnostics, or the error from opening a session.</returns>
+    public async Task<Result<StorageConnectionDiagnostics>> GetConnectionDiagnosticsAsync(
+        string connectionId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateConnectionId(connectionId);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var lease = AcquireOperation(connectionId);
+        StorageConnectionInfo? info;
+        lock (_registryGate)
+            _connectionInfos.TryGetValue(lease.Backend.ConnectionId, out info);
+        _health.TryGetValue(lease.Backend.ConnectionId, out var health);
+        return await DiagnoseAsync(lease.Backend, info?.Host, info?.Port, info?.Security ?? StorageTransportSecurity.Unknown, health, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<Result<StorageConnectionDiagnostics>> DiagnoseAsync(
+        IStorageBackend backend,
+        string? host,
+        int? port,
+        StorageTransportSecurity security,
+        StorageConnectionHealth? health,
+        CancellationToken cancellationToken)
+    {
+        var diagnostics = new StorageConnectionDiagnostics
+        {
+            ConnectionId = backend.ConnectionId,
+            Provider = backend.Provider,
+            Host = host,
+            Port = port,
+            Security = security,
+            LastHealth = health
+        };
+        if (backend is not IStorageDiagnosticsSource source)
+            return Result<StorageConnectionDiagnostics>.Success(diagnostics);
+        var details = await source.GetServerDetailsAsync(cancellationToken).ConfigureAwait(false);
+        if (details.IsFailure)
+            return Result<StorageConnectionDiagnostics>.Failure(details.Error!);
+        return Result<StorageConnectionDiagnostics>.Success(diagnostics with
+        {
+            ServerSystem = details.Value!.System,
+            ServerSoftware = details.Value.Software,
+            ServerFeatures = details.Value.Features,
+            Negotiated = details.Value.Negotiated,
+            ServerIdentity = source.PresentedIdentity,
+            Pool = source.PoolStats
+        });
+    }
+
+    /// <summary>
+    /// Tests a connection configuration without saving or registering it: validates it, connects and
+    /// authenticates, lists the root, and reads server details. Works before the library is initialized.
+    /// </summary>
+    /// <remarks>
+    /// When the server's certificate or host key is rejected, <see cref="StorageConnectionTestReport.ServerIdentity"/>
+    /// still carries what it presented, so a setup screen can ask "the server presented this fingerprint; trust it?".
+    /// </remarks>
+    /// <param name="connection">Provider connection settings, such as <see cref="SftpConnectionConfig"/>.</param>
+    /// <param name="cancellationToken">Token used to cancel the test.</param>
+    /// <returns>The steps that ran and what they found.</returns>
+    public Task<StorageConnectionTestReport> TestConnectionAsync(
+        StorageConnectionConfigBase connection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        var (host, port, security) = StorageEndpoints.Describe(connection);
+        return TestConnectionCoreAsync(
+            connection.GetValidationErrors().ToArray(),
+            connection.GetType(),
+            () => _factories[connection.GetType()].Create("connection-test", CloneProviderConnection(connection), DefaultTestBufferBytes),
+            host,
+            port,
+            security,
+            cancellationToken);
+    }
+
+    /// <summary>Tests local folder settings without saving or registering them.</summary>
+    /// <param name="connection">Local folder settings.</param>
+    /// <param name="cancellationToken">Token used to cancel the test.</param>
+    /// <returns>The steps that ran and what they found.</returns>
+    public Task<StorageConnectionTestReport> TestConnectionAsync(
+        LocalConnectionConfig connection,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        return TestConnectionCoreAsync(
+            [.. connection.Validate().Errors],
+            typeof(LocalConnectionConfig),
+            () => _factories[typeof(LocalConnectionConfig)].Create("connection-test", connection, DefaultTestBufferBytes),
+            null,
+            null,
+            StorageTransportSecurity.Unknown,
+            cancellationToken);
+    }
+
+    private const long DefaultTestBufferBytes = 1_048_576;
+
+    private async Task<StorageConnectionTestReport> TestConnectionCoreAsync(
+        string[] validationErrors,
+        Type configurationType,
+        Func<IStorageBackend> create,
+        string? host,
+        int? port,
+        StorageTransportSecurity security,
+        CancellationToken cancellationToken)
+    {
+        var steps = new List<StorageConnectionTestStep>();
+        StorageConnectionTestReport Fail(Error error, IStorageBackend? backend) => new(
+            false, steps, null, (backend as IStorageDiagnosticsSource)?.PresentedIdentity, error);
+
+        var started = Stopwatch.GetTimestamp();
+        if (validationErrors.Length > 0 || !_factories.ContainsKey(configurationType))
+        {
+            var invalid = validationErrors.Length > 0
+                ? StorageErrors.InvalidContent($"The connection settings are invalid: {string.Join("; ", validationErrors)}")
+                : StorageErrors.Unsupported($"Connection configuration type '{configurationType.Name}' does not have a provider factory.");
+            steps.Add(new StorageConnectionTestStep("validate", false, Stopwatch.GetElapsedTime(started), invalid));
+            return Fail(invalid, null);
+        }
+
+        IStorageBackend backend;
+        try
+        {
+            backend = create();
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            var invalid = StorageErrors.InvalidContent($"The connection settings could not be applied: {error.Message}");
+            steps.Add(new StorageConnectionTestStep("validate", false, Stopwatch.GetElapsedTime(started), invalid));
+            return Fail(invalid, null);
+        }
+        steps.Add(new StorageConnectionTestStep("validate", true, Stopwatch.GetElapsedTime(started), null));
+
+        await using (backend.ConfigureAwait(false))
+        {
+            async Task<Result<T>> Step<T>(string name, Func<Task<Result<T>>> run)
+            {
+                var stepStarted = Stopwatch.GetTimestamp();
+                Result<T> result;
+                try
+                {
+                    result = await run().ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch (Exception error)
+                {
+                    result = Result<T>.Failure(ProviderErrorMapper.FromTransport(error, $"Connection test '{name}'", "server")
+                        ?? StorageErrors.ProviderError($"Connection test step '{name}' failed: {error.Message}"));
+                }
+                steps.Add(new StorageConnectionTestStep(name, result.IsSuccess, Stopwatch.GetElapsedTime(stepStarted), result.Error));
+                return result;
+            }
+
+            var connected = await Step("connect", async () =>
+            {
+                var health = await backend.CheckHealthAsync(cancellationToken).ConfigureAwait(false);
+                return health.IsSuccess ? Result<bool>.Success(true) : Result<bool>.Failure(health.Error!);
+            }).ConfigureAwait(false);
+            if (connected.IsFailure) return Fail(connected.Error!, backend);
+
+            var listed = await Step("list", () => backend.ListAsync(string.Empty, new StorageListOptions { PageSize = 1 }, cancellationToken))
+                .ConfigureAwait(false);
+            if (listed.IsFailure) return Fail(listed.Error!, backend);
+
+            var described = await Step("details", () => DiagnoseAsync(backend, host, port, security, null, cancellationToken))
+                .ConfigureAwait(false);
+            // Server details are informational: a server that refuses OPTIONS is still usable.
+            var source = backend as IStorageDiagnosticsSource;
+            return new StorageConnectionTestReport(
+                true,
+                steps,
+                described.IsSuccess ? described.Value : null,
+                source?.PresentedIdentity,
+                null);
         }
     }
 
@@ -536,7 +756,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             report = new StorageDirectoryTransferReport(
                 copied.Value!.Files,
                 copied.Value.Directories,
-                copied.Value.Bytes);
+                copied.Value.Bytes,
+                copied.Value.SkippedFiles);
             publisher = CaptureEventPublisher();
         }
         finally
@@ -640,7 +861,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             report = new StorageDirectoryTransferReport(
                 copied.Value!.Files,
                 copied.Value.Directories,
-                copied.Value.Bytes);
+                copied.Value.Bytes,
+                copied.Value.SkippedFiles);
             publisher = CaptureEventPublisher();
         }
         finally
@@ -703,6 +925,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         if (normalizedDestination.IsFailure)
             return Result.Failure(normalizedDestination.Error!);
 
+        var destinationTarget = normalizedDestination.Value!;
         BackendEntry.BackendOperationLease? sourceLease = null;
         BackendEntry.BackendOperationLease? destinationLease = null;
         StorageEventPublisher? publisher = null;
@@ -725,12 +948,43 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             sourceProvider = sourceBackend.Provider;
             destinationProvider = destinationBackend.Provider;
             var usedNativeOperation = false;
+            var perFileDecisions = false;
 
-            if (sameBackend)
+            // Conditional conflict policies decide per file. A single file is decided here, so the
+            // native operation can still run; a directory must relay so every file is decided on its own.
+            if (StorageConflictResolver.IsConditional(options.ConflictPolicy))
+            {
+                var info = await sourceBackend.GetInfoAsync(normalizedSource.Value!, cancellationToken).ConfigureAwait(false);
+                if (info.IsFailure)
+                    return Result.Failure(info.Error!);
+                if (info.Value!.ItemType == StorageItemType.File)
+                {
+                    var decision = await StorageConflictResolver.ResolveAsync(
+                        destinationBackend,
+                        destinationTarget,
+                        options.ConflictPolicy,
+                        options.Overwrite,
+                        info.Value.Size,
+                        info.Value.LastModified,
+                        cancellationToken).ConfigureAwait(false);
+                    if (decision.IsFailure)
+                        return Result.Failure(decision.Error!);
+                    if (decision.Value.Skip)
+                        return Result.Success();
+                    destinationTarget = decision.Value.Path;
+                    options = options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null };
+                }
+                else
+                {
+                    perFileDecisions = true;
+                }
+            }
+
+            if (sameBackend && !perFileDecisions)
             {
                 var relationship = StorageTransferPath.ValidateDistinct(
                     normalizedSource.Value!,
-                    normalizedDestination.Value!);
+                    destinationTarget);
                 if (relationship.IsFailure)
                     return relationship;
 
@@ -743,7 +997,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 {
                     relationship = StorageTransferPath.ValidateDirectoryDestination(
                         normalizedSource.Value!,
-                        normalizedDestination.Value!);
+                        destinationTarget);
                     if (relationship.IsFailure)
                         return relationship;
                 }
@@ -767,12 +1021,12 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     result = move
                         ? await sourceBackend.MoveAsync(
                             normalizedSource.Value!,
-                            normalizedDestination.Value!,
+                            destinationTarget,
                             options,
                             cancellationToken).ConfigureAwait(false)
                         : await sourceBackend.CopyAsync(
                             normalizedSource.Value!,
-                            normalizedDestination.Value!,
+                            destinationTarget,
                             options,
                             cancellationToken).ConfigureAwait(false);
                     if (result.IsSuccess)
@@ -787,14 +1041,20 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     sourceBackend,
                     normalizedSource.Value!,
                     destinationBackend,
-                    normalizedDestination.Value!,
+                    destinationTarget,
                     options,
                     cancellationToken).ConfigureAwait(false);
                 if (copied.IsFailure)
                     return Result.Failure(copied.Error!);
                 summary = copied.Value!;
 
-                if (move)
+                if (move && summary.SourceType == StorageItemType.Directory && LeavesSourcesBehind(options, summary))
+                {
+                    var removed = await DeleteTransferredSourcesAsync(sourceBackend, normalizedSource.Value!, summary, cancellationToken).ConfigureAwait(false);
+                    if (removed.IsFailure)
+                        return removed;
+                }
+                else if (move)
                 {
                     var deleted = await sourceBackend.DeleteAsync(
                         normalizedSource.Value!,
@@ -830,8 +1090,45 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             normalizedSource.Value!,
             effectiveDestinationId!,
             destinationProvider,
-            normalizedDestination.Value!,
+            destinationTarget,
             summary).ConfigureAwait(false);
+    }
+
+    /// <summary>Whether a directory move must keep some source items: skipped files or skipped links.</summary>
+    private static bool LeavesSourcesBehind(StorageTransferOptions options, StorageTransferSummary summary) =>
+        summary.SkippedFiles > 0 || options.LinkHandling == StorageLinkHandling.Skip;
+
+    /// <summary>
+    /// Completes a partial directory move: deletes only the source files that were transferred, then
+    /// removes directories left empty, deepest first. Skipped files and their directories stay in place.
+    /// </summary>
+    private static async Task<Result> DeleteTransferredSourcesAsync(
+        IStorageBackend source,
+        string sourceRoot,
+        StorageTransferSummary summary,
+        CancellationToken cancellationToken)
+    {
+        foreach (var path in summary.TransferredSources ?? [])
+        {
+            var deleted = await source.DeleteAsync(path, new StorageDeleteOptions { IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+            if (deleted.IsFailure)
+                return Result.Failure(StorageErrors.PartialFailure(
+                    "The destination completed, but a transferred source file could not be deleted.",
+                    $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+        }
+
+        var directories = new List<string> { sourceRoot };
+        await foreach (var item in source.EnumerateItemsAsync(sourceRoot, new StorageListOptions { Recursive = true }, cancellationToken).ConfigureAwait(false))
+        {
+            if (item.IsSuccess && item.Value!.ItemType == StorageItemType.Directory)
+                directories.Add(item.Value.Path);
+        }
+        foreach (var directory in directories.OrderByDescending(path => path.Count(c => c == '/')).ThenByDescending(path => path.Length))
+        {
+            // Non-recursive: a directory that still holds skipped items fails with a conflict and stays.
+            _ = await source.DeleteAsync(directory, new StorageDeleteOptions { IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+        }
+        return Result.Success();
     }
 
     private static Result<string> NormalizeTransferPath(string path, string role)
@@ -913,6 +1210,55 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return result;
     }
 
+    /// <summary>Compares two directory trees on (possibly different) connections.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory.</param>
+    /// <param name="options">Comparison criteria.</param>
+    /// <param name="cancellationToken">Token used to cancel the comparison.</param>
+    /// <returns>Every path on either side with its relation.</returns>
+    public Task<Result<Sync.StorageDiff>> CompareAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageCompareOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.CompareAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
+
+    /// <summary>Synchronizes two directory trees on (possibly different) connections.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory.</param>
+    /// <param name="options">Direction, deletes, dry run, and comparison settings.</param>
+    /// <param name="cancellationToken">Token used to cancel the sync.</param>
+    /// <returns>The steps taken, or planned for a dry run.</returns>
+    public Task<Result<Sync.StorageSyncReport>> SyncAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageSyncOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.SyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
+
+    /// <summary>
+    /// Creates a background transfer queue over this library's connections, with concurrency limits,
+    /// priorities, pause and resume, cancellation, and automatic retries. Dispose it to stop its jobs.
+    /// </summary>
+    /// <param name="options">Queue limits; defaults to two transfers at once, two per connection.</param>
+    /// <returns>A new, empty queue.</returns>
+    public Queue.StorageTransferQueue CreateTransferQueue(Queue.StorageTransferQueueOptions? options = null)
+    {
+        options ??= new Queue.StorageTransferQueueOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure)
+            throw new ArgumentException(validation.Error!.Message, nameof(options));
+        return new Queue.StorageTransferQueue(this, options);
+    }
+
     /// <summary>Returns an immutable snapshot containing sanitized connection information.</summary>
     public IReadOnlyList<StorageConnectionInfo> GetConnections()
     {
@@ -920,6 +1266,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         lock (_registryGate)
         {
             var snapshot = _connectionInfos.Values
+                .Select(connection => _health.TryGetValue(connection.Id, out var health) ? connection with { LastHealth = health } : connection)
                 .OrderBy(connection => connection.Id, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             return new ReadOnlyCollection<StorageConnectionInfo>(snapshot);
@@ -1063,6 +1410,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 if (replacement is not null)
                     _registry[id] = replacement;
                 _connectionInfos[id] = new StorageConnectionInfo(id, StorageProvider.Local, localConnection.RootPath, localConnection.Enabled);
+                _health.TryRemove(id, out _);
             }
             replacement = null;
         }
@@ -1155,11 +1503,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             {
                 if (_registry.TryGetValue(id, out previous)) _registry.Remove(id);
                 if (replacement is not null) _registry[id] = replacement;
-                _connectionInfos[id] = new StorageConnectionInfo(
-                    id,
-                    descriptor.Value.Provider,
-                    effectiveConnection.MountRoot,
-                    effectiveConnection.Enabled);
+                _connectionInfos[id] = DescribeConnection(id, descriptor.Value.Provider, effectiveConnection);
+                _health.TryRemove(id, out _);
             }
             replacement = null;
         }
@@ -1189,10 +1534,11 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         try
         {
             replacement = new BackendEntry(
-                _factories[configuration.GetType()].Create(
+                WithLimits(_factories[configuration.GetType()].Create(
                     id,
                     configuration,
-                    runtime.MaxBufferedDownloadBytes),
+                    runtime.MaxBufferedDownloadBytes,
+                    _connectionObserver), configuration, _libraryLimits),
                 ownsBackend: true);
             var timeoutDuration = TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds);
             using var timeout = new CancellationTokenSource(timeoutDuration);
@@ -1256,10 +1602,10 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         try
         {
             replacement = new BackendEntry(
-                _factories[typeof(LocalConnectionConfig)].Create(
+                WithLimits(_factories[typeof(LocalConnectionConfig)].Create(
                     id,
                     configuration,
-                    runtime.MaxBufferedDownloadBytes),
+                    runtime.MaxBufferedDownloadBytes), configuration, _libraryLimits),
                 ownsBackend: true);
 
             var timeoutDuration = TimeSpan.FromSeconds(runtime.HealthCheckTimeoutSeconds);
@@ -1399,6 +1745,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 if (_registry.TryGetValue(id, out removed))
                     _registry.Remove(id);
                 _connectionInfos.Remove(id);
+                _health.TryRemove(id, out _);
             }
         }
         finally
@@ -1562,6 +1909,20 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
     }
 
+    private StorageEventPublisher? TryCaptureEventPublisher()
+    {
+        lock (_stateGate)
+            return _context is { } context ? new StorageEventPublisher(context.Events, context.Logger) : null;
+    }
+
+    private ILogger? TryCaptureLogger()
+    {
+        lock (_stateGate)
+            return _context?.Logger;
+    }
+
+    internal StorageConnectionObserver ConnectionObserver => _connectionObserver;
+
     internal StorageEventPublisher CaptureEventPublisher()
     {
         LibraryContext context;
@@ -1599,6 +1960,10 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         ILogger logger)
     {
         Task<Result>? probeTask = null;
+        var provider = target.Lease.Backend.Provider;
+        var started = Stopwatch.GetTimestamp();
+        HealthProbe Probe(bool healthy, string detail) =>
+            new(target.Id, healthy, detail) { Provider = provider, Latency = Stopwatch.GetElapsedTime(started) };
         using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
         {
             try
@@ -1608,21 +1973,21 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     .WaitAsync(TimeSpan.FromSeconds(timeoutSeconds))
                     .ConfigureAwait(false);
                 return result.IsSuccess
-                    ? new HealthProbe(target.Id, true, string.Empty)
-                    : new HealthProbe(target.Id, false, result.Error?.Code ?? "storage.provider_error");
+                    ? Probe(true, string.Empty)
+                    : Probe(false, result.Error?.Code ?? "storage.provider_error");
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
-                return new HealthProbe(target.Id, false, "storage.timeout");
+                return Probe(false, "storage.timeout");
             }
             catch (TimeoutException)
             {
                 timeout.Cancel();
-                return new HealthProbe(target.Id, false, "storage.timeout");
+                return Probe(false, "storage.timeout");
             }
             catch (Exception)
             {
-                return new HealthProbe(target.Id, false, "storage.provider_error");
+                return Probe(false, "storage.provider_error");
             }
             finally
             {
@@ -1865,21 +2230,47 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         IDictionary<string, StorageConnectionInfo> infos,
         ProviderStorageConfigBase<TConnection> config,
         StorageProvider provider,
-        long maxBufferedDownloadBytes)
+        long maxBufferedDownloadBytes,
+        TransferLimits libraryLimits)
         where TConnection : StorageConnectionConfigBase
     {
         _factories.TryGetValue(typeof(TConnection), out var factory);
         foreach (var (id, connection) in config.Connections)
         {
-            infos.Add(id, new StorageConnectionInfo(id, provider, connection.MountRoot, connection.Enabled));
+            infos.Add(id, DescribeConnection(id, provider, connection));
             if (!connection.Enabled)
                 continue;
             if (factory is null)
                 throw new InvalidOperationException($"The {provider} provider factory is not registered.");
             entries.Add(id, new BackendEntry(
-                factory.Create(id, connection, maxBufferedDownloadBytes),
+                WithLimits(factory.Create(id, connection, maxBufferedDownloadBytes, _connectionObserver), connection, libraryLimits),
                 ownsBackend: true));
         }
+    }
+
+    private static StorageConnectionInfo DescribeConnection(string id, StorageProvider provider, StorageConnectionConfigBase connection)
+    {
+        var (host, port, security) = StorageEndpoints.Describe(connection);
+        return new StorageConnectionInfo(id, provider, connection.MountRoot, connection.Enabled)
+        {
+            Host = host,
+            Port = port,
+            Security = security
+        };
+    }
+
+    /// <summary>Attaches a connection's speed limits, plus the library-wide totals, to its backend.</summary>
+    private static IStorageBackend WithLimits(IStorageBackend backend, StorageConnectionConfigBase configuration, TransferLimits libraryLimits) =>
+        WithLimits(backend, configuration.TransferLimits, libraryLimits);
+
+    private static IStorageBackend WithLimits(IStorageBackend backend, LocalConnectionConfig configuration, TransferLimits libraryLimits) =>
+        WithLimits(backend, configuration.TransferLimits, libraryLimits);
+
+    private static IStorageBackend WithLimits(IStorageBackend backend, StorageTransferLimitsConfig? configured, TransferLimits libraryLimits)
+    {
+        var limits = configured ?? new StorageTransferLimitsConfig();
+        StorageTransferPipeline.SetLimits(backend, limits.MaxUploadBytesPerSecond, limits.MaxDownloadBytesPerSecond, libraryLimits);
+        return backend;
     }
 
     private static void ValidateConnectionId(string connectionId)
@@ -1947,7 +2338,11 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return key is not null;
     }
 
-    private sealed record HealthProbe(string Id, bool Healthy, string Detail);
+    private sealed record HealthProbe(string Id, bool Healthy, string Detail)
+    {
+        public StorageProvider Provider { get; init; }
+        public TimeSpan Latency { get; init; }
+    }
     private sealed record HealthTarget(string Id, BackendEntry.BackendOperationLease Lease);
     private readonly record struct ProviderDescriptor(StorageProvider Provider, string Section);
     private sealed record ProviderConfigMatch(ProviderStorageConfigBase Config, ProviderDescriptor Descriptor);

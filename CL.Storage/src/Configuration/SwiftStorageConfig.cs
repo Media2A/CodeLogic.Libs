@@ -9,7 +9,10 @@ public enum SwiftAuthenticationMode
     /// <summary>Authenticates through Keystone v3 using a user and project.</summary>
     KeystoneV3Password,
     /// <summary>Uses a pre-issued token and storage URL.</summary>
-    StaticToken
+    StaticToken,
+    /// <summary>Authenticates with Swift TempAuth v1 (<c>X-Auth-User</c> / <c>X-Auth-Key</c>).</summary>
+    /// <remarks><see cref="SwiftConnectionConfig.Username"/> is usually <c>account:user</c> and <see cref="SwiftConnectionConfig.Password"/> the key.</remarks>
+    TempAuthV1
 }
 
 /// <summary>Defines named OpenStack Swift connections.</summary>
@@ -66,11 +69,20 @@ public sealed class SwiftConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets the request timeout in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 60;
 
+    /// <summary>Gets or sets whether <c>http://</c> authentication and storage URLs are allowed.</summary>
+    /// <remarks>Tokens and passwords travel in clear text over HTTP; keep this to trusted networks and test clusters.</remarks>
+    public bool AllowInsecureHttp { get; set; }
+
+    /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
+    public StorageProxyConfig Proxy { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Prefix;
 
     internal override IEnumerable<string> GetValidationErrors()
     {
+        foreach (var error in (Proxy ?? new StorageProxyConfig()).GetValidationErrors("Proxy."))
+            yield return error;
         if (string.IsNullOrWhiteSpace(Container))
             yield return "Container is required";
         if (StoragePath.Normalize(Prefix ?? string.Empty).IsFailure)
@@ -79,21 +91,31 @@ public sealed class SwiftConnectionConfig : StorageConnectionConfigBase
             yield return "TimeoutSeconds must be greater than zero";
         if (AuthenticationMode == SwiftAuthenticationMode.StaticToken)
         {
-            if (!IsHttps(StorageUrl)) yield return "StaticToken authentication requires an HTTPS StorageUrl";
+            if (!IsAllowedUrl(StorageUrl)) yield return $"StaticToken authentication requires an {Scheme} StorageUrl";
             if (string.IsNullOrWhiteSpace(Token)) yield return "StaticToken authentication requires Token";
+        }
+        else if (AuthenticationMode == SwiftAuthenticationMode.TempAuthV1)
+        {
+            if (!IsAllowedUrl(AuthenticationUrl)) yield return $"TempAuthV1 authentication requires an {Scheme} AuthenticationUrl";
+            if (string.IsNullOrWhiteSpace(Username)) yield return "TempAuthV1 authentication requires Username";
+            if (string.IsNullOrWhiteSpace(Password)) yield return "TempAuthV1 authentication requires Password";
+            if (!string.IsNullOrWhiteSpace(StorageUrl) && !IsAllowedUrl(StorageUrl)) yield return $"StorageUrl must use {Scheme}";
         }
         else
         {
-            if (!IsHttps(AuthenticationUrl)) yield return "Keystone authentication requires an HTTPS AuthenticationUrl";
+            if (!IsAllowedUrl(AuthenticationUrl)) yield return $"Keystone authentication requires an {Scheme} AuthenticationUrl";
             if (string.IsNullOrWhiteSpace(Username)) yield return "Keystone authentication requires Username";
             if (string.IsNullOrWhiteSpace(Password)) yield return "Keystone authentication requires Password";
             if (string.IsNullOrWhiteSpace(ProjectName)) yield return "Keystone authentication requires ProjectName";
             if (string.IsNullOrWhiteSpace(UserDomainName)) yield return "UserDomainName is required";
             if (string.IsNullOrWhiteSpace(ProjectDomainName)) yield return "ProjectDomainName is required";
-            if (!string.IsNullOrWhiteSpace(StorageUrl) && !IsHttps(StorageUrl)) yield return "StorageUrl must use HTTPS";
+            if (!string.IsNullOrWhiteSpace(StorageUrl) && !IsAllowedUrl(StorageUrl)) yield return $"StorageUrl must use {Scheme}";
         }
     }
 
-    private static bool IsHttps(string? value) =>
-        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps;
+    private string Scheme => AllowInsecureHttp ? "HTTP(S)" : "HTTPS";
+
+    private bool IsAllowedUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
+        (uri.Scheme == Uri.UriSchemeHttps || (AllowInsecureHttp && uri.Scheme == Uri.UriSchemeHttp));
 }

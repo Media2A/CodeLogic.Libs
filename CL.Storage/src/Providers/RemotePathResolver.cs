@@ -63,6 +63,23 @@ internal sealed class RemotePathResolver
         var index = remotePath.LastIndexOf('/');
         return index <= 0 ? "/" : remotePath[..index];
     }
+
+    /// <summary>Resolves a relative path (such as a link target) against a remote directory, collapsing <c>.</c> and <c>..</c>.</summary>
+    public static string Combine(string directory, string relative)
+    {
+        var segments = new List<string>();
+        foreach (var segment in (directory.TrimEnd('/') + "/" + relative).Split('/'))
+        {
+            if (segment.Length == 0 || segment == ".") continue;
+            if (segment == "..")
+            {
+                if (segments.Count > 0) segments.RemoveAt(segments.Count - 1);
+                continue;
+            }
+            segments.Add(segment);
+        }
+        return "/" + string.Join('/', segments);
+    }
 }
 
 internal sealed record ResolvedRemotePath(string StoragePath, string RemotePath);

@@ -43,6 +43,9 @@ public sealed class LocalConnectionConfig
     [ConfigField(Label = "Follow Links", Description = "Allow links only when their resolved target remains under the configured root.", RequiresRestart = true, Group = "Security", Order = 20)]
     public bool FollowLinks { get; set; }
 
+    /// <summary>Gets or sets upload and download speed limits for this connection.</summary>
+    public StorageTransferLimitsConfig TransferLimits { get; set; } = new();
+
     /// <summary>Validates the local connection settings.</summary>
     /// <returns>A configuration validation result.</returns>
     public ConfigValidationResult Validate()

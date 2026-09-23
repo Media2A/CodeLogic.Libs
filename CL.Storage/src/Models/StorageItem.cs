@@ -25,6 +25,26 @@ public sealed record StorageItem
     public string? ETag { get; init; }
     /// <summary>Provider version, generation, or mutation identifier when one is available.</summary>
     public string? VersionId { get; init; }
+    /// <summary>Gets the Unix permission bits (for example octal 0755, including setuid/setgid/sticky) when the provider reports them.</summary>
+    public int? UnixMode { get; init; }
+    /// <summary>Gets <see cref="UnixMode"/> as <c>rwxr-xr-x</c> text, or <see langword="null"/> when unknown.</summary>
+    public string? Permissions => UnixMode is { } mode ? UnixPermissions.Format(mode) : null;
+    /// <summary>Gets the owner name when the provider reports one (FTP listings).</summary>
+    public string? Owner { get; init; }
+    /// <summary>Gets the group name when the provider reports one (FTP listings).</summary>
+    public string? Group { get; init; }
+    /// <summary>Gets the numeric owner ID when the provider reports one (SFTP).</summary>
+    public long? OwnerId { get; init; }
+    /// <summary>Gets the numeric group ID when the provider reports one (SFTP).</summary>
+    public long? GroupId { get; init; }
+    /// <summary>Gets the raw target of a symbolic link when the provider reports it.</summary>
+    public string? LinkTarget { get; init; }
+    /// <summary>Gets the creation time when the provider reports it.</summary>
+    public DateTimeOffset? Created { get; init; }
+    /// <summary>Gets the last access time when the provider reports it.</summary>
+    public DateTimeOffset? LastAccessed { get; init; }
+    /// <summary>Gets whether the item is hidden: a dot-file, or marked hidden on Windows.</summary>
+    public bool IsHidden { get; init; }
 
     /// <summary>Gets an immutable snapshot of provider metadata.</summary>
     public IReadOnlyDictionary<string, string> Metadata

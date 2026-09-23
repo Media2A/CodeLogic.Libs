@@ -142,3 +142,78 @@ jobs:
 
       - name: Run MSSQL tests
         run: dotnet test tests/MSSQL.Tests/MSSQL.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
+  # Live FTP, SFTP and WebDAV servers plus MinIO, Azurite, fake-gcs-server and Swift SAIO for
+  # CL.Storage, so every provider runs against a real protocol without a cloud account. The same compose file is used for local
+  # runs, so CI and a developer machine exercise identical servers. Without the CL_STORAGE_TEST_*
+  # variables the suite self-skips, which is what the windows job above sees.
+  storage-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CL_STORAGE_TEST_SFTP_HOST: 127.0.0.1
+      CL_STORAGE_TEST_SFTP_PORT: '2022'
+      CL_STORAGE_TEST_SFTP_USER: cltest
+      CL_STORAGE_TEST_SFTP_PASS: cltest-pw
+      CL_STORAGE_TEST_FTP_HOST: 127.0.0.1
+      CL_STORAGE_TEST_FTP_PORT: '2021'
+      CL_STORAGE_TEST_FTP_USER: cltest
+      CL_STORAGE_TEST_FTP_PASS: cltest-pw
+      CL_STORAGE_TEST_FTP_ROOT: home/cltest
+      CL_STORAGE_TEST_WEBDAV_URL: http://127.0.0.1:8080/
+      CL_STORAGE_TEST_WEBDAV_USER: cltest
+      CL_STORAGE_TEST_WEBDAV_PASS: cltest-pw
+      CL_STORAGE_TEST_S3_URL: http://127.0.0.1:9010
+      CL_STORAGE_TEST_S3_ACCESSKEY: cltest
+      CL_STORAGE_TEST_S3_SECRETKEY: cltest-pw-minio
+      CL_STORAGE_TEST_AZURE_CONNECTION_STRING: UseDevelopmentStorage=true
+      CL_STORAGE_TEST_GCS_URL: http://127.0.0.1:4443
+      CL_STORAGE_TEST_SWIFT_AUTH_URL: http://127.0.0.1:8082/auth/v1.0
+      CL_STORAGE_TEST_SWIFT_USER: test:tester
+      CL_STORAGE_TEST_SWIFT_KEY: testing
+      CL_STORAGE_TEST_PROXY_HOST: 127.0.0.1
+      CL_STORAGE_TEST_FTPS_HOST: 127.0.0.1
+      CL_STORAGE_TEST_FTPS_PORT: '2024'
+      CL_STORAGE_TEST_FTPS_USER: cltest
+      CL_STORAGE_TEST_FTPS_PASS: cltest-pw
+      CL_STORAGE_TEST_WEBDAV_DIGEST_URL: http://127.0.0.1:8081/
+      CL_STORAGE_TEST_WEBDAV_TLS_URL: https://localhost:8443/
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Start storage servers and emulators
+        shell: bash
+        run: |
+          docker compose -f tests/Storage.Integration.Tests/docker-compose.yml up -d --build
+          for port in 2021 2022 2023 2024 8080 8081 8443 9010 10000 4443 8082 3128 1080; do
+            for i in {1..120}; do
+              if (echo > /dev/tcp/127.0.0.1/$port) >/dev/null 2>&1; then break; fi
+              sleep 1
+            done
+          done
+          # A published port accepts connections even when the server behind it has died, so wait
+          # for the FTP greeting too (the FTP containers restart themselves if vsftpd dies at startup).
+          for port in 2021 2024; do
+            for i in {1..60}; do
+              if timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port && head -c 3 <&3" 2>/dev/null | grep -q 220; then break; fi
+              sleep 1
+            done
+          done
+
+      # The windows job above runs the unit suite too; running it here covers Linux-only paths such
+      # as Unix permission bits and local symbolic links, which Windows cannot create without admin.
+      - name: Run storage unit tests on Linux
+        run: dotnet test tests/Storage.Tests/Storage.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
+      - name: Run storage integration tests
+        run: dotnet test tests/Storage.Integration.Tests/Storage.Integration.Tests.csproj --configuration Release -p:CodeLogicFromNuGet=true --logger "console;verbosity=normal"
+
+      - name: Server logs on failure
+        if: failure()
+        run: docker compose -f tests/Storage.Integration.Tests/docker-compose.yml logs

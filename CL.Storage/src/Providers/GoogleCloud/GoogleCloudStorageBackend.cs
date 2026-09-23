@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http.Headers;
@@ -21,7 +22,8 @@ public sealed class GoogleCloudStorageBackend :
     IStorageBackend,
     IStorageMetadataService,
     IStorageSignedUrlService,
-    IStorageVersionService
+    IStorageVersionService,
+    IStorageChecksumService
 {
     private static readonly StorageCapabilities GcsCapabilities = new(
         StorageFeature.VirtualDirectories |
@@ -32,6 +34,7 @@ public sealed class GoogleCloudStorageBackend :
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.ConditionalCreate |
@@ -78,8 +81,9 @@ public sealed class GoogleCloudStorageBackend :
         if (normalized.IsFailure) throw new ArgumentException(normalized.Error!.Message, nameof(prefix));
         ConnectionId = connectionId;
         _client = client;
+        // Credentials that cannot sign (user credentials, anonymous emulator clients) disable signed URLs.
         try { _urlSigner = client.CreateUrlSigner(); }
-        catch (InvalidOperationException) { }
+        catch (Exception error) when (error is InvalidOperationException or ArgumentException or NotSupportedException) { }
         var features = GcsCapabilities.Features;
         if (_urlSigner is not null)
             features |= StorageFeature.SignedReadUrls | StorageFeature.SignedWriteUrls;
@@ -119,6 +123,23 @@ public sealed class GoogleCloudStorageBackend :
             return await GetDirectoryInfoAsync(normalized.Value, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Google Cloud object info")); }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Google Cloud Storage computes an MD5 for every non-composite object.</remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm != StorageChecksumAlgorithm.Md5)
+            return ProviderChecksums.Unavailable(algorithm, "Google Cloud Storage stores only MD5 and CRC32C checksums.");
+        try
+        {
+            var item = await _client.GetObjectAsync(_bucket, ToKey(normalized.Value!), cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ProviderChecksums.FromBase64(algorithm, item.Md5Hash);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get Google Cloud checksum")); }
     }
 
     /// <inheritdoc />
@@ -207,7 +228,7 @@ public sealed class GoogleCloudStorageBackend :
                     ? null
                     : EncodeContinuationToken(new GcsContinuationToken(providerPage.NextPageToken, 0));
             }
-            return Result<StoragePage>.Success(new StoragePage(pageItems, nextToken));
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(pageItems, options), nextToken));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Google Cloud objects")); }
@@ -240,6 +261,8 @@ public sealed class GoogleCloudStorageBackend :
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (StorageTransferPipeline.Applies(this, options))
+            return await StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
@@ -303,7 +326,10 @@ public sealed class GoogleCloudStorageBackend :
     }
 
     /// <inheritdoc />
-    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
@@ -346,6 +372,8 @@ public sealed class GoogleCloudStorageBackend :
                     : (long?)null;
                 downloadOptions ??= new DownloadObjectOptions();
                 downloadOptions.Range = new RangeHeaderValue(options.Offset, end);
+                // The stored CRC32C/MD5 covers the whole object, so it cannot validate a byte range.
+                downloadOptions.DownloadValidationMode = DownloadValidationMode.Never;
             }
 
             var pipe = new Pipe(new PipeOptions(
@@ -626,8 +654,8 @@ public sealed class GoogleCloudStorageBackend :
                         System.Globalization.CultureInfo.InvariantCulture),
                     ETag = version.ETag,
                     Size = version.Size.HasValue ? checked((long)version.Size.Value) : null,
-                    LastModified = version.UpdatedDateTimeOffset,
-                    IsLatest = version.TimeDeletedDateTimeOffset is null,
+                    LastModified = ParseTimestamp(version.UpdatedRaw),
+                    IsLatest = string.IsNullOrEmpty(version.TimeDeletedRaw),
                     IsDeleteMarker = false
                 });
             }
@@ -745,7 +773,7 @@ public sealed class GoogleCloudStorageBackend :
         {
             completionError = error is OperationCanceledException
                 ? error
-                : new IOException("The Google Cloud download stream failed.");
+                : new IOException("The Google Cloud download stream failed.", error);
         }
         finally
         {
@@ -863,7 +891,7 @@ public sealed class GoogleCloudStorageBackend :
         Name = NameOf(path.TrimEnd('/')),
         ItemType = path.EndsWith('/') ? StorageItemType.Directory : StorageItemType.File,
         Size = path.EndsWith('/') || !item.Size.HasValue ? null : checked((long)item.Size.Value),
-        LastModified = item.UpdatedDateTimeOffset,
+        LastModified = ParseTimestamp(item.UpdatedRaw),
         ContentType = item.ContentType,
         ETag = item.ETag,
         VersionId = item.Generation?.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -881,22 +909,21 @@ public sealed class GoogleCloudStorageBackend :
 
     private static string NameOf(string path) => path.Split('/')[^1];
 
+    /// <summary>
+    /// Parses an RFC 3339 timestamp leniently. The client library's own parser insists on exactly three
+    /// fractional digits, so a server or emulator that trims them would otherwise fail the whole operation.
+    /// </summary>
+    internal static DateTimeOffset? ParseTimestamp(string? raw) =>
+        DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed)
+            ? parsed
+            : null;
+
     private static Error Map(Exception exception, string operation)
     {
-        if (exception is GoogleApiException google)
-        {
-            return google.HttpStatusCode switch
-            {
-                HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                HttpStatusCode.NotFound => StorageErrors.NotFound($"{operation}: item was not found."),
-                HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout => StorageErrors.Timeout($"{operation}: operation timed out."),
-                HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed => StorageErrors.Conflict($"{operation}: Google Cloud Storage conflict."),
-                HttpStatusCode.TooManyRequests or >= HttpStatusCode.InternalServerError => StorageErrors.Unavailable($"{operation}: Google Cloud Storage is unavailable."),
-                _ => StorageErrors.ProviderError($"{operation}: Google Cloud request failed.", google.HttpStatusCode.ToString())
-            };
-        }
-        if (exception is TimeoutException or TaskCanceledException) return StorageErrors.Timeout($"{operation}: operation timed out.");
-        return StorageErrors.ProviderError($"{operation}: Google Cloud Storage provider failed.");
+        if (exception is GoogleApiException google && (int)google.HttpStatusCode > 0)
+            return ProviderErrorMapper.FromHttpStatus((int)google.HttpStatusCode, operation, "Google Cloud Storage");
+        return ProviderErrorMapper.FromTransport(exception, operation, "Google Cloud Storage")
+            ?? StorageErrors.ProviderError($"{operation}: Google Cloud Storage provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private sealed record GcsContinuationToken(string? ProviderPageToken, int Skip);

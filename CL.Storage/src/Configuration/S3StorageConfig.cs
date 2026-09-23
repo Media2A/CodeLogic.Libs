@@ -67,11 +67,16 @@ public sealed class S3ConnectionConfig : StorageConnectionConfigBase
     /// <summary>Gets or sets the size at which multipart upload begins.</summary>
     public long MultipartThresholdBytes { get; set; } = 64L * 1024 * 1024;
 
+    /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
+    public StorageProxyConfig Proxy { get; set; } = new();
+
     /// <inheritdoc />
     public override string MountRoot => Prefix;
 
     internal override IEnumerable<string> GetValidationErrors()
     {
+        foreach (var error in (Proxy ?? new StorageProxyConfig()).GetValidationErrors("Proxy."))
+            yield return error;
         if (string.IsNullOrWhiteSpace(Bucket))
             yield return "Bucket is required";
         if (string.IsNullOrWhiteSpace(Region))

@@ -9,10 +9,12 @@ internal sealed class SwiftStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(SwiftConnectionConfig);
     public StorageProvider Provider => StorageProvider.OpenStackSwift;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (SwiftConnectionConfig)configuration;
-        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(value.TimeoutSeconds) };
+        var proxy = value.Proxy?.ToWebProxy();
+        var handler = new SocketsHttpHandler { Proxy = proxy, UseProxy = proxy is not null };
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(value.TimeoutSeconds) };
         return new SwiftStorageBackend(connectionId, client, value, ownsClient: true, maxBufferedDownloadBytes);
     }
 }

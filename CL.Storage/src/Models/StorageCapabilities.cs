@@ -44,7 +44,7 @@ public enum StorageFeature : ulong
     ConditionalDelete = 1UL << 17,
     /// <summary>The provider returns opaque continuation tokens instead of preloading all results.</summary>
     ServerPagination = 1UL << 18,
-    /// <summary>The provider exposes native checksum information or verification.</summary>
+    /// <summary>The provider can report stored checksums through <see cref="Abstractions.IStorageChecksumService"/>.</summary>
     Checksums = 1UL << 19,
     /// <summary>Large uploads are split into bounded provider multipart requests.</summary>
     MultipartUpload = 1UL << 20,
@@ -65,7 +65,21 @@ public enum StorageFeature : ulong
     /// <summary>The provider can append content without replacing the complete object.</summary>
     Append = 1UL << 28,
     /// <summary>The provider can emit object-change notifications.</summary>
-    ChangeNotifications = 1UL << 29
+    ChangeNotifications = 1UL << 29,
+    /// <summary>Unix permission bits can be changed through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    Permissions = 1UL << 30,
+    /// <summary>Numeric owner and group can be changed through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    Ownership = 1UL << 31,
+    /// <summary>Modification (and possibly access) times can be set through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    SetTimestamps = 1UL << 32,
+    /// <summary>Symbolic links can be created through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    CreateLinks = 1UL << 33,
+    /// <summary>Link targets can be read through <see cref="Abstractions.IStorageAttributeService"/>.</summary>
+    ReadLinks = 1UL << 34,
+    /// <summary>Raw protocol commands can be sent through <see cref="Abstractions.IStorageCommandService"/>.</summary>
+    RawCommands = 1UL << 35,
+    /// <summary>Free and used space can be read through <see cref="Abstractions.IStorageSpaceService"/>.</summary>
+    SpaceInfo = 1UL << 36
 }
 
 /// <summary>Optional provider limits. A null value means the provider did not expose a reliable limit.</summary>

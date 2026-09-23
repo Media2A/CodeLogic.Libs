@@ -1,4 +1,5 @@
 using Azure.Core;
+using Azure.Core.Pipeline;
 using Azure.Identity;
 using Azure.Storage;
 using Azure.Storage.Blobs;
@@ -13,7 +14,7 @@ internal sealed class AzureBlobStorageBackendFactory : IStorageBackendFactory
     public Type ConfigurationType => typeof(AzureBlobConnectionConfig);
     public StorageProvider Provider => StorageProvider.AzureBlob;
 
-    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes)
+    public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
         var value = (AzureBlobConnectionConfig)configuration;
         var options = new BlobClientOptions
@@ -24,6 +25,8 @@ internal sealed class AzureBlobStorageBackendFactory : IStorageBackendFactory
                 NetworkTimeout = TimeSpan.FromSeconds(value.TimeoutSeconds)
             }
         };
+        if (value.Proxy?.ToWebProxy() is { } proxy)
+            options.Transport = new HttpClientTransport(new SocketsHttpHandler { Proxy = proxy, UseProxy = true });
         BlobContainerClient client = value.AuthenticationMode switch
         {
             AzureBlobAuthenticationMode.ConnectionString => new BlobContainerClient(value.ConnectionString!, value.Container, options),

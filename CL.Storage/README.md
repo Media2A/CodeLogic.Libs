@@ -76,6 +76,145 @@ That option trusts any SSH host key and is best limited to trusted development e
 and WebDAV use normal certificate validation by default and optionally accept configured SHA-256
 certificate pins; there is no accept-any switch.
 
+### SFTP authentication, host keys, and jump hosts
+
+```json
+{
+  "Host": "sftp.internal",
+  "Username": "deploy",
+  "AuthenticationMode": "Auto",
+  "Password": "...",
+  "PrivateKeyPath": "/secrets/id_ed25519",
+  "PrivateKeyContent": null,
+  "AdditionalPrivateKeyPaths": [],
+  "PrivateKeyPassphrase": "...",
+  "KnownHostsPath": "/home/app/.ssh/known_hosts",
+  "HostKeyFingerprints": [],
+  "Ciphers": ["aes256-gcm@openssh.com", "aes256-ctr"],
+  "Encoding": "utf-8",
+  "BufferSize": 262144,
+  "JumpHost": {
+    "Host": "bastion.example.com",
+    "Username": "jump",
+    "PrivateKeyPath": "/secrets/bastion_ed25519",
+    "KnownHostsPath": "/home/app/.ssh/known_hosts"
+  }
+}
+```
+
+- `AuthenticationMode`: `Password`, `PrivateKey`, `KeyboardInteractive` (answers the password
+  prompt), or `Auto`, which offers keys, then password, then keyboard-interactive, and also satisfies
+  servers that demand several methods. Keys can be files or inline text (`PrivateKeyContent`) from a
+  secret store. SSH agents are not supported by the underlying SSH library.
+- Host keys are trusted through `HostKeyFingerprints`, an OpenSSH `KnownHostsPath` (plain, hashed,
+  wildcard, and `[host]:port` entries), or `AutoAcceptHostKey` for development. A key marked
+  `@revoked` in `known_hosts` is refused even with auto-accept. A rejected key reports
+  `storage.host_key_rejected` with the presented fingerprint in `Details`.
+- `KeyExchangeAlgorithms`, `Ciphers`, `MacAlgorithms`, and `HostKeyAlgorithms` restrict and order
+  the offered algorithms, for hardening or for old servers. Unknown names fail validation and list
+  what is supported.
+- `JumpHost` tunnels through an SSH bastion. The target's key is still verified against the target's
+  settings, and a configured `Proxy` applies to the bastion connection.
+
+### FTP and FTPS options
+
+```json
+{
+  "Host": "ftp.partner.example",
+  "EncryptionMode": "Explicit",
+  "TrustedPublicKeySha256": ["SHA256:..."],
+  "TlsProtocols": ["Tls12", "Tls13"],
+  "EncryptDataChannel": true,
+  "DataConnectionMode": "AutoPassive",
+  "ActivePortMin": 50000,
+  "ActivePortMax": 50100,
+  "ActiveExternalIp": "203.0.113.7",
+  "Encoding": "windows-1252",
+  "TransferType": "Binary",
+  "ListingParser": "Auto",
+  "ServerTimeZone": "Europe/Copenhagen",
+  "ReadTimeoutSeconds": 60,
+  "SocketKeepAlive": true,
+  "LoginCommands": ["SITE UMASK 022"]
+}
+```
+
+- `TrustedCertificateSha256` pins the whole certificate; `TrustedPublicKeySha256` pins only its
+  public key, so it keeps working across renewals that keep the key. Pinned self-signed certificates
+  are accepted unless `RequireValidCertificateChain` is set. Without pins, normal validation applies.
+  TLS problems report `storage.tls_failure`.
+- Legacy encodings such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for
+  file names on older servers.
+- `ServerTimeZone` converts listing times from servers that report local time.
+- `LoginCommands` run after every login; a command the server rejects fails the connection so
+  misconfiguration surfaces immediately.
+
+### WebDAV options
+
+`AuthenticationMode` accepts `None`, `Basic` (sent up front, saving a challenge round trip),
+`BearerToken`, `Digest`, `Ntlm`, `Negotiate`, and `Windows` (current user). HTTPS endpoints support
+`TrustedCertificateSha256` and `TrustedPublicKeySha256` pins, `RequireValidCertificateChain`, and a
+PFX `ClientCertificatePath` for mutual TLS. `MaxConnectionsPerServer` caps concurrent connections.
+
+### Proxies
+
+Every remote provider can tunnel through an HTTP (`CONNECT`), SOCKS5, or SOCKS4 proxy:
+
+```json
+"Proxy": { "Type": "Socks5", "Host": "proxy.corp.local", "Port": 1080, "Username": "me", "Password": "..." }
+```
+
+SOCKS5 and HTTP proxies resolve the destination host name on the proxy side. SOCKS4 cannot, so
+the host must resolve from the client, and SOCKS4 carries no password. FTP data connections are
+tunnelled as well, so use passive mode, and the server's passive address must be reachable
+from the proxy.
+
+### Sessions, retries, and keep-alive
+
+FTP and SFTP keep authenticated sessions in a per-connection pool, and FTP, SFTP, and WebDAV
+retry transient failures automatically. Both are tuned per connection:
+
+```json
+{
+  "Connections": {
+    "partner": {
+      "Host": "sftp.partner.example",
+      "Username": "upload",
+      "Password": "...",
+      "HostKeyFingerprints": ["SHA256:..."],
+      "Session": {
+        "MaxSessions": 4,
+        "MaxIdleSessions": 2,
+        "IdleLifetimeSeconds": 120,
+        "AcquireTimeoutSeconds": 30,
+        "ValidateAfterIdleSeconds": 15,
+        "KeepAliveSeconds": 60
+      },
+      "Retry": {
+        "RetryCount": 3,
+        "BaseDelayMs": 100,
+        "MaxDelayMs": 30000,
+        "RetryNonIdempotent": false
+      }
+    }
+  }
+}
+```
+
+- `MaxSessions` caps open sessions, busy or idle, so the library stays under a server's per-user
+  connection limit. Callers beyond it wait up to `AcquireTimeoutSeconds`, then receive
+  `storage.server_busy`.
+- A pooled session idle longer than `ValidateAfterIdleSeconds` is probed (FTP `NOOP`, SFTP `stat`)
+  before reuse. Sessions that time out, drop, or fail TLS mid-operation are closed instead of reused.
+- `KeepAliveSeconds` sends FTP `NOOP` or SSH keep-alive packets while a session is open.
+- Reads, listings, info, and directory creation retry on timeouts, refused or dropped connections,
+  and busy servers, with exponential backoff and jitter; a server `Retry-After` is honored. Uploads
+  retry only from a seekable stream, which is replayed from its starting position; staged uploads
+  never leave a partial file. Deletes and moves retry only with `RetryNonIdempotent`, because the
+  first attempt may already have succeeded.
+- `StorageConnectionOpenedEvent`, `StorageConnectionLostEvent`, and `StorageConnectionRetryEvent`
+  are published for monitoring, and each retry is logged as a warning.
+
 ## Common API
 
 ```csharp
@@ -225,6 +364,197 @@ await media.UploadAsync("settings.json", replacement, new StorageUploadOptions
 Providers that cannot enforce the condition atomically reject it instead of performing a racy
 check-then-write.
 
+## Permissions, ownership, timestamps, and links
+
+`StorageItem` now carries `UnixMode` (with `Permissions` as `rwxr-xr-x` text), `Owner`/`Group`
+(FTP listings), `OwnerId`/`GroupId` (SFTP), `LinkTarget`, `Created`, `LastAccessed`, and `IsHidden`
+wherever the provider reports them. Changing them goes through `IStorageAttributeService`, exposed as
+extension methods on every `IStorageService`:
+
+```csharp
+await storage.SetPermissionsAsync("reports/q3.csv", "640");
+await storage.SetPermissionsRecursiveAsync("public", fileMode: 0x1A4, directoryMode: 0x1ED); // 0644 / 0755
+await storage.SetOwnerAsync("reports/q3.csv", ownerId: 1001, groupId: 1001);
+await storage.SetTimestampsAsync("reports/q3.csv", lastModified: sourceTime);
+await storage.CreateLinkAsync("current", "releases/v42");
+var link = await storage.ReadLinkAsync("current");
+```
+
+| | Local | FTP | SFTP |
+|---|---|---|---|
+| Permissions | Unix only | `SITE CHMOD` | yes, incl. setuid/setgid/sticky |
+| Owner/group | no | no | numeric IDs |
+| Timestamps | modified + accessed | modified (`MFMT`/`MDTM`) | modified + accessed |
+| Create link | yes (relative) | no | yes |
+| Read link | yes | from listings | no (SSH.NET lacks `readlink`) |
+
+Check `Capabilities` for `Permissions`, `Ownership`, `SetTimestamps`, `CreateLinks`, and
+`ReadLinks`; unsupported calls return `storage.unsupported`. Link targets must stay inside the
+mounted root. On Windows, creating local links needs Developer Mode or the symbolic-link privilege.
+
+### When the destination already exists
+
+`ConflictPolicy` on `StorageUploadOptions` and `StorageTransferOptions` mirrors FileZilla's
+"target file already exists" choices: `Fail`, `Overwrite`, `Skip`, `OverwriteIfNewer`,
+`OverwriteIfSizeDiffers`, `OverwriteIfNewerOrSizeDiffers`, and `Rename` (writes `name (1).ext`).
+When it is not set, the `Overwrite` flag decides as before.
+
+```csharp
+await storage.UploadFileAsync("backup/db.bak", @"C:\dumps\db.bak",
+    new StorageUploadOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfNewer });
+var report = await library.UploadDirectoryAsync(@"C:\site", "web", "public",
+    new StorageTransferOptions { ConflictPolicy = StorageConflictPolicy.OverwriteIfNewerOrSizeDiffers });
+Console.WriteLine($"{report.Value!.Files} uploaded, {report.Value.SkippedFiles} unchanged");
+```
+
+- Directories are decided file by file; `StorageDirectoryTransferReport.SkippedFiles` counts the rest.
+- A skipped upload succeeds and returns the existing item, without a write event.
+- Moving a directory deletes only the source files that were transferred; skipped files stay.
+- "Newer" allows two seconds of clock slack. `UploadFileAsync` supplies the local file's time; for
+  stream uploads set `SourceLastModified`. Unknown times or sizes count as newer or different.
+- `DownloadToFileAsync` takes a `conflictPolicy` for the local file.
+- Conditional policies on copy and move are applied by `StorageLibrary` and its connections, not by a
+  backend's own `CopyAsync`/`MoveAsync`.
+
+### Resume and append
+
+`ConflictPolicy = Resume` continues an interrupted upload by appending only what the destination is
+missing (FTP `APPE`, SFTP append mode, local files); a complete destination is left alone. The
+source must be seekable, and resumed bytes are written in place rather than staged, so check a
+checksum afterwards when integrity matters. `DownloadToFileAsync(..., conflictPolicy: Resume)`
+continues a partial local file with a ranged download. `AppendAsync` appends to a file directly,
+for example a log, and `CleanupStaleStagingAsync` removes staging leftovers of crashed transfers.
+
+### Progress and speed limits
+
+Upload, download, and transfer options take a `Progress` sink. Reports arrive at most every 250 ms and
+carry `BytesTransferred`, `TotalBytes`, `BytesPerSecond`, `EstimatedRemaining`, and, for directory
+transfers, the `ItemPath` of the current file; directory transfers accumulate bytes across files.
+
+```csharp
+var progress = new Progress<StorageTransferProgress>(p =>
+    Console.WriteLine($"{p.ItemPath}: {p.BytesTransferred:N0} B at {p.BytesPerSecond / 1024:N0} KiB/s"));
+await library.CopyAsync("sftp", "exports", "s3", "archive", new StorageTransferOptions { Progress = progress });
+```
+
+Speed limits are set per connection and shared by all of its concurrent transfers:
+
+```json
+"TransferLimits": { "MaxUploadBytesPerSecond": 1048576, "MaxDownloadBytesPerSecond": 5242880 }
+```
+
+`StorageConfig.MaxTotalUploadBytesPerSecond` and `MaxTotalDownloadBytesPerSecond` cap all
+connections together. Limits also apply to relayed transfers between connections.
+
+### Transfer queue
+
+`CreateTransferQueue` runs transfers in the background, like FileZilla's queue:
+
+```csharp
+await using var queue = library.CreateTransferQueue(new StorageTransferQueueOptions
+{
+    MaxConcurrentTransfers = 4,
+    MaxTransfersPerConnection = 2,
+    AutomaticRetries = 2
+});
+queue.ProgressChanged += job => Console.WriteLine($"{job.Destination}: {job.Progress?.BytesTransferred:N0} B");
+queue.EnqueueUploadDirectory(@"C:\exports", "sftp", "incoming");
+var urgent = queue.EnqueueCopy("s3", "reports/q3.pdf", "sftp", "outbox/q3.pdf", priority: StorageTransferPriority.High);
+await queue.WaitForIdleAsync();
+foreach (var failed in queue.FailedJobs) Console.WriteLine($"{failed.Source}: {failed.Error?.Code}");
+queue.RetryFailed();
+```
+
+Jobs cover copies, moves, and file and directory uploads and downloads. The queue respects a global
+and a per-connection limit, starts `High` priority jobs first, supports `Pause`/`Resume`/`Cancel`, and
+re-queues transient failures automatically before moving a job to `FailedJobs`. `JobChanged` and
+`ProgressChanged` suit a UI; `StorageTransferStartedEvent`, `StorageTransferCompletedEvent`, and
+`StorageTransferFailedEvent` go to the event bus. Jobs live in memory only.
+
+### Compare and sync
+
+```csharp
+var diff = await library.CompareAsync("sftp", "site", "s3", "backup/site");
+foreach (var entry in diff.Value!.Entries.Where(e => e.Kind != StorageDiffKind.Same))
+    Console.WriteLine($"{entry.Kind,-18} {entry.Reasons,-12} {entry.RelativePath}");
+
+var report = await library.SyncAsync("sftp", "site", "s3", "backup/site", new StorageSyncOptions
+{
+    Direction = StorageSyncDirection.Mirror,
+    DeleteExtraneous = true,
+    DryRun = true
+});
+```
+
+`CompareAsync` and `SyncAsync` also work between any two `IStorageService` instances, such as a
+`LocalStorageBackend` over a local folder. Comparison uses size and modification time by default
+(two-second tolerance) and can add checksums. Sync directions:
+
+- `Update` copies new and changed files and never deletes; it will not replace a newer destination
+  that has the same size.
+- `Mirror` makes the destination match the source, deleting extra items with `DeleteExtraneous`.
+- `TwoWay` copies each file toward the side where it is missing or older, without deletes.
+
+Copied files keep the source's modification time where the destination supports it. On services
+that cannot (S3, Azure, GCS, Swift) a copy is newer than its source, and "changed" means "source
+newer", so repeated syncs stay no-ops. Per-file failures are collected in `Failed`. `DryRun` returns
+the plan without changing anything.
+
+### Raw commands and free space
+
+With `AllowRawCommands: true` on an FTP or SFTP connection, `ExecuteCommandAsync` sends a raw FTP
+command (`SITE ...`, `SYST`) or runs an SSH shell command as the connection's account. It is off by
+default because commands are not confined to the connection's `Root`. A rejected command or non-zero
+exit is returned as a result with `Succeeded = false`, not as an error. Servers that allow only SFTP
+(`ForceCommand internal-sftp`) refuse shell commands.
+
+`GetSpaceAsync` reports free and used space: SFTP through `statvfs@openssh.com`, FTP through `AVBL`
+where the server implements it, and local connections from the volume. WebDAV and object stores
+return `storage.unsupported`.
+
+### Watching for changes
+
+```csharp
+await foreach (var change in storage.WatchAsync("incoming", cancellationToken: stopping))
+    Console.WriteLine($"{change.Kind}: {change.Path}");
+```
+
+Local connections use native file-system notifications (including renames). Every other provider
+is polled: the directory is listed every `PollInterval` (30 s by default) and compared by type, size,
+time, and ETag, so a rename appears as a delete plus a create. A failed poll is retried on the next
+interval rather than reported as deletions. The library's own staging items never appear.
+
+### Links in transfers
+
+Relayed copies and moves (across connections, or directory copies) meet links as provider-specific
+items. `StorageTransferOptions.LinkHandling` decides what happens:
+
+| Mode | Behavior |
+|---|---|
+| `Reject` (default) | fail with `storage.unsupported` and roll back |
+| `Skip` | leave links out |
+| `Follow` | copy the target file's content; links to directories are refused, so loops cannot occur |
+| `Recreate` | create an equivalent link; targets inside the copied tree point into the copy |
+
+`Recreate` needs `ReadLinks` on the source and `CreateLinks` on the destination; SFTP cannot be a
+`Recreate` source because SSH.NET cannot read link targets.
+
+## Server-side checksums
+
+`ComputeChecksumAsync` and `VerifyChecksumAsync` ask the server for a stored digest first and only
+download the content when there is none; `StorageChecksum.Source` says which happened.
+`GetServerChecksumAsync` returns only the server's value, and `StorageChecksumMode.ComputeOnly`
+forces a download.
+
+| Provider | Server digest |
+|---|---|
+| S3 | MD5 from single-part, non-KMS ETags; SHA-256 when stored with the object |
+| Azure Blob | MD5 (`Content-MD5`) |
+| Google Cloud Storage | MD5 of non-composite objects |
+| Swift | MD5 ETag, except segmented large objects |
+| FTP | `HASH`/`XMD5`/`XSHA256`/`XSHA512` when the server offers them |
+| SFTP, WebDAV, Local | none (always computed) |
+
 ## Runtime connections, health, and native clients
 
 ```csharp
@@ -259,10 +589,40 @@ if (opened.IsSuccess)
 
 Do not dispose reusable clients returned by `GetNativeClient`; dispose session leases.
 
+### Testing settings and diagnosing connections
+
+`TestConnectionAsync` tries settings without saving them, even before the library is initialized.
+It reports each step (`validate`, `connect`, `list`, `details`). If the server's certificate or host
+key is rejected, `ServerIdentity` still says what was presented, ready to pin:
+
+```csharp
+var report = await storage.TestConnectionAsync(settings);
+if (!report.Succeeded && report.ServerIdentity is { Kind: "ssh-host-key" } key)
+{
+    // Ask the user: "The server presented {key.Fingerprint} ({key.Algorithm}). Trust it?"
+    settings.HostKeyFingerprints = [key.Fingerprint];
+}
+// For TLS, pin key.PublicKeyFingerprint in TrustedPublicKeySha256 (survives certificate renewal).
+```
+
+`GetConnectionDiagnosticsAsync(id)` describes a registered connection: host, port, transport security,
+the presented certificate or host key, what was negotiated (`tls`/`cipher` for FTPS; `kex`, `hostKey`,
+`cipher`, `mac` for SSH), server system and software (FTP `SYST`, SSH version string, HTTP `Server`),
+advertised features (FTP `FEAT`, WebDAV `DAV` and `Allow`), session pool counters, and the last health
+check. `GetConnections()` includes the host, port, security, and last health for every connection.
+Diagnostics never contain credentials.
+
+Health checks publish `StorageConnectionHealthChangedEvent` when a connection's state changes (and on
+its first check). Every failed service operation publishes `StorageOperationFailedEvent` with the
+operation, path, and error code, including expected failures such as `storage.not_found`.
+
 ## Failures and compatibility
 
 Expected failures use stable `storage.*` error codes such as `storage.not_found`,
-`storage.conflict`, `storage.unauthorized`, `storage.too_large`, and `storage.unsupported`.
+`storage.conflict`, `storage.authentication_failed`, `storage.permission_denied`,
+`storage.connection_lost`, `storage.server_busy`, `storage.quota_exceeded`, `storage.too_large`, and
+`storage.unsupported`. `StorageErrorInfo.IsTransient` tells whether a failure is worth retrying, and
+`StorageErrorInfo.TryGetDetail` exposes the provider's own code (`ftpReply`, `sftpStatus`, `httpStatus`).
 Incomplete cleanup/source deletion is reported as `storage.partial_failure` with sanitized state and
 error codes. Provider bodies, credentials, and signed query strings are not exposed. Caller
 cancellation propagates as `OperationCanceledException`.

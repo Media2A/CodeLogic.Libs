@@ -22,6 +22,14 @@ public sealed class StorageConfig : ConfigModelBase
     [ConfigField(Label = "Maximum Buffered Download (bytes)", Min = 1, Group = "Transfers", Order = 20)]
     public long MaxBufferedDownloadBytes { get; set; } = 67_108_864;
 
+    /// <summary>Gets or sets the combined upload speed limit across all connections, in bytes per second; null or zero means unlimited.</summary>
+    [ConfigField(Label = "Total upload limit (bytes/s)", Min = 0, Group = "Transfers", Order = 21)]
+    public long? MaxTotalUploadBytesPerSecond { get; set; }
+
+    /// <summary>Gets or sets the combined download speed limit across all connections, in bytes per second; null or zero means unlimited.</summary>
+    [ConfigField(Label = "Total download limit (bytes/s)", Min = 0, Group = "Transfers", Order = 22)]
+    public long? MaxTotalDownloadBytesPerSecond { get; set; }
+
     /// <inheritdoc />
     public override ConfigValidationResult Validate()
     {
@@ -32,6 +40,8 @@ public sealed class StorageConfig : ConfigModelBase
             errors.Add("HealthCheckTimeoutSeconds must be greater than zero");
         if (MaxBufferedDownloadBytes <= 0)
             errors.Add("MaxBufferedDownloadBytes must be greater than zero");
+        if (MaxTotalUploadBytesPerSecond < 0 || MaxTotalDownloadBytesPerSecond < 0)
+            errors.Add("Total transfer limits cannot be negative");
         return errors.Count == 0 ? ConfigValidationResult.Valid() : ConfigValidationResult.Invalid(errors);
     }
 }

@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -20,7 +21,8 @@ public sealed class S3StorageBackend :
     IStorageMetadataService,
     IStorageTagService,
     IStorageSignedUrlService,
-    IStorageVersionService
+    IStorageVersionService,
+    IStorageChecksumService
 {
     private static readonly StorageCapabilities S3Capabilities = new(
         StorageFeature.VirtualDirectories |
@@ -31,6 +33,7 @@ public sealed class S3StorageBackend :
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.Tags |
@@ -200,7 +203,7 @@ public sealed class S3StorageBackend :
             }
             var unique = items.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
                 .OrderBy(item => item.Path, StringComparer.Ordinal).ToArray();
-            return Result<StoragePage>.Success(new StoragePage(unique, response.NextContinuationToken));
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(unique, options), response.NextContinuationToken));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List S3 objects")); }
@@ -228,6 +231,8 @@ public sealed class S3StorageBackend :
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (StorageTransferPipeline.Applies(this, options))
+            return await StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
@@ -291,7 +296,10 @@ public sealed class S3StorageBackend :
     }
 
     /// <inheritdoc />
-    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var valid = options.Validate();
@@ -1049,6 +1057,36 @@ public sealed class S3StorageBackend :
         ETag = item.ETag?.Trim('"')
     };
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// SHA-256 comes from a stored <c>x-amz-checksum-sha256</c>. MD5 comes from the ETag, which equals
+    /// the content MD5 only for single-part uploads without SSE-KMS, so other ETags are not reported.
+    /// </remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm is not (StorageChecksumAlgorithm.Md5 or StorageChecksumAlgorithm.Sha256))
+            return ProviderChecksums.Unavailable(algorithm, $"S3 does not store {algorithm} checksums.");
+        try
+        {
+            var response = await _client.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            {
+                BucketName = _bucket,
+                Key = ToKey(normalized.Value!),
+                ChecksumMode = ChecksumMode.ENABLED
+            }, cancellationToken).ConfigureAwait(false);
+            if (algorithm == StorageChecksumAlgorithm.Sha256)
+                return ProviderChecksums.FromBase64(algorithm, response.ChecksumSHA256);
+            var encryption = response.ServerSideEncryptionMethod?.Value ?? string.Empty;
+            return encryption.StartsWith("aws:kms", StringComparison.Ordinal)
+                ? ProviderChecksums.Unavailable(algorithm, "An SSE-KMS object's ETag is not its MD5.")
+                : ProviderChecksums.FromHex(algorithm, response.ETag);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get S3 checksum")); }
+    }
+
     private static bool IsNotFound(AmazonS3Exception error) => error.StatusCode == HttpStatusCode.NotFound ||
         error.ErrorCode is "NoSuchKey" or "NoSuchBucket" or "NotFound";
 
@@ -1058,21 +1096,25 @@ public sealed class S3StorageBackend :
             return StorageErrors.TooLarge($"{operation}: the multipart upload exceeds 10,000 parts.");
         if (exception is AmazonS3Exception s3)
         {
-            if (IsNotFound(s3)) return StorageErrors.NotFound($"{operation}: item was not found.");
-            if (s3.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden ||
-                s3.ErrorCode is "AccessDenied" or "InvalidAccessKeyId" or "SignatureDoesNotMatch")
-                return StorageErrors.Unauthorized($"{operation}: access was denied.");
-            if (s3.StatusCode is HttpStatusCode.Conflict or HttpStatusCode.PreconditionFailed)
-                return StorageErrors.Conflict($"{operation}: provider conflict.");
-            if ((int)s3.StatusCode >= 500 || s3.StatusCode == (HttpStatusCode)429)
-                return StorageErrors.Unavailable($"{operation}: S3 service is unavailable.");
-            return StorageErrors.ProviderError($"{operation}: S3 request failed.", s3.ErrorCode ?? string.Empty);
+            var details = ProviderErrorMapper.Details(
+                StorageErrorInfo.HttpStatusKey, ((int)s3.StatusCode).ToString(CultureInfo.InvariantCulture), s3.ErrorCode);
+            if (IsNotFound(s3)) return StorageErrors.NotFound($"{operation}: item was not found.", details);
+            if (s3.ErrorCode is "InvalidAccessKeyId" or "SignatureDoesNotMatch" or "ExpiredToken" or "InvalidToken")
+                return StorageErrors.AuthenticationFailed($"{operation}: S3 rejected the credentials.", details);
+            if (s3.ErrorCode is "AccessDenied" or "AllAccessDisabled")
+                return StorageErrors.PermissionDenied($"{operation}: access was denied.", details);
+            if (s3.ErrorCode is "SlowDown" or "RequestLimitExceeded" or "ServiceUnavailable")
+                return StorageErrors.ServerBusy($"{operation}: S3 is throttling requests.", details);
+            if (s3.ErrorCode is "QuotaExceeded")
+                return StorageErrors.QuotaExceeded($"{operation}: the S3 storage quota was exceeded.", details);
+            if (s3.ErrorCode is "EntityTooLarge")
+                return StorageErrors.TooLarge($"{operation}: S3 rejected the object size.", details);
+            if ((int)s3.StatusCode > 0)
+                return ProviderErrorMapper.FromHttpStatus((int)s3.StatusCode, operation, "S3", providerCode: s3.ErrorCode);
+            return StorageErrors.ProviderError($"{operation}: S3 request failed.", details);
         }
-        if (exception is TimeoutException or TaskCanceledException)
-            return StorageErrors.Timeout($"{operation}: operation timed out.");
-        if (exception is HttpRequestException)
-            return StorageErrors.Unavailable($"{operation}: S3 service is unavailable.");
-        return StorageErrors.ProviderError($"{operation}: S3 provider failed.");
+        return ProviderErrorMapper.FromTransport(exception, operation, "S3")
+            ?? StorageErrors.ProviderError($"{operation}: S3 provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 
     private static string EncodeVersionContinuation(S3VersionContinuation continuation) =>

@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -17,7 +18,8 @@ public sealed class AzureBlobStorageBackend :
     IStorageMetadataService,
     IStorageTagService,
     IStorageSignedUrlService,
-    IStorageVersionService
+    IStorageVersionService,
+    IStorageChecksumService
 {
     private static readonly StorageCapabilities AzureCapabilities = new(
         StorageFeature.VirtualDirectories |
@@ -28,6 +30,7 @@ public sealed class AzureBlobStorageBackend :
         StorageFeature.ServerSideCopy |
         StorageFeature.ServerSideMove |
         StorageFeature.RangeReads |
+        StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
         StorageFeature.Tags |
@@ -107,6 +110,23 @@ public sealed class AzureBlobStorageBackend :
     }
 
     /// <inheritdoc />
+    /// <remarks>Azure stores the MD5 (<c>Content-MD5</c>) of blobs uploaded in a single request.</remarks>
+    public async Task<Result<StorageChecksum>> GetServerChecksumAsync(string path, StorageChecksumAlgorithm algorithm, CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(path);
+        if (normalized.IsFailure) return Result<StorageChecksum>.Failure(normalized.Error!);
+        if (algorithm != StorageChecksumAlgorithm.Md5)
+            return ProviderChecksums.Unavailable(algorithm, $"Azure Blob stores only MD5 checksums.");
+        try
+        {
+            var properties = await Blob(normalized.Value!).GetPropertiesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            return ProviderChecksums.FromBytes(algorithm, properties.Value.ContentHash);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageChecksum>.Failure(Map(error, "Get Azure blob checksum")); }
+    }
+
+    /// <inheritdoc />
     public async Task<Result<bool>> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         var info = await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
@@ -143,7 +163,7 @@ public sealed class AzureBlobStorageBackend :
                     cancellationToken).AsPages(options.ContinuationToken, options.PageSize).ConfigureAwait(false))
                 {
                     var items = page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>().ToArray();
-                    return Result<StoragePage>.Success(new StoragePage(items, page.ContinuationToken));
+                    return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.ContinuationToken));
                 }
             }
             else
@@ -156,7 +176,7 @@ public sealed class AzureBlobStorageBackend :
                     cancellationToken).AsPages(options.ContinuationToken, options.PageSize).ConfigureAwait(false))
                 {
                     var items = page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>().ToArray();
-                    return Result<StoragePage>.Success(new StoragePage(items, page.ContinuationToken));
+                    return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.ContinuationToken));
                 }
             }
             return Result<StoragePage>.Success(new StoragePage([], null));
@@ -186,6 +206,8 @@ public sealed class AzureBlobStorageBackend :
     public async Task<Result<StorageItem>> UploadAsync(string path, Stream source, StorageUploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (StorageTransferPipeline.Applies(this, options))
+            return await StorageTransferPipeline.UploadAsync(this, path, source, options, cancellationToken).ConfigureAwait(false);
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
@@ -250,7 +272,10 @@ public sealed class AzureBlobStorageBackend :
     }
 
     /// <inheritdoc />
-    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
+        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+
+    private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
@@ -785,17 +810,21 @@ public sealed class AzureBlobStorageBackend :
     {
         if (exception is RequestFailedException azure)
         {
-            return azure.Status switch
+            if (azure.Status == 403 && azure.ErrorCode is "AuthenticationFailed" or "InvalidAuthenticationInfo")
+                return StorageErrors.AuthenticationFailed(
+                    $"{operation}: Azure Blob rejected the credentials.",
+                    ProviderErrorMapper.Details(StorageErrorInfo.HttpStatusKey, "403", azure.ErrorCode));
+            if (azure.Status > 0)
             {
-                401 or 403 => StorageErrors.Unauthorized($"{operation}: access was denied."),
-                404 => StorageErrors.NotFound($"{operation}: item was not found."),
-                408 or 504 => StorageErrors.Timeout($"{operation}: operation timed out."),
-                409 or 412 => StorageErrors.Conflict($"{operation}: Azure Blob conflict."),
-                429 or >= 500 => StorageErrors.Unavailable($"{operation}: Azure Blob service is unavailable."),
-                _ => StorageErrors.ProviderError($"{operation}: Azure Blob request failed.", azure.ErrorCode ?? string.Empty)
-            };
+                TimeSpan? retryAfter = null;
+                var response = azure.GetRawResponse();
+                if (response is not null && response.Headers.TryGetValue("Retry-After", out var header) &&
+                    int.TryParse(header, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds))
+                    retryAfter = TimeSpan.FromSeconds(seconds);
+                return ProviderErrorMapper.FromHttpStatus(azure.Status, operation, "Azure Blob", retryAfter, azure.ErrorCode);
+            }
         }
-        if (exception is TimeoutException or TaskCanceledException) return StorageErrors.Timeout($"{operation}: operation timed out.");
-        return StorageErrors.ProviderError($"{operation}: Azure Blob provider failed.");
+        return ProviderErrorMapper.FromTransport(exception, operation, "Azure Blob")
+            ?? StorageErrors.ProviderError($"{operation}: Azure Blob provider failed.", ProviderErrorMapper.ExceptionDetails(exception));
     }
 }
