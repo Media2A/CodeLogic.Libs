@@ -29,6 +29,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 {
     private readonly object _stateGate = new();
     private readonly object _registryGate = new();
+    // Transfer queues opened from this library; stopping the library stops them first (B43).
+    private readonly List<Queue.StorageTransferQueue> _queues = [];
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
     private readonly Dictionary<string, BackendEntry> _registry = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, StorageServiceProxy> _proxies = new(StringComparer.OrdinalIgnoreCase);
@@ -258,6 +260,12 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         var gateEntered = false;
         try
         {
+            // Queues first, while their connections still work: running jobs record where they stopped
+            // (queued again or interrupted) instead of failing on retired connections.
+            Queue.StorageTransferQueue[] queues;
+            lock (_queues) queues = [.. _queues];
+            await Task.WhenAll(queues.Select(queue => queue.DisposeAsync().AsTask())).ConfigureAwait(false);
+
             await _mutationGate.WaitAsync().ConfigureAwait(false);
             gateEntered = true;
             try
@@ -1456,16 +1464,26 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     /// Opens a background transfer queue. Its jobs live in <see cref="Queue.StorageTransferQueueOptions.Store"/>
     /// (in memory by default); a durable store brings back the jobs of an earlier run, with those left
     /// running either queued again (when their destination was never touched) or marked interrupted.
+    /// Stopping the library disposes the queue first, so its running jobs stop the same way.
     /// </summary>
     /// <param name="options">Limits, retries, and the job store.</param>
     /// <param name="cancellationToken">Token used to cancel loading the store.</param>
     /// <returns>The queue, or why the options are invalid.</returns>
-    public Task<Result<Queue.StorageTransferQueue>> OpenTransferQueueAsync(
+    public async Task<Result<Queue.StorageTransferQueue>> OpenTransferQueueAsync(
         Queue.StorageTransferQueueOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         EnsureOperational();
-        return Queue.StorageTransferQueue.OpenAsync(this, options ?? new Queue.StorageTransferQueueOptions(), cancellationToken);
+        var opened = await Queue.StorageTransferQueue.OpenAsync(this, options ?? new Queue.StorageTransferQueueOptions(), cancellationToken).ConfigureAwait(false);
+        if (opened.IsSuccess)
+            lock (_queues) _queues.Add(opened.Value!);
+        return opened;
+    }
+
+    /// <summary>Forgets a queue that was disposed.</summary>
+    internal void UntrackQueue(Queue.StorageTransferQueue queue)
+    {
+        lock (_queues) _queues.Remove(queue);
     }
 
     /// <summary>Returns an immutable snapshot containing sanitized connection information.</summary>

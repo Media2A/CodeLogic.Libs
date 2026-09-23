@@ -45,7 +45,10 @@ public enum StorageTransferState
     Blocked = 6,
     /// <summary>Stopped part-way with a mixed state (see the job's report); decide, then retry or remove it.</summary>
     NeedsReconciliation = 7,
-    /// <summary>Was running when its process stopped, after it may have changed the destination; decide, then retry or remove it.</summary>
+    /// <summary>
+    /// Was running when its process stopped, and either may have changed the destination or
+    /// <see cref="StorageTransferQueueOptions.RequeueInterruptedWhenSafe"/> is off; decide, then retry or remove it.
+    /// </summary>
     Interrupted = 8
 }
 
@@ -85,7 +88,7 @@ public sealed record StorageTransferJobSpec
     /// <summary>The spec format this version of the library writes.</summary>
     public const int CurrentSchemaVersion = 1;
 
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Converters = { new JsonStringEnumConverter() }
@@ -141,8 +144,26 @@ public sealed record StorageTransferJobSpec
         return spec;
     }
 
-    /// <summary>Whether two specs describe the same work.</summary>
-    public bool SameWorkAs(StorageTransferJobSpec other) => ToJson() == other.ToJson();
+    /// <summary>
+    /// Whether two specs describe the same work. Connection ids compare without regard to case, as connections
+    /// do, and options left null equal default options of the kind the job uses.
+    /// </summary>
+    public bool SameWorkAs(StorageTransferJobSpec other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        return Normalized().ToJson() == other.Normalized().ToJson();
+    }
+
+    private StorageTransferJobSpec Normalized() => this with
+    {
+        SourceConnectionId = SourceConnectionId?.ToUpperInvariant(),
+        DestinationConnectionId = DestinationConnectionId?.ToUpperInvariant(),
+        TransferOptions = UsesTransferOptions ? TransferOptions ?? new StorageTransferOptions() : TransferOptions,
+        UploadOptions = Kind == StorageTransferKind.UploadFile ? UploadOptions ?? new StorageUploadOptions() : UploadOptions,
+        DownloadOptions = Kind == StorageTransferKind.DownloadFile ? DownloadOptions ?? new StorageDownloadOptions() : DownloadOptions
+    };
+
+    private bool UsesTransferOptions => Kind is not (StorageTransferKind.UploadFile or StorageTransferKind.DownloadFile);
 
     internal Result Validate()
     {
@@ -154,6 +175,17 @@ public sealed record StorageTransferJobSpec
             return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job needs a source connection."));
         if (needsDestination && string.IsNullOrWhiteSpace(DestinationConnectionId))
             return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job needs a destination connection."));
+        // What does not apply to the kind would be ignored when the job runs, so it is refused here.
+        if (!needsSource && SourceConnectionId is not null)
+            return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job reads a local source and takes no source connection."));
+        if (!needsDestination && DestinationConnectionId is not null)
+            return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job writes a local destination and takes no destination connection."));
+        if (!UsesTransferOptions && TransferOptions is not null)
+            return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job does not take TransferOptions."));
+        if (Kind != StorageTransferKind.UploadFile && UploadOptions is not null)
+            return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job does not take UploadOptions."));
+        if (Kind != StorageTransferKind.DownloadFile && (DownloadOptions is not null || DownloadConflictPolicy is not null))
+            return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job does not take DownloadOptions or DownloadConflictPolicy."));
         if (TransferOptions?.Progress is not null || UploadOptions?.Progress is not null || DownloadOptions?.Progress is not null)
             return Result.Failure(StorageErrors.InvalidContent("A job spec cannot carry a progress sink; subscribe to the queue's ProgressChanged instead."));
         return Result.Success();
@@ -225,6 +257,26 @@ public sealed record StorageTransferJobRecord
     /// <summary>Gets whether the job is finished and will not run again unless retried.</summary>
     [JsonIgnore]
     public bool IsFinished => State is StorageTransferState.Completed or StorageTransferState.Failed or StorageTransferState.Cancelled;
+
+    /// <summary>
+    /// Gets whether this version of the library can run the record: neither the record nor its spec was
+    /// written by a newer schema. A queue leaves records it cannot read alone, for the version that wrote them.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsReadable => SchemaVersion <= CurrentSchemaVersion && Spec.SchemaVersion <= StorageTransferJobSpec.CurrentSchemaVersion;
+
+    /// <summary>Serializes the record, lease fields and checkpoint included, for stores that keep jobs as JSON.</summary>
+    public string ToJson() => JsonSerializer.Serialize(this, StorageTransferJobSpec.Json);
+
+    /// <summary>Reads a record written by <see cref="ToJson"/>.</summary>
+    /// <exception cref="JsonException">The JSON is empty or was written by a newer schema version.</exception>
+    public static StorageTransferJobRecord FromJson(string json)
+    {
+        var record = JsonSerializer.Deserialize<StorageTransferJobRecord>(json, StorageTransferJobSpec.Json) ?? throw new JsonException("The job record is empty.");
+        if (!record.IsReadable)
+            throw new JsonException($"The job record has schema version {record.SchemaVersion} (spec {record.Spec.SchemaVersion}); this library reads up to {CurrentSchemaVersion} ({StorageTransferJobSpec.CurrentSchemaVersion}).");
+        return record;
+    }
 }
 
 /// <summary>A worker's claim on a job. Saves carrying a lease that is no longer current are refused.</summary>
