@@ -52,7 +52,10 @@ internal static class StorageConflictResolver
         }
         var current = existing.Value!;
         if (current.ItemType == StorageItemType.Directory)
-            return Result<ConflictDecision>.Failure(StorageErrors.Conflict($"The destination '{path}' is a directory."));
+            return policy == StorageConflictPolicy.Rename
+                // A folder in the way is just another taken name.
+                ? await RenameAsync(destination, path, cancellationToken).ConfigureAwait(false)
+                : Result<ConflictDecision>.Failure(StorageErrors.Conflict($"The destination '{path}' is a directory."));
 
         return policy switch
         {
@@ -118,16 +121,26 @@ internal static class StorageConflictResolver
     internal static bool SizeDiffers(long? source, long? destination) =>
         source is not { } s || destination is not { } d || s != d;
 
-    /// <summary>Returns <c>name (1).ext</c>, <c>name (2).ext</c>, … for the first free name.</summary>
+    /// <summary>
+    /// Returns <c>name (1).ext</c>, <c>name (2).ext</c>, … for the first free name. A name that is already
+    /// numbered counts on (<c>name (1).txt</c> gives <c>name (2).txt</c>, not <c>name (1) (1).txt</c>), and a
+    /// trailing dot is not an extension (<c>file.</c> gives <c>file. (1)</c>, never the Windows-invalid <c>file (1).</c>).
+    /// </summary>
     internal static string Candidate(string path, int attempt)
     {
         var slash = path.LastIndexOf('/');
         var directory = slash < 0 ? string.Empty : path[..(slash + 1)];
         var name = path[(slash + 1)..];
         var dot = name.LastIndexOf('.');
-        var (stem, extension) = dot > 0 ? (name[..dot], name[dot..]) : (name, string.Empty);
+        var (stem, extension) = dot > 0 && dot < name.Length - 1 ? (name[..dot], name[dot..]) : (name, string.Empty);
+        var numbered = NumberedStem.Match(stem);
+        if (numbered.Success && int.TryParse(numbered.Groups[2].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var start) && start < int.MaxValue - MaxRenameAttempts)
+            return $"{directory}{numbered.Groups[1].Value} ({start + attempt}){extension}";
         return $"{directory}{stem} ({attempt}){extension}";
     }
+
+    private static readonly System.Text.RegularExpressions.Regex NumberedStem =
+        new(@"^(.+) \((\d{1,9})\)$", System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     private static Result<ConflictDecision> Skip(string path, StorageItem current) =>
         Result<ConflictDecision>.Success(new ConflictDecision(true, path, false, current));

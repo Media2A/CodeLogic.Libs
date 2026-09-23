@@ -10,7 +10,8 @@ namespace CL.Storage.Abstractions;
 /// A stream the caller writes a file's content into. Nothing is visible at the destination until
 /// <see cref="CommitAsync"/> succeeds; <see cref="AbortAsync"/>, or disposing without committing, discards
 /// everything. Written bytes flow straight to a staging object with at most 1 MiB buffered, so a slow
-/// destination slows the writer down rather than filling memory.
+/// destination slows the writer down rather than filling memory. A write that fails or is cancelled aborts
+/// the whole stream: its bytes may already be on their way, so the stream cannot be written again.
 /// </summary>
 public sealed class StorageWriteStream : Stream
 {
@@ -21,8 +22,10 @@ public sealed class StorageWriteStream : Stream
     private readonly bool _overwrite;
     private readonly Task<StagedWriteResult> _upload;
     private readonly CancellationTokenSource _cancel;
+    private Task<Result<StorageItem>>? _commit;
     private long _written;
     private int _state; // 0 open, 1 committing or committed, 2 aborted
+    private int _cancelDisposed;
 
     internal StorageWriteStream(IStorageService destination, string path, StorageUploadOptions options, bool overwrite, CancellationToken cancellationToken)
     {
@@ -42,7 +45,8 @@ public sealed class StorageWriteStream : Stream
             new StagedWriteRequest
             {
                 Path = path,
-                Upload = options,
+                // Progress names the destination, not the internal staging object.
+                Upload = options with { Progress = options.Progress is { } progress ? new PathProgress(progress, path) : null },
                 ExpectedLength = options.ExpectedLength,
                 Verify = options.Verify,
                 ExpectedSha256 = options.ExpectedSha256
@@ -73,15 +77,40 @@ public sealed class StorageWriteStream : Stream
         WriteAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
 
     /// <inheritdoc />
+    /// <exception cref="StorageWriteException">The destination stopped accepting data; <see cref="StorageWriteException.Error"/> says why.</exception>
+    /// <remarks>Any failure, including a cancelled write, aborts the stream: nothing is committed and it cannot be written again.</remarks>
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
         EnsureOpen();
         if (_upload.IsCompleted)
-            throw new IOException("The destination stopped accepting data.", (await _upload.ConfigureAwait(false)).Error is { } error ? new StorageWriteException(error) : null);
-        var flush = await _pipe.Writer.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+        {
+            var stopped = await _upload.ConfigureAwait(false);
+            await AbortAsync().ConfigureAwait(false);
+            throw new StorageWriteException("The destination stopped accepting data.", stopped.Error);
+        }
+        FlushResult flush;
+        try
+        {
+            flush = await _pipe.Writer.WriteAsync(buffer, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The bytes may already be in the pipe: a retried write would duplicate them, so the stream is done.
+            BeginAbort();
+            throw;
+        }
         Interlocked.Add(ref _written, buffer.Length);
-        if (flush.IsCompleted)
-            throw new IOException("The destination stopped accepting data.");
+        if (flush.IsCompleted || flush.IsCanceled)
+        {
+            BeginAbort();
+            Error? error = null;
+            if (_upload.IsCompleted)
+            {
+                try { error = (await _upload.ConfigureAwait(false)).Error; }
+                catch (Exception) { }
+            }
+            throw new StorageWriteException("The destination stopped accepting data.", error);
+        }
     }
 
     /// <inheritdoc />
@@ -96,15 +125,28 @@ public sealed class StorageWriteStream : Stream
 
     /// <summary>
     /// Finishes the content, checks its length and digest when those were requested, and moves it into place.
+    /// A <c>Condition</c> is passed to the provider's move, which enforces it atomically where it can, and is
+    /// otherwise checked immediately before.
     /// </summary>
     /// <param name="cancellationToken">Token used to cancel the commit.</param>
     /// <returns>The committed item, or why it was not committed; nothing is left at the destination on failure.</returns>
-    public async Task<Result<StorageItem>> CommitAsync(CancellationToken cancellationToken = default)
+    public Task<Result<StorageItem>> CommitAsync(CancellationToken cancellationToken = default)
     {
         if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
-            return Result<StorageItem>.Failure(StorageErrors.Conflict("The write was already committed or aborted."));
+            return Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Conflict("The write was already committed or aborted.")));
+        var commit = CommitCoreAsync(cancellationToken);
+        _commit = commit;
+        return commit;
+    }
+
+    private async Task<Result<StorageItem>> CommitCoreAsync(CancellationToken cancellationToken)
+    {
         await _pipe.Writer.CompleteAsync().ConfigureAwait(false);
-        using var stop = cancellationToken.Register(() => _cancel.Cancel());
+        using var stop = cancellationToken.Register(() =>
+        {
+            try { _cancel.Cancel(); }
+            catch (ObjectDisposedException) { }
+        });
         // The staged write cleans up after itself when cancelled, so it is always awaited to the end.
         var written = await _upload.ConfigureAwait(false);
         if (written.Cancelled) cancellationToken.ThrowIfCancellationRequested();
@@ -114,15 +156,6 @@ public sealed class StorageWriteStream : Stream
         Result promoted;
         try
         {
-            if (_options.Condition is { IsEmpty: false } condition)
-            {
-                var check = await StagedWriter.CheckConditionAsync(_destination, _path, condition, cancellationToken).ConfigureAwait(false);
-                if (check.IsFailure)
-                {
-                    await StagedWriter.DeleteAsync(_destination, staging).ConfigureAwait(false);
-                    return Result<StorageItem>.Failure(check.Error!);
-                }
-            }
             (promoted, _) = await StagedWriter.PromoteAsync(
                 _destination, staging, _path, _overwrite, _options.Condition, _options.CreateParents, cancellationToken).ConfigureAwait(false);
         }
@@ -146,7 +179,7 @@ public sealed class StorageWriteStream : Stream
     {
         if (!BeginAbort()) return;
         try { await _upload.ConfigureAwait(false); }
-        catch (OperationCanceledException) { }
+        catch (Exception) { }
     }
 
     /// <summary>Stops the staged write; it removes its staging object on its own.</summary>
@@ -160,10 +193,11 @@ public sealed class StorageWriteStream : Stream
     }
 
     /// <inheritdoc />
+    /// <remarks>Never throws for a failed write; disposing during a commit lets the commit finish.</remarks>
     public override async ValueTask DisposeAsync()
     {
         await AbortAsync().ConfigureAwait(false);
-        _cancel.Dispose();
+        ReleaseCancellation();
         await base.DisposeAsync().ConfigureAwait(false);
     }
 
@@ -174,12 +208,31 @@ public sealed class StorageWriteStream : Stream
     /// </remarks>
     protected override void Dispose(bool disposing)
     {
-        if (disposing && BeginAbort())
+        if (disposing)
         {
-            // The token source is disposed once the staged write has finished with it.
-            _ = _upload.ContinueWith(_ => _cancel.Dispose(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            BeginAbort();
+            ReleaseCancellation();
         }
         base.Dispose(disposing);
+    }
+
+    /// <summary>
+    /// Disposes the cancellation source (and with it the registration on the caller's token) once nothing
+    /// uses it any more: after the staged write, and after a commit in progress.
+    /// </summary>
+    private void ReleaseCancellation()
+    {
+        var pending = (Task?)_commit ?? _upload;
+        if (pending.IsCompleted && _upload.IsCompleted)
+            DisposeCancellation();
+        else
+            _ = Task.WhenAll(pending, _upload).ContinueWith(_ => DisposeCancellation(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private void DisposeCancellation()
+    {
+        if (Interlocked.Exchange(ref _cancelDisposed, 1) == 0)
+            _cancel.Dispose();
     }
 
     /// <inheritdoc />
@@ -194,12 +247,24 @@ public sealed class StorageWriteStream : Stream
         if (Volatile.Read(ref _state) != 0)
             throw new ObjectDisposedException(nameof(StorageWriteStream), "The write was already committed or aborted.");
     }
+}
 
-    /// <summary>Carries the storage error that stopped a write.</summary>
-    private sealed class StorageWriteException(Error error) : Exception(error.Message)
+/// <summary>
+/// Thrown by <see cref="StorageWriteStream"/> writes when the destination stopped accepting data. It is an
+/// <see cref="IOException"/>, and <see cref="Error"/> carries the storage error that stopped the write.
+/// </summary>
+public sealed class StorageWriteException : IOException
+{
+    /// <summary>Creates the exception.</summary>
+    /// <param name="message">What happened.</param>
+    /// <param name="error">The storage error that stopped the write, when known.</param>
+    public StorageWriteException(string message, Error? error) : base(error is null ? message : $"{message} {error.Message}")
     {
-        public Error Error { get; } = error;
+        Error = error;
     }
+
+    /// <summary>Gets the storage error that stopped the write, when known.</summary>
+    public Error? Error { get; }
 }
 
 /// <summary>Opens push-style writes on any storage connection.</summary>

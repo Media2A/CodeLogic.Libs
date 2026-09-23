@@ -109,14 +109,27 @@ public sealed class ReviewCancellationTests
     public async Task Disposing_a_streamed_write_synchronously_does_not_wait_and_still_cleans_up()
     {
         using var directory = new TestDirectory();
-        var storage = new LocalStorageBackend("local", new LocalConnectionConfig { RootPath = directory.Path });
+        var local = new LocalStorageBackend("local", new LocalConnectionConfig { RootPath = directory.Path });
+        // Removing the staging object takes a while, as on a slow server.
+        var storage = new InterceptBackend(local)
+        {
+            Delete = async (path, options, token) =>
+            {
+                await Task.Delay(1_500, CancellationToken.None);
+                return await local.DeleteAsync(path, options, CancellationToken.None);
+            }
+        };
         var writer = (await storage.OpenWriteAsync("f.bin")).Value!;
         await writer.WriteAsync(new byte[10_000]);
 
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         writer.Dispose();
+        clock.Stop();
 
-        for (var i = 0; i < 100 && (await ListAllAsync(storage)).Count > 0; i++) await Task.Delay(20);
-        Assert.Empty(await ListAllAsync(storage));
+        // needs-review E: disposing does not wait for the cleanup, which still happens.
+        Assert.True(clock.Elapsed < TimeSpan.FromMilliseconds(750), $"Dispose took {clock.Elapsed}");
+        for (var i = 0; i < 200 && (await ListAllAsync(local)).Count > 0; i++) await Task.Delay(25);
+        Assert.Empty(await ListAllAsync(local));
     }
 
     [Fact]

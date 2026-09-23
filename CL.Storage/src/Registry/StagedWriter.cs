@@ -42,7 +42,33 @@ internal sealed record StagedWriteResult(StagedContent? Content, Error? Error, s
     /// <summary>Why a staging object that should have been removed was not.</summary>
     public Error? CleanupError { get; init; }
 
+    /// <summary>
+    /// Whether the write used a resumable staging object, so <see cref="StagingLeft"/> is a prefix a later
+    /// attempt may continue. False when the request was not resumable, or when its part file was in use by
+    /// another transfer and a private staging object was used instead.
+    /// </summary>
+    public bool Resumable { get; init; }
+
     public bool IsSuccess => Content is not null;
+}
+
+/// <summary>What a promote did: its result, how a condition was enforced, and what the provider left behind.</summary>
+/// <param name="Result">Success when the destination holds the staged content.</param>
+/// <param name="Enforcement">How a create-only or version condition was enforced.</param>
+/// <param name="Touched">
+/// Whether the destination may have been changed: false when the promote was refused before the provider was
+/// asked to move anything (a failed condition check), so the destination is exactly as it was.
+/// </param>
+/// <param name="LeftBehind">
+/// Internal objects the provider could not remove after it committed (its own backup or staging copy); the
+/// destination is committed even though the provider reported an error.
+/// </param>
+internal sealed record PromoteOutcome(Result Result, StorageConditionEnforcement Enforcement, bool Touched, IReadOnlyList<string> LeftBehind);
+
+/// <summary>Tags progress with the path a caller knows instead of an internal staging name.</summary>
+internal sealed class PathProgress(IProgress<StorageTransferProgress> inner, string path) : IProgress<StorageTransferProgress>
+{
+    public void Report(StorageTransferProgress value) => inner.Report(value with { ItemPath = path });
 }
 
 /// <summary>Opens the source for reading from <paramref name="offset"/>; the caller disposes the stream.</summary>
@@ -86,41 +112,77 @@ internal static class StagedWriter
         CancellationToken cancellationToken)
     {
         var parent = Parent(request.Path);
-        string staging;
-        if (request.StagingPath is { } explicitStaging)
+        var staging = request.StagingPath ?? (request.ResumeKey is { } key ? ResumableStagingPath(request.Path, key) : null);
+        string? part = null;
+        if (staging is not null)
         {
-            staging = explicitStaging;
-        }
-        else if (request.ResumeKey is { } key)
-        {
-            staging = ResumableStagingPath(request.Path, key);
-        }
-        else
-        {
-            Result<string> allocated;
-            try { allocated = await AllocateStagingPathAsync(destination, parent, cancellationToken).ConfigureAwait(false); }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return CancelledResult(null, 0); }
-            if (allocated.IsFailure) return new StagedWriteResult(null, allocated.Error, null, 0);
-            staging = allocated.Value!;
+            // One writer per part file in this process. A second transfer of the same source to the same
+            // destination (two queued jobs for one file) writes a private staging object instead of appending
+            // into the bytes the first one is writing; it is not resumable, but neither corrupts the other.
+            part = PartKey(destination, staging);
+            if (!ActiveParts.TryAdd(part, 0))
+            {
+                part = null;
+                staging = null;
+                request = request with { ResumeKey = null, StagingPath = null };
+            }
         }
         try
         {
-            return await WriteToStagingAsync(destination, request, open, staging, parent, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            if (!request.Resumable)
+            if (staging is null)
             {
-                var deleted = await DeleteAsync(destination, staging).ConfigureAwait(false);
-                return CancelledResult(deleted.IsFailure ? staging : null, 0);
+                Result<string> allocated;
+                try { allocated = await AllocateStagingPathAsync(destination, parent, cancellationToken).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return CancelledResult(null, 0); }
+                if (allocated.IsFailure) return new StagedWriteResult(null, allocated.Error, null, 0);
+                staging = allocated.Value!;
             }
-            var kept = await destination.GetInfoAsync(staging, CancellationToken.None).ConfigureAwait(false);
-            return kept.IsSuccess ? CancelledResult(staging, kept.Value!.Size ?? 0) : CancelledResult(null, 0);
+            StagedWriteResult result;
+            try
+            {
+                result = await WriteToStagingAsync(destination, request, open, staging, parent, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                if (!request.Resumable)
+                {
+                    var deleted = await DeleteAsync(destination, staging).ConfigureAwait(false);
+                    return CancelledResult(deleted.IsFailure ? staging : null, 0);
+                }
+                var kept = await TryGetInfoAsync(destination, staging).ConfigureAwait(false);
+                result = kept.IsSuccess ? CancelledResult(staging, kept.Value!.Size ?? 0) : CancelledResult(null, 0);
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                // A throwing provider, source, or progress sink: the staging object is cleaned up (or kept, for a
+                // resumable write) exactly as for a failure it reported.
+                result = await FailAsync(destination, request, staging, StorageErrors.FromException(error, "Write transfer staging object"), contentIsWrong: false).ConfigureAwait(false);
+            }
+            return result with { Resumable = request.Resumable };
+        }
+        finally
+        {
+            if (part is not null) ActiveParts.TryRemove(part, out _);
         }
     }
 
+    /// <summary>Part files being written in this process, so two writers never append into one.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ActiveParts = new(StringComparer.Ordinal);
+
+    private static string PartKey(IStorageService destination, string staging) =>
+        $"{destination.Provider}\n{destination.Root}\n{staging}";
+
+    /// <summary>Whether a resumable part file is being written by a transfer in this process.</summary>
+    internal static bool IsPartInUse(IStorageService destination, string staging) => ActiveParts.ContainsKey(PartKey(destination, staging));
+
     private static StagedWriteResult CancelledResult(string? stagingLeft, long bytes) =>
         new(null, StorageErrors.Cancelled("The write was cancelled."), stagingLeft, bytes) { Cancelled = true };
+
+    private static async Task<Result<StorageItem>> TryGetInfoAsync(IStorageService destination, string path)
+    {
+        try { return await destination.GetInfoAsync(path, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception error) { return Result<StorageItem>.Failure(StorageErrors.FromException(error, "Read transfer staging object")); }
+    }
 
     private static async Task<StagedWriteResult> WriteToStagingAsync(
         IStorageService destination,
@@ -134,8 +196,18 @@ internal static class StagedWriter
         long offset = 0;
         using var hash = verify ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
         if (request.Resumable)
-            offset = await ResumableOffsetAsync(destination, staging, request.ExpectedLength, cancellationToken).ConfigureAwait(false);
+        {
+            var resumed = await ResumableOffsetAsync(destination, staging, request.ExpectedLength, cancellationToken).ConfigureAwait(false);
+            if (resumed.IsFailure)
+                return resumed.Error!.Code == StorageErrors.ConflictCode
+                    ? new StagedWriteResult(null, resumed.Error, null, 0)
+                    : await FailAsync(destination, request, staging, resumed.Error!, contentIsWrong: false).ConfigureAwait(false);
+            offset = resumed.Value;
+        }
 
+        // Everything is staged already: the source is not opened at its end, which servers answer with
+        // "range not satisfiable", so a fully staged resume can still complete.
+        var complete = offset > 0 && request.ExpectedLength == offset;
         Result<Stream> opened;
         if (offset > 0 && hash is not null)
         {
@@ -146,9 +218,14 @@ internal static class StagedWriter
             {
                 await DeleteAsync(destination, staging).ConfigureAwait(false);
                 offset = 0;
+                complete = false;
                 hash.GetHashAndReset();
                 opened = await open(0, cancellationToken).ConfigureAwait(false);
             }
+        }
+        else if (complete)
+        {
+            opened = Result<Stream>.Success(Stream.Null);
         }
         else
         {
@@ -185,14 +262,29 @@ internal static class StagedWriter
             }
             try
             {
-                written = offset == 0 && !direct
-                    ? await RelayAsync(guard, destination, staging, stagingUpload, cancellationToken).ConfigureAwait(false)
-                    : await AppendAsync(destination, staging, guard, request.Upload.Progress, request.ExpectedLength, request.Path, cancellationToken).ConfigureAwait(false);
+                if (complete)
+                {
+                    // Nothing to append; a source that still has bytes is longer than expected.
+                    try { _ = await guard.ReadAsync(new byte[1], cancellationToken).ConfigureAwait(false); }
+                    catch (SourceTooLongException) { }
+                    written = Result<long>.Success(0);
+                }
+                else
+                {
+                    written = offset == 0 && !direct
+                        ? await RelayAsync(guard, destination, staging, stagingUpload, cancellationToken).ConfigureAwait(false)
+                        : await AppendAsync(destination, staging, guard, request.Upload, request.ExpectedLength, request.Path, cancellationToken).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 // Cleaned up (or kept, for resume) by WriteAsync.
                 throw;
+            }
+            catch (Exception) when (guard.Exceeded)
+            {
+                // The provider let the guard's "too long" escape; it is reported as the conflict it is.
+                written = Result<long>.Failure(StorageErrors.Conflict("The source delivered more bytes than expected."));
             }
         }
 
@@ -205,9 +297,23 @@ internal static class StagedWriter
 
         var total = offset + written.Value;
         if (request.ExpectedLength is { } length && total != length)
+            // A short source leaves a good prefix a resume can continue; a longer one tripped the guard above.
             return await FailAsync(destination, request, staging, StorageErrors.Conflict(
                 $"The source delivered {total} bytes; {length} were expected.",
-                $"expectedLength={length};actualLength={total}"), contentIsWrong: true).ConfigureAwait(false);
+                $"expectedLength={length};actualLength={total}"), contentIsWrong: total > length).ConfigureAwait(false);
+
+        if (request.Resumable)
+        {
+            // A part file is shared by name: a writer in another process appending to it at the same time would
+            // leave more (or other) bytes than this writer accounted for. Such a file is never promoted.
+            var stagedInfo = await destination.GetInfoAsync(staging, cancellationToken).ConfigureAwait(false);
+            if (stagedInfo.IsFailure)
+                return await FailAsync(destination, request, staging, stagedInfo.Error!, contentIsWrong: false).ConfigureAwait(false);
+            if (stagedInfo.Value!.Size is { } stagedSize && stagedSize != total)
+                return await FailAsync(destination, request, staging, StorageErrors.Conflict(
+                    "The staged data changed while it was written; another transfer may be writing the same part file.",
+                    $"expectedLength={total};actualLength={stagedSize}"), contentIsWrong: true).ConfigureAwait(false);
+        }
 
         string? digest = null;
         string? verifiedBy = null;
@@ -220,7 +326,8 @@ internal static class StagedWriter
                     $"expectedSha256={expectedDigest.ToLowerInvariant()};actualSha256={digest}"), contentIsWrong: true).ConfigureAwait(false);
             var confirmed = await ConfirmAsync(destination, staging, digest, total, cancellationToken).ConfigureAwait(false);
             if (confirmed.IsFailure)
-                return await FailAsync(destination, request, staging, confirmed.Error!, contentIsWrong: true).ConfigureAwait(false);
+                // Only a mismatch proves the staged bytes wrong; a confirm that could not run keeps them.
+                return await FailAsync(destination, request, staging, confirmed.Error!, contentIsWrong: confirmed.Error!.Code == StorageErrors.ConflictCode).ConfigureAwait(false);
             verifiedBy = confirmed.Value;
         }
 
@@ -241,47 +348,93 @@ internal static class StagedWriter
         bool createParents,
         CancellationToken cancellationToken)
     {
-        var enforcement = StorageConditionEnforcement.None;
-        if (condition is { IsEmpty: false })
-        {
-            var check = await CheckConditionAsync(destination, path, condition, cancellationToken).ConfigureAwait(false);
-            if (check.IsFailure) return (check, StorageConditionEnforcement.CheckedBeforeCommit);
-            enforcement = StorageConditionEnforcement.CheckedBeforeCommit;
-        }
-        else if (!overwrite)
-        {
-            enforcement = destination.Capabilities.Supports(StorageFeature.ConditionalCreate)
-                ? StorageConditionEnforcement.Atomic
-                : StorageConditionEnforcement.CheckedBeforeCommit;
-        }
-        var moved = await destination.MoveAsync(
-            stagingPath,
-            path,
-            new StorageTransferOptions { Overwrite = overwrite, CreateParents = createParents },
-            cancellationToken).ConfigureAwait(false);
-        return (moved, enforcement);
+        var outcome = await PromoteCoreAsync(destination, stagingPath, path, overwrite, condition, createParents, cancellationToken).ConfigureAwait(false);
+        return (outcome.Result, outcome.Enforcement);
     }
 
     /// <summary>
+    /// Promotes the staged object and says what happened. A version condition is checked first and then passed
+    /// to the provider's move, which enforces it in the same request where it can (and answers
+    /// <c>storage.unsupported</c> where it cannot, in which case the checked-before move is used). A provider
+    /// error that says the destination was committed (<see cref="StorageErrorInfo.DestinationStateKey"/>
+    /// <c>=complete</c>) is a success with the internal objects it left behind, never a failure to roll back.
+    /// </summary>
+    public static async Task<PromoteOutcome> PromoteCoreAsync(
+        IStorageService destination,
+        string stagingPath,
+        string path,
+        bool overwrite,
+        StorageMutationCondition? condition,
+        bool createParents,
+        CancellationToken cancellationToken)
+    {
+        var enforcement = StorageConditionEnforcement.None;
+        var options = new StorageTransferOptions { Overwrite = overwrite, CreateParents = createParents };
+        if (condition is { IsEmpty: false })
+        {
+            var check = await CheckConditionAsync(destination, path, condition, cancellationToken).ConfigureAwait(false);
+            if (check.IsFailure) return new PromoteOutcome(check, StorageConditionEnforcement.CheckedBeforeCommit, Touched: false, []);
+            enforcement = await StorageConditionEnforcements.ForAsync(destination, StorageConditionKind.MatchVersion, serverSideCopy: true, cancellationToken).ConfigureAwait(false);
+            options = options with { Overwrite = true, DestinationCondition = condition };
+        }
+        else if (!overwrite)
+        {
+            enforcement = await StorageConditionEnforcements.ForAsync(destination, StorageConditionKind.CreateOnly, serverSideCopy: true, cancellationToken).ConfigureAwait(false);
+        }
+        var moved = await destination.MoveAsync(stagingPath, path, options, cancellationToken).ConfigureAwait(false);
+        if (moved.IsFailure && options.DestinationCondition is not null && moved.Error!.Code == StorageErrors.UnsupportedCode)
+        {
+            // The provider cannot enforce the condition in its move: it was checked just before, which is all
+            // this connection offers.
+            enforcement = StorageConditionEnforcement.CheckedBeforeCommit;
+            moved = await destination.MoveAsync(stagingPath, path, options with { DestinationCondition = null }, cancellationToken).ConfigureAwait(false);
+        }
+        if (moved.IsFailure && StorageErrorInfo.DestinationCommitted(moved.Error))
+            return new PromoteOutcome(Result.Success(), enforcement, Touched: true, LeftBehind(moved.Error));
+        return new PromoteOutcome(moved, enforcement, Touched: true, []);
+    }
+
+    /// <summary>Every <see cref="StorageErrorInfo.LeftBehindKey"/> entry in an error's details.</summary>
+    internal static IReadOnlyList<string> LeftBehind(Error? error)
+    {
+        if (error?.Details is not { Length: > 0 } details) return [];
+        var prefix = StorageErrorInfo.LeftBehindKey + "=";
+        return [.. details.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(part => part.StartsWith(prefix, StringComparison.Ordinal) && part.Length > prefix.Length)
+            .Select(part => part[prefix.Length..])];
+    }
+
+    /// <summary>Appends <c>key=value</c> details to an error, keeping what the provider put there.</summary>
+    internal static Error AppendDetails(Error error, string details) =>
+        string.IsNullOrEmpty(details) ? error
+        : error.WithDetails(string.IsNullOrEmpty(error.Details) ? details : $"{error.Details};{details}");
+
+    /// <summary>
     /// Confirms a promoted destination: it has the staged length and, where the server keeps a SHA-256, the
-    /// digest that was verified. A rename does not change content, so nothing is read back.
+    /// digest that was verified. A rename does not change content, so nothing is read back. A mismatch is a
+    /// <c>storage.conflict</c> carrying <c>destinationState=complete</c>: the destination was committed and
+    /// must be reported, not rolled back (it may be another writer's newer content).
     /// </summary>
     public static async Task<Result<StorageItem>> ConfirmPromotedAsync(IStorageService destination, string path, StagedContent content, CancellationToken cancellationToken)
     {
-        var info = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        Result<StorageItem> info;
+        try { info = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false); }
+        catch (Exception error) when (error is not OperationCanceledException) { return Result<StorageItem>.Failure(StorageErrors.FromException(error, "Confirm transfer destination")); }
         if (info.IsFailure) return info;
         var total = content.Bytes + content.BytesResumed;
         if (info.Value!.Size is { } size && size != total)
             return Result<StorageItem>.Failure(StorageErrors.Conflict(
                 $"The destination '{path}' does not hold what was committed: it is {size} bytes, not {total}.",
-                $"expectedLength={total};actualLength={size}"));
+                $"expectedLength={total};actualLength={size};{StorageErrorInfo.DestinationStateKey}=complete"));
         if (content.Sha256 is { } digest)
         {
-            var server = await destination.GetServerChecksumAsync(path, StorageChecksumAlgorithm.Sha256, cancellationToken).ConfigureAwait(false);
+            Result<StorageChecksum> server;
+            try { server = await destination.GetServerChecksumAsync(path, StorageChecksumAlgorithm.Sha256, cancellationToken).ConfigureAwait(false); }
+            catch (Exception error) when (error is not OperationCanceledException) { server = Result<StorageChecksum>.Failure(StorageErrors.FromException(error, "Confirm transfer destination")); }
             if (server.IsSuccess && !string.Equals(server.Value!.HexValue, digest, StringComparison.OrdinalIgnoreCase))
                 return Result<StorageItem>.Failure(StorageErrors.Conflict(
                     $"The destination '{path}' does not hold what was committed.",
-                    $"expectedSha256={digest};actualSha256={server.Value.HexValue.ToLowerInvariant()}"));
+                    $"expectedSha256={digest};actualSha256={server.Value.HexValue.ToLowerInvariant()};{StorageErrorInfo.DestinationStateKey}=complete"));
         }
         return Result<StorageItem>.Success(info.Value with { Sha256 = content.Sha256 });
     }
@@ -317,14 +470,17 @@ internal static class StagedWriter
     private static string TrimETag(string value) =>
         (value.StartsWith("W/", StringComparison.Ordinal) ? value[2..] : value).Trim('"');
 
-    /// <summary>Deletes a staging object, ignoring one that is already gone.</summary>
+    /// <summary>
+    /// Deletes a staging object, ignoring one that is already gone. Never recursive: a staging object is a file,
+    /// and a path that turns out to be a folder is not the library's to remove.
+    /// </summary>
     public static async Task<Result> DeleteAsync(IStorageService destination, string stagingPath)
     {
         try
         {
             return await destination.DeleteAsync(
                 stagingPath,
-                new StorageDeleteOptions { Recursive = true, IgnoreMissing = true },
+                new StorageDeleteOptions { IgnoreMissing = true },
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception error)
@@ -361,7 +517,7 @@ internal static class StagedWriter
         // Wrong content cannot be resumed; a transport failure leaves a resumable prefix.
         if (request.Resumable && !contentIsWrong)
         {
-            var info = await destination.GetInfoAsync(staging, CancellationToken.None).ConfigureAwait(false);
+            var info = await TryGetInfoAsync(destination, staging).ConfigureAwait(false);
             if (info.IsSuccess)
                 return new StagedWriteResult(null, error, staging, info.Value!.Size ?? 0);
             return new StagedWriteResult(null, error, null, 0);
@@ -370,24 +526,31 @@ internal static class StagedWriter
         return new StagedWriteResult(null, error, deleted.IsFailure ? staging : null, 0) { CleanupError = deleted.Error };
     }
 
-    private static async Task<long> ResumableOffsetAsync(IStorageService destination, string staging, long? expectedLength, CancellationToken cancellationToken)
+    /// <summary>
+    /// How many bytes an earlier attempt staged. Only a part file that is not there means none; a size that
+    /// cannot be read fails the attempt (and keeps the part file) rather than appending the whole source
+    /// after the existing prefix.
+    /// </summary>
+    private static async Task<Result<long>> ResumableOffsetAsync(IStorageService destination, string staging, long? expectedLength, CancellationToken cancellationToken)
     {
         var existing = await destination.GetInfoAsync(staging, cancellationToken).ConfigureAwait(false);
-        if (existing.IsFailure || existing.Value!.ItemType != StorageItemType.File)
-            return 0;
+        if (existing.IsFailure)
+            return existing.Error!.Code == StorageErrors.NotFoundCode ? Result<long>.Success(0) : Result<long>.Failure(existing.Error);
+        if (existing.Value!.ItemType != StorageItemType.File)
+            return Result<long>.Failure(StorageErrors.Conflict($"The staging path '{staging}' is not a file."));
         var size = existing.Value.Size ?? 0;
         var canAppend = destination is IStorageAppendService && destination.Capabilities.Supports(StorageFeature.Append);
         if (size > 0 && canAppend && (expectedLength is null || size <= expectedLength))
-            return size;
+            return Result<long>.Success(size);
         await DeleteAsync(destination, staging).ConfigureAwait(false);
-        return 0;
+        return Result<long>.Success(0);
     }
 
     /// <summary>
     /// Opens the source from the start, hashes its first <paramref name="length"/> bytes into
     /// <paramref name="hash"/>, and checks them against the staged prefix. Returns the source positioned at
-    /// <paramref name="length"/>, or a null stream when the prefix does not match (or cannot be read), in
-    /// which case the caller starts over.
+    /// <paramref name="length"/>, or a null stream when the prefix does not match, in which case the caller
+    /// starts over. A staged prefix that cannot be read is a failure (the part file is kept), not a mismatch.
     /// </summary>
     private static async Task<Result<Stream>> OpenVerifiedTailAsync(
         IStorageService destination,
@@ -399,7 +562,7 @@ internal static class StagedWriter
     {
         using var stagedHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var download = await destination.DownloadAsync(staging, new StorageDownloadOptions { Length = length }, cancellationToken).ConfigureAwait(false);
-        if (download.IsFailure) return Result<Stream>.Success(null!);
+        if (download.IsFailure) return Result<Stream>.Failure(download.Error!);
         await using (var stagedStream = download.Value!)
         {
             if (await HashAsync(stagedStream, stagedHash, length, cancellationToken).ConfigureAwait(false) != length)
@@ -409,11 +572,17 @@ internal static class StagedWriter
         var opened = await open(0, cancellationToken).ConfigureAwait(false);
         if (opened.IsFailure) return opened;
         var source = opened.Value!;
-        if (await HashAsync(source, hash, length, cancellationToken).ConfigureAwait(false) == length &&
-            hash.GetCurrentHash().AsSpan().SequenceEqual(stagedHash.GetHashAndReset()))
-            return Result<Stream>.Success(source);
-        await source.DisposeAsync().ConfigureAwait(false);
-        return Result<Stream>.Success(null!);
+        var matched = false;
+        try
+        {
+            matched = await HashAsync(source, hash, length, cancellationToken).ConfigureAwait(false) == length &&
+                hash.GetCurrentHash().AsSpan().SequenceEqual(stagedHash.GetHashAndReset());
+        }
+        finally
+        {
+            if (!matched) await source.DisposeAsync().ConfigureAwait(false);
+        }
+        return Result<Stream>.Success(matched ? source : null!);
     }
 
     /// <summary>Hashes up to <paramref name="length"/> bytes of a stream and returns how many there were.</summary>
@@ -462,14 +631,18 @@ internal static class StagedWriter
         IStorageService destination,
         string staging,
         GuardedReadStream source,
-        IProgress<StorageTransferProgress>? progress,
+        StorageUploadOptions upload,
         long? total,
         string path,
         CancellationToken cancellationToken)
     {
-        Stream input = progress is null
+        // An append bypasses the provider's upload entry, so the destination's speed limits apply here (unless
+        // the caller's pipeline already applied them to the source).
+        var progress = upload.Progress;
+        var limits = upload.PipelineApplied ? TransferLimits.None : StorageTransferPipeline.LimitsFor(destination);
+        Stream input = progress is null && !limits.LimitsUploads
             ? source
-            : new Providers.MeteredStream(source, progress, total, path, leaveOpen: true);
+            : new Providers.MeteredStream(source, progress, total, path, leaveOpen: true, limits.Upload, limits.TotalUpload);
         Result<StorageItem> appended;
         try
         {
@@ -533,6 +706,10 @@ internal static class StagedWriter
             var produced = await producer.ConfigureAwait(false);
             if (cancellationToken.IsCancellationRequested)
                 cancellationToken.ThrowIfCancellationRequested();
+            // A source that failed makes the upload fail too; the source's error is the one that explains it.
+            // (The producer reports "unavailable" only when the upload stopped reading first.)
+            if (produced.IsFailure && produced.Error!.Code != StorageErrors.UnavailableCode)
+                return Result<long>.Failure(produced.Error);
             if (thrownUploadError is not null)
                 return Result<long>.Failure(thrownUploadError);
             if (upload?.IsFailure == true)

@@ -117,22 +117,33 @@ internal sealed class StorageServiceProxy :
                 connectionId, provider, normalized, DateTimeOffset.UtcNow));
 
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
-        (await _library.CopyAsync(
+        AsResult(await _library.CopyAsync(
             _connectionId,
             sourcePath,
             _connectionId,
             destinationPath,
             options,
-            cancellationToken).ConfigureAwait(false)).ToResult();
+            cancellationToken).ConfigureAwait(false), cancellationToken);
 
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
-        (await _library.MoveAsync(
+        AsResult(await _library.MoveAsync(
             _connectionId,
             sourcePath,
             _connectionId,
             destinationPath,
             options,
-            cancellationToken).ConfigureAwait(false)).ToResult();
+            cancellationToken).ConfigureAwait(false), cancellationToken);
+
+    /// <summary>
+    /// A connection's copy and move behave like every other connection call: a clean cancel throws, as it does
+    /// on a backend. A report that needs reconciliation stays a failure, since something was committed.
+    /// </summary>
+    private static Result AsResult(StorageTransferReport report, CancellationToken cancellationToken)
+    {
+        if (report.Outcome == StorageTransferOutcome.Cancelled)
+            throw new OperationCanceledException(report.Error?.Message ?? "The transfer was cancelled.", cancellationToken);
+        return report.ToResult();
+    }
 
     public Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
