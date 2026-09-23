@@ -22,6 +22,8 @@ public sealed class NeedsReviewProviderS3Tests
             ConditionalRequests = conditions
         };
 
+    private static bool IsProbe(string key) => key.Contains(".cl-storage-probe-", StringComparison.Ordinal);
+
     private static ProviderFakeS3.FakeObject Decorated(ProviderFakeS3 fake, string key, byte[] content)
     {
         var item = fake.Put(key, content, "application/x-test");
@@ -61,7 +63,8 @@ public sealed class NeedsReviewProviderS3Tests
         var copied = await backend.CopyAsync("src.bin", "dst.bin", new StorageTransferOptions { Overwrite = false });
 
         Assert.True(copied.IsSuccess, copied.Error?.ToString());
-        var request = Assert.Single(fake.Copies);
+        // The connection's condition probe copies its own objects first (needs-review R4-A6).
+        var request = Assert.Single(fake.Copies, copy => !IsProbe(copy.DestinationKey));
         Assert.Equal("*", request.IfNoneMatch);
         Assert.Equal(source.ETag, request.ETagToMatch?.Trim('"'));
         Assert.Empty(fake.Initiated);
@@ -241,7 +244,8 @@ public sealed class NeedsReviewProviderS3Tests
         var moved = await backend.MoveAsync("a", "b");
 
         Assert.True(moved.IsSuccess, moved.Error?.ToString());
-        var delete = Assert.Single(fake.Deletes);
+        // The connection's condition probe deletes its own objects first (needs-review R4-A6).
+        var delete = Assert.Single(fake.Deletes, delete => !IsProbe(delete.Key));
         Assert.Equal("a", delete.Key);
         Assert.Equal(source.ETag, delete.IfMatch?.Trim('"'));
         Assert.True(fake.Objects.ContainsKey("a/inside.txt"));
@@ -378,7 +382,8 @@ public sealed class NeedsReviewProviderS3Tests
         Assert.Equal(StorageConditionEnforcement.Atomic, await awsSource.GetEnforcementAsync(StorageConditionKind.CreateOnly, true, default));
         Assert.Equal(StorageConditionEnforcement.Atomic, await awsSource.GetEnforcementAsync(StorageConditionKind.MatchVersion, true, default));
         Assert.Equal(StorageConditionEnforcement.Atomic, await awsSource.GetEnforcementAsync(StorageConditionKind.DeleteMatchVersion, false, default));
-        Assert.Equal(2, minio.Puts.Count);
+        // Two objects, then If-None-Match and If-Match on PutObject (needs-review R4-B24 probes uploads too).
+        Assert.Equal(4, minio.Puts.Count);
         Assert.Empty(minio.Objects);
         Assert.Empty(aws.Objects);
     }

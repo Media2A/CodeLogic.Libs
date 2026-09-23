@@ -2,6 +2,7 @@ using System.Net;
 using System.Reflection;
 using Amazon.S3;
 using Amazon.S3.Model;
+using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
 using CL.Storage.Providers.S3;
@@ -24,7 +25,11 @@ public sealed class S3StorageBackendTests
             "bucket",
             prefix: "mounted",
             multipartPartSizeBytes: PartSize,
-            multipartThresholdBytes: PartSize);
+            multipartThresholdBytes: PartSize)
+        {
+            // Forwarding the headers is the Enforced behaviour; under Auto they are sent only after the probe (needs-review R4-B24).
+            ConditionalRequests = S3ConditionalRequestSupport.Enforced
+        };
         var content = Enumerable.Range(0, PartSize + 17).Select(index => (byte)(index % 251)).ToArray();
         await using var source = new TrackingNonSeekableStream(content);
 
@@ -212,7 +217,8 @@ public sealed class S3StorageBackendTests
             VersionId = "version-current",
             ContentLength = 1
         };
-        await using var backend = new S3StorageBackend("S3", client, "bucket");
+        // Forwarding the guards is the Enforced behaviour; under Auto they are sent only after the probe (needs-review R4-B24).
+        await using var backend = new S3StorageBackend("S3", client, "bucket") { ConditionalRequests = S3ConditionalRequestSupport.Enforced };
 
         var uploaded = await backend.UploadBytesAsync("item.bin", [1], new StorageUploadOptions
         {

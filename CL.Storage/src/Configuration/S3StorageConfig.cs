@@ -16,10 +16,20 @@ public enum S3AuthenticationMode
 public enum S3ConditionalRequestSupport
 {
     /// <summary>
-    /// Conditional uploads (<c>PutObject</c> and <c>CompleteMultipartUpload</c> with <c>If-None-Match</c> or
-    /// <c>If-Match</c>) are trusted, as on AWS and MinIO. Whether the server enforces <c>If-None-Match</c> and
-    /// <c>If-Match</c> on <c>CopyObject</c> and <c>If-Match</c> on <c>DeleteObject</c> is probed once per connection
-    /// with two temporary <c>.cl-storage-probe-*</c> objects under the prefix.
+    /// Whether the server enforces <c>If-None-Match</c> and <c>If-Match</c> on <c>PutObject</c> (and so on
+    /// <c>CompleteMultipartUpload</c>) and on <c>CopyObject</c>, and <c>If-Match</c> on <c>DeleteObject</c>, is probed
+    /// once per connection, the first time a conditional write, copy, or delete needs to know. A condition the probe
+    /// finds enforced is sent with the request that commits; one it finds ignored or rejected (400/501) is not sent
+    /// and is checked immediately before the commit instead (reported as
+    /// <see cref="CL.Storage.Models.StorageConditionEnforcement.CheckedBeforeCommit"/>). A probe that cannot finish
+    /// (a network error, missing permissions) assumes nothing is enforced and is tried again after a back-off.
+    /// <para>
+    /// The probe writes, overwrites, copies, and deletes two one-byte <c>.cl-storage-probe-*</c> objects under the
+    /// prefix, so it needs <c>PutObject</c> and <c>DeleteObject</c> permission there. Its requests are ordinary writes:
+    /// on a versioned bucket they leave noncurrent versions and delete markers behind (and on an Object Lock bucket
+    /// versions that cannot be removed until their retention ends), and they trigger event notifications, replication,
+    /// and access logging like any other write. Choose <see cref="Enforced"/> or <see cref="NotEnforced"/> to avoid it.
+    /// </para>
     /// </summary>
     Auto = 0,
     /// <summary>The server enforces every condition in the request that commits; nothing is probed.</summary>
