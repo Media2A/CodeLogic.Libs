@@ -105,7 +105,13 @@ public sealed record StorageCompareOptions
     /// normalization forms (NFC and NFD).
     /// </summary>
     public bool? CaseInsensitive { get; init; }
-    /// <summary>Gets how links are treated: skipped by default. A skipped link to a folder is left out with its contents.</summary>
+    /// <summary>
+    /// Gets how links are treated: skipped by default. A skipped link to a folder is left out with its contents.
+    /// A followed link is compared as what it leads to (a link to a folder as a folder holding its target's
+    /// contents), and an item reached through one has as its <see cref="StorageItem.Path"/> the path its content
+    /// is read from; a link that leads outside the connection, is broken, or leads back into a folder being listed
+    /// is left out like a skipped one. A sync never deletes or replaces anything through a followed link.
+    /// </summary>
     public StorageLinkHandling LinkHandling { get; init; } = StorageLinkHandling.Skip;
     /// <summary>Gets the most items one side may hold; a larger tree fails instead of exhausting memory.</summary>
     public int MaxItems { get; init; } = 1_000_000;
@@ -158,11 +164,53 @@ public sealed record StorageDiff(IReadOnlyList<StorageDiffEntry> Entries)
     /// <summary>Gets what the filters, hidden rule, and link handling left out, per side, for safe deletes.</summary>
     internal StorageExclusions SourceExclusions { get; init; } = new();
     internal StorageExclusions DestinationExclusions { get; init; } = new();
+    /// <summary>Gets the links each side followed, so nothing is deleted or overwritten through one.</summary>
+    internal StorageFollowedLinks SourceLinks { get; init; } = new();
+    internal StorageFollowedLinks DestinationLinks { get; init; } = new();
     internal bool CaseInsensitive { get; init; }
 }
 
 /// <summary>A listed tree: included items keyed by path, what was left out, and whether the root was missing.</summary>
-internal sealed record StorageTree(Dictionary<string, StorageItem> Items, StorageExclusions Exclusions, bool Missing);
+internal sealed record StorageTree(Dictionary<string, StorageItem> Items, StorageExclusions Exclusions, bool Missing)
+{
+    /// <summary>The links followed on this side, and where the content of each item reached through one is read.</summary>
+    public StorageFollowedLinks Links { get; init; } = new();
+}
+
+/// <summary>
+/// The links one side's listing followed (<see cref="StorageLinkHandling.Follow"/>): each link's path, whether it
+/// leads to a folder, and for every item reached through a link the path its content is really read from.
+/// </summary>
+internal sealed class StorageFollowedLinks
+{
+    // Links compare ignoring case, which only ever leaves more alone; read paths are exact spellings.
+    private readonly Dictionary<string, bool> _links = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _readPaths = new(StringComparer.Ordinal);
+
+    /// <summary>Records a followed link.</summary>
+    public void Link(string relative, bool toDirectory) => _links[relative] = toDirectory;
+
+    /// <summary>Records where an item reached through a link is read from.</summary>
+    public void ReadFrom(string relative, string path) => _readPaths[relative] = path;
+
+    /// <summary>The path an item's content is read from, when it was reached through a link.</summary>
+    public string? ReadPath(string relative) => _readPaths.GetValueOrDefault(relative);
+
+    /// <summary>Whether the path is a followed link to a file.</summary>
+    public bool IsFileLink(string relative) => _links.TryGetValue(relative, out var toDirectory) && !toDirectory;
+
+    /// <summary>Whether the path is a followed link, or lies below a followed link to a folder.</summary>
+    public bool Through(string relative)
+    {
+        if (_links.Count == 0) return false;
+        if (_links.ContainsKey(relative)) return true;
+        for (var slash = relative.IndexOf('/'); slash > 0; slash = relative.IndexOf('/', slash + 1))
+        {
+            if (_links.TryGetValue(relative[..slash], out var toDirectory) && toDirectory) return true;
+        }
+        return false;
+    }
+}
 
 /// <summary>
 /// What one side's listing left out, kept small: folders left out with their contents are kept as prefixes, items
@@ -250,13 +298,29 @@ public static class StorageCompare
         options ??= new StorageCompareOptions();
         var valid = options.Validate();
         if (valid.IsFailure) return Result<StorageDiff>.Failure(valid.Error!);
-        var filter = new PathFilter(options);
-        var sourceTree = await ListTreeAsync(source, sourcePath, options, filter, required: true, cancellationToken).ConfigureAwait(false);
-        if (sourceTree.IsFailure) return Result<StorageDiff>.Failure(sourceTree.Error!);
-        var destinationTree = await ListTreeAsync(destination, destinationPath, options, filter, required: false, cancellationToken).ConfigureAwait(false);
-        if (destinationTree.IsFailure) return Result<StorageDiff>.Failure(destinationTree.Error!);
-        return await DiffAsync(source, sourceTree.Value!, destination, destinationTree.Value!, options, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var filter = new PathFilter(options);
+            var sourceTree = await ListTreeAsync(source, sourcePath, options, filter, required: true, cancellationToken).ConfigureAwait(false);
+            if (sourceTree.IsFailure) return Result<StorageDiff>.Failure(sourceTree.Error!);
+            var destinationTree = await ListTreeAsync(destination, destinationPath, options, filter, required: false, cancellationToken).ConfigureAwait(false);
+            if (destinationTree.IsFailure) return Result<StorageDiff>.Failure(destinationTree.Error!);
+            return await DiffAsync(source, sourceTree.Value!, destination, destinationTree.Value!, options, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            return Result<StorageDiff>.Failure(PlanningError(error, "Compare the directories"));
+        }
     }
+
+    /// <summary>
+    /// A failure for an exception thrown while listing or comparing: a filter pattern that took too long is the
+    /// caller's to fix, anything else (a provider whose listing threw) is reported as the provider's error.
+    /// </summary>
+    internal static Error PlanningError(Exception error, string operation) =>
+        error is RegexMatchTimeoutException timeout
+            ? StorageErrors.InvalidContent($"The filter pattern '{timeout.Pattern}' took too long to match '{timeout.Input}'; simplify it.")
+            : StorageErrors.FromException(error, operation);
 
     internal static async Task<Result<StorageDiff>> DiffAsync(
         IStorageService source,
@@ -276,8 +340,8 @@ public static class StorageCompare
         // Where case is ignored, a folder may be spelled differently on each side ("Docs" and "docs"). An item
         // only one side has goes under the other side's spelling of its folders, so a copy lands in the existing
         // folder instead of making a second one beside it on a store that keeps case.
-        var sourceFolders = insensitive ? FolderSpellings(sourceTree.Items.Keys) : null;
-        var destinationFolders = insensitive ? FolderSpellings(destinationTree.Items.Keys) : null;
+        var sourceFolders = insensitive ? FolderSpellings(sourceTree.Items) : null;
+        var destinationFolders = insensitive ? FolderSpellings(destinationTree.Items) : null;
 
         var entries = new List<StorageDiffEntry>();
         var pairs = new List<(string Path, StorageItem Left, StorageItem Right)>();
@@ -323,6 +387,8 @@ public static class StorageCompare
         {
             SourceExclusions = sourceTree.Exclusions,
             DestinationExclusions = destinationTree.Exclusions,
+            SourceLinks = sourceTree.Links,
+            DestinationLinks = destinationTree.Links,
             CaseInsensitive = insensitive
         });
     }
@@ -341,16 +407,20 @@ public static class StorageCompare
         return x.Length.CompareTo(y.Length);
     }
 
-    /// <summary>Every folder on one side, by its case-insensitive key, as that side spells it.</summary>
-    private static Dictionary<string, string> FolderSpellings(IEnumerable<string> paths)
+    /// <summary>
+    /// Every folder on one side, by its case-insensitive key, as that side spells it: each folder listed (an empty
+    /// one, or one holding only items left out, included) and each folder above a listed item.
+    /// </summary>
+    private static Dictionary<string, string> FolderSpellings(Dictionary<string, StorageItem> items)
     {
         var folders = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var path in paths)
+        foreach (var (path, item) in items)
         {
             // Walking up stops at the first folder already known: its own parents were added with it.
-            for (var parent = StorageExclusions.Parent(path); parent.Length > 0; parent = StorageExclusions.Parent(parent))
+            var start = item.ItemType == StorageItemType.Directory ? path : StorageExclusions.Parent(path);
+            for (var folder = start; folder.Length > 0; folder = StorageExclusions.Parent(folder))
             {
-                if (!folders.TryAdd(KeyOf(parent, insensitive: true), parent)) break;
+                if (!folders.TryAdd(KeyOf(folder, insensitive: true), folder)) break;
             }
         }
         return folders;
@@ -620,7 +690,11 @@ public static class StorageCompare
     /// <summary>
     /// Lists a tree once, applying the hidden rule, name/include/exclude filters, and link handling. A folder the
     /// hidden rule or an exclude pattern leaves out is left out with everything below it, and a skipped link to a
-    /// folder with its contents; what was left out is recorded so deletes never touch it on the other side.
+    /// folder with its contents; what was left out is recorded so deletes never touch it on the other side. A
+    /// followed link to a folder is listed as a folder holding its target's contents (links inside it followed
+    /// the same way, up to <see cref="MaxLinkDepth"/> deep); one that leads back into a folder being listed is
+    /// left out with everything below it. An item reached through a link keeps, as its
+    /// <see cref="StorageItem.Path"/>, the path its content is read from.
     /// </summary>
     internal static async Task<Result<StorageTree>> ListTreeAsync(
         IStorageService storage,
@@ -632,13 +706,118 @@ public static class StorageCompare
     {
         var items = new Dictionary<string, StorageItem>(StringComparer.Ordinal);
         var exclusions = new StorageExclusions();
+        var links = new StorageFollowedLinks();
         var normalizedRoot = StoragePath.Normalize(root);
         if (normalizedRoot.IsFailure) return Result<StorageTree>.Failure(normalizedRoot.Error!);
         // Hidden items are listed and left out here, so they are recorded (and a hidden folder's contents go too).
         var listOptions = new StorageListOptions { Recursive = true, IncludeHidden = true };
         var pattern = string.IsNullOrEmpty(options.NamePattern) ? null : Providers.StorageListFilter.Glob(options.NamePattern);
+        // Followed links to folders, whose contents come from their targets: whatever a provider itself lists below
+        // one is not taken a second time.
+        var expanded = new HashSet<string>(StringComparer.Ordinal);
         var missing = false;
         var listed = 0;
+
+        bool UnderExpanded(string relative)
+        {
+            if (expanded.Count == 0) return false;
+            for (var slash = relative.IndexOf('/'); slash > 0; slash = relative.IndexOf('/', slash + 1))
+            {
+                if (expanded.Contains(relative[..slash])) return true;
+            }
+            return false;
+        }
+
+        Error? TooMany() => items.Count + exclusions.Count > options.MaxItems
+            ? StorageErrors.TooLarge($"'{normalizedRoot.Value}' holds more than {options.MaxItems} items; raise MaxItems or narrow the filters.")
+            : null;
+
+        void LeaveOutLink(string relative)
+        {
+            exclusions.Item(relative);
+            exclusions.Prune(relative);
+        }
+
+        // Takes one listed item in, or leaves it out; an error ends the listing.
+        async Task<Error?> AdmitAsync(StorageItem current, string relative, bool reached, IReadOnlyList<string> chain)
+        {
+            var isDirectory = current.ItemType == StorageItemType.Directory;
+            if (!options.IncludeHidden && (current.IsHidden || current.Name.StartsWith('.')))
+            {
+                if (isDirectory || current.ItemType == StorageItemType.Link) exclusions.Prune(relative);
+                else if (current.Name.StartsWith('.')) exclusions.Holds(relative);
+                else exclusions.Item(relative);
+                return null;
+            }
+            // A followed link is filtered as what it leads to: a link to a folder is a folder to the filters.
+            StorageItem? target = null;
+            if (current.ItemType == StorageItemType.Link && options.LinkHandling == StorageLinkHandling.Follow)
+            {
+                target = await FollowAsync(storage, current, cancellationToken).ConfigureAwait(false);
+                if (target is null) { LeaveOutLink(relative); return null; }
+                isDirectory = target.ItemType == StorageItemType.Directory;
+            }
+            if (filter.Excludes(relative, isDirectory))
+            {
+                if (isDirectory) exclusions.Prune(relative);
+                else exclusions.Holds(relative);
+                return null;
+            }
+            if (pattern is not null && (target ?? current).ItemType == StorageItemType.File && !pattern.IsMatch(current.Name))
+            {
+                exclusions.Holds(relative);
+                return null;
+            }
+            if (current.ItemType != StorageItemType.Link)
+            {
+                if (reached) links.ReadFrom(relative, current.Path);
+                items[relative] = current;
+                return TooMany();
+            }
+            switch (options.LinkHandling)
+            {
+                case StorageLinkHandling.Reject:
+                    return StorageErrors.Unsupported($"'{current.Path}' is a link. Set LinkHandling to skip, follow, or recreate links.");
+                case StorageLinkHandling.Follow:
+                    var toDirectory = isDirectory;
+                    if (toDirectory && (LeadsBack(target!.Path, current.Path, chain) || chain.Count > MaxLinkDepth))
+                    {
+                        // Following it would list a folder already being listed, or go too deep.
+                        LeaveOutLink(relative);
+                        return null;
+                    }
+                    links.Link(relative, toDirectory);
+                    links.ReadFrom(relative, target!.Path);
+                    items[relative] = target with { Name = current.Name };
+                    if (TooMany() is { } tooMany) return tooMany;
+                    if (!toDirectory) return null;
+                    expanded.Add(relative);
+                    return await ExpandAsync(target.Path, relative, [.. chain, target.Path]).ConfigureAwait(false);
+                default:
+                    // Skipped, with anything a provider lists below a link to a folder.
+                    LeaveOutLink(relative);
+                    return null;
+            }
+        }
+
+        // Lists a followed folder's target and takes its contents in under the link's path.
+        async Task<Error?> ExpandAsync(string targetPath, string linkRelative, IReadOnlyList<string> chain)
+        {
+            await foreach (var item in storage.EnumerateItemsAsync(targetPath, listOptions, cancellationToken).ConfigureAwait(false))
+            {
+                if (item.IsFailure) return item.Error!;
+                var below = Relative(targetPath, item.Value!.Path);
+                if (below is null)
+                    return StorageErrors.ProviderError($"Listing '{targetPath}' returned '{item.Value.Path}', which is not inside it.", $"listedPath={item.Value.Path}");
+                if (below.Length == 0) continue;
+                var relative = $"{linkRelative}/{below}";
+                if (exclusions.UnderPruned(relative)) continue;
+                var admitted = await AdmitAsync(item.Value, relative, reached: true, chain).ConfigureAwait(false);
+                if (admitted is not null) return admitted;
+            }
+            return null;
+        }
+
         await foreach (var item in storage.EnumerateItemsAsync(normalizedRoot.Value!, listOptions, cancellationToken).ConfigureAwait(false))
         {
             if (item.IsFailure)
@@ -655,58 +834,26 @@ public static class StorageCompare
                     $"Listing '{normalizedRoot.Value}' returned '{item.Value.Path}', which is not inside it.",
                     $"listedPath={item.Value.Path}"));
             if (relative.Length == 0) continue;
-            if (exclusions.UnderPruned(relative)) continue;
-            var current = item.Value;
-            var isDirectory = current.ItemType == StorageItemType.Directory;
-
-            if (!options.IncludeHidden && (current.IsHidden || current.Name.StartsWith('.')))
-            {
-                if (isDirectory || current.ItemType == StorageItemType.Link) exclusions.Prune(relative);
-                else if (current.Name.StartsWith('.')) exclusions.Holds(relative);
-                else exclusions.Item(relative);
-                continue;
-            }
-            if (filter.Excludes(relative, isDirectory))
-            {
-                if (isDirectory) exclusions.Prune(relative);
-                else exclusions.Holds(relative);
-                continue;
-            }
-            if (pattern is not null && current.ItemType == StorageItemType.File && !pattern.IsMatch(current.Name))
-            {
-                exclusions.Holds(relative);
-                continue;
-            }
-            if (current.ItemType == StorageItemType.Link)
-            {
-                switch (options.LinkHandling)
-                {
-                    case StorageLinkHandling.Reject:
-                        return Result<StorageTree>.Failure(StorageErrors.Unsupported(
-                            $"'{current.Path}' is a link. Set LinkHandling to skip, follow, or recreate links."));
-                    case StorageLinkHandling.Follow:
-                        var target = await FollowAsync(storage, current, cancellationToken).ConfigureAwait(false);
-                        if (target is null)
-                        {
-                            exclusions.Item(relative);
-                            exclusions.Prune(relative);
-                            continue;
-                        }
-                        current = target with { Path = current.Path, Name = current.Name };
-                        break;
-                    default:
-                        // Skipped, with anything a provider lists below a link to a folder.
-                        exclusions.Item(relative);
-                        exclusions.Prune(relative);
-                        continue;
-                }
-            }
-            items[relative] = current;
-            if (items.Count + exclusions.Count > options.MaxItems)
-                return Result<StorageTree>.Failure(StorageErrors.TooLarge(
-                    $"'{normalizedRoot.Value}' holds more than {options.MaxItems} items; raise MaxItems or narrow the filters."));
+            if (exclusions.UnderPruned(relative) || UnderExpanded(relative)) continue;
+            var failed = await AdmitAsync(item.Value, relative, reached: false, [normalizedRoot.Value!]).ConfigureAwait(false);
+            if (failed is not null) return Result<StorageTree>.Failure(failed);
         }
-        return Result<StorageTree>.Success(new StorageTree(items, exclusions, missing));
+        return Result<StorageTree>.Success(new StorageTree(items, exclusions, missing) { Links = links });
+    }
+
+    /// <summary>How many followed links to folders may lie inside one another.</summary>
+    internal const int MaxLinkDepth = 8;
+
+    /// <summary>
+    /// Whether following a link to a folder would list a folder already being listed: the target holds the link
+    /// itself, or holds (or is) the listed root or the target of a link the new one was found through.
+    /// </summary>
+    private static bool LeadsBack(string target, string linkPath, IReadOnlyList<string> chain)
+    {
+        bool Holds(string path) =>
+            target.Length == 0 || string.Equals(path, target, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(target + "/", StringComparison.OrdinalIgnoreCase);
+        return Holds(linkPath) || chain.Any(Holds);
     }
 
     /// <summary>
