@@ -323,19 +323,19 @@ public sealed record StorageTransferOptions
 public enum StorageConflictPolicy
 {
     /// <summary>Fails with <c>storage.conflict</c>.</summary>
-    Fail,
+    Fail = 0,
     /// <summary>Replaces the destination.</summary>
-    Overwrite,
+    Overwrite = 1,
     /// <summary>Leaves the destination untouched.</summary>
-    Skip,
+    Skip = 2,
     /// <summary>Replaces the destination only when the source is newer (2-second tolerance; unknown times count as newer).</summary>
-    OverwriteIfNewer,
+    OverwriteIfNewer = 3,
     /// <summary>Replaces the destination only when the sizes differ (unknown sizes count as different).</summary>
-    OverwriteIfSizeDiffers,
+    OverwriteIfSizeDiffers = 4,
     /// <summary>Replaces the destination when the source is newer or the sizes differ.</summary>
-    OverwriteIfNewerOrSizeDiffers,
+    OverwriteIfNewerOrSizeDiffers = 5,
     /// <summary>Writes to the first free name <c>name (1).ext</c>, <c>name (2).ext</c>, … instead.</summary>
-    Rename,
+    Rename = 6,
     /// <summary>
     /// Writes through a resumable staging object and replaces the destination only when it is complete. When
     /// an earlier attempt left staged data for the same destination and the same source (same length,
@@ -343,22 +343,22 @@ public enum StorageConflictPolicy
     /// never half-written. Appending needs <see cref="StorageFeature.Append"/> on the destination (otherwise
     /// the staging object is rewritten from the start), and uploads need a seekable source.
     /// </summary>
-    Resume
+    Resume = 7
 }
 
 /// <summary>How relayed transfers treat symbolic links.</summary>
 public enum StorageLinkHandling
 {
     /// <summary>Fails the transfer when it meets a link, because link targets are provider-specific.</summary>
-    Reject,
+    Reject = 0,
     /// <summary>Leaves links out of the transfer.</summary>
-    Skip,
+    Skip = 1,
     /// <summary>Copies the content of the file a link points to. Links to directories are refused, which also rules out loops.</summary>
-    Follow,
+    Follow = 2,
     /// <summary>
     /// Creates an equivalent link at the destination. A target inside the transferred directory is remapped
     /// to the copy; the source must support <see cref="StorageFeature.ReadLinks"/> and the destination
     /// <see cref="StorageFeature.CreateLinks"/>.
     /// </summary>
-    Recreate
+    Recreate = 3
 }

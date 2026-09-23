@@ -4,41 +4,41 @@ namespace CL.Storage.Models;
 public enum StorageProvider
 {
     /// <summary>Local filesystem or UNC share.</summary>
-    Local,
+    Local = 0,
     /// <summary>Amazon S3 or an S3-compatible object store.</summary>
-    S3,
+    S3 = 1,
     /// <summary>FTP or FTPS server.</summary>
-    Ftp,
+    Ftp = 2,
     /// <summary>SSH File Transfer Protocol server.</summary>
-    Sftp,
+    Sftp = 3,
     /// <summary>WebDAV endpoint.</summary>
-    WebDav,
+    WebDav = 4,
     /// <summary>Azure Blob Storage container.</summary>
-    AzureBlob,
+    AzureBlob = 5,
     /// <summary>Google Cloud Storage bucket.</summary>
-    GoogleCloudStorage,
+    GoogleCloudStorage = 6,
     /// <summary>OpenStack Swift container.</summary>
-    OpenStackSwift
+    OpenStackSwift = 7
 }
 
 /// <summary>Identifies the kind of a storage item.</summary>
 public enum StorageItemType
 {
     /// <summary>Byte content addressable by a path.</summary>
-    File,
+    File = 0,
     /// <summary>Physical directory or virtual object-key prefix.</summary>
-    Directory,
+    Directory = 1,
     /// <summary>Symbolic link or provider reference.</summary>
-    Link
+    Link = 2
 }
 
 /// <summary>Controls user-metadata behavior when relaying between unlike providers.</summary>
 public enum StorageMetadataPreservation
 {
     /// <summary>Preserve metadata when the destination advertises support; otherwise copy content only.</summary>
-    BestEffort,
+    BestEffort = 0,
     /// <summary>Fail before upload when source metadata cannot be preserved.</summary>
-    Require,
+    Require = 1,
     /// <summary>Never copy source user metadata.</summary>
-    Discard
+    Discard = 2
 }

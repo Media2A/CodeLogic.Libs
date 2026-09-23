@@ -6,13 +6,13 @@ namespace CL.Storage.Models;
 public enum StorageTransportSecurity
 {
     /// <summary>Not a network connection, or not known from the configuration.</summary>
-    Unknown,
+    Unknown = 0,
     /// <summary>Plain text: FTP without TLS, or HTTP.</summary>
-    None,
+    None = 1,
     /// <summary>TLS: FTPS or HTTPS.</summary>
-    Tls,
+    Tls = 2,
     /// <summary>SSH.</summary>
-    Ssh
+    Ssh = 3
 }
 
 /// <summary>The certificate or host key a server presented, in the form a pin setting expects.</summary>

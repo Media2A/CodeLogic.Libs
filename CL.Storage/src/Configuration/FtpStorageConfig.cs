@@ -7,58 +7,58 @@ namespace CL.Storage.Configuration;
 public enum StorageFtpEncryptionMode
 {
     /// <summary>Uses unencrypted FTP.</summary>
-    None,
+    None = 0,
     /// <summary>Upgrades an FTP connection with explicit TLS.</summary>
-    Explicit,
+    Explicit = 1,
     /// <summary>Starts the connection using implicit TLS.</summary>
-    Implicit
+    Implicit = 2
 }
 
 /// <summary>Specifies how FTP data connections are established.</summary>
 public enum StorageFtpDataConnectionMode
 {
     /// <summary>Automatically chooses a passive strategy.</summary>
-    AutoPassive,
+    AutoPassive = 0,
     /// <summary>Uses extended passive mode.</summary>
-    Epsv,
+    Epsv = 1,
     /// <summary>Uses passive mode.</summary>
-    Pasv,
+    Pasv = 2,
     /// <summary>Automatically chooses an active strategy.</summary>
-    AutoActive,
+    AutoActive = 3,
     /// <summary>Uses extended active mode.</summary>
-    Eprt,
+    Eprt = 4,
     /// <summary>Uses active port mode.</summary>
-    Port
+    Port = 5
 }
 
 /// <summary>Specifies the FTP transfer type.</summary>
 public enum StorageFtpTransferType
 {
     /// <summary>Transfers bytes unchanged (TYPE I). Correct for every file type.</summary>
-    Binary,
+    Binary = 0,
     /// <summary>Converts line endings between client and server (TYPE A). Only for text files.</summary>
-    Ascii
+    Ascii = 1
 }
 
 /// <summary>Specifies how FTP directory listings are parsed.</summary>
 public enum StorageFtpListingParser
 {
     /// <summary>Detects the format from the server.</summary>
-    Auto,
+    Auto = 0,
     /// <summary>Machine-readable MLSD listings.</summary>
-    Machine,
+    Machine = 1,
     /// <summary>Unix <c>ls -l</c> style listings.</summary>
-    Unix,
+    Unix = 2,
     /// <summary>Alternative Unix listing parser for unusual servers.</summary>
-    UnixAlternative,
+    UnixAlternative = 3,
     /// <summary>Windows/IIS style listings.</summary>
-    Windows,
+    Windows = 4,
     /// <summary>OpenVMS listings.</summary>
-    Vms,
+    Vms = 5,
     /// <summary>IBM z/OS listings.</summary>
-    IbmZos,
+    IbmZos = 6,
     /// <summary>HP NonStop/Tandem listings.</summary>
-    NonStop
+    NonStop = 7
 }
 
 /// <summary>Defines named FTP and FTPS connections.</summary>

@@ -8,16 +8,16 @@ namespace CL.Storage.Configuration;
 public enum SftpAuthenticationMode
 {
     /// <summary>Authenticates with a password.</summary>
-    Password,
+    Password = 0,
     /// <summary>Authenticates with a private key and optional passphrase.</summary>
-    PrivateKey,
+    PrivateKey = 1,
     /// <summary>Answers the server's keyboard-interactive password prompt with <see cref="SftpConnectionConfig.Password"/>.</summary>
-    KeyboardInteractive,
+    KeyboardInteractive = 2,
     /// <summary>
     /// Offers every configured method in the order OpenSSH uses: private keys, then password, then
     /// keyboard-interactive. Also satisfies servers that require several methods, such as key and password.
     /// </summary>
-    Auto
+    Auto = 3
 }
 
 /// <summary>Defines named SFTP connections.</summary>

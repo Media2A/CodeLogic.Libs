@@ -12,13 +12,13 @@ namespace CL.Storage.Sync;
 public enum StorageDiffKind
 {
     /// <summary>Exists only on the source side.</summary>
-    OnlyInSource,
+    OnlyInSource = 0,
     /// <summary>Exists only on the destination side.</summary>
-    OnlyInDestination,
+    OnlyInDestination = 1,
     /// <summary>Exists on both sides with different content, by the chosen criteria.</summary>
-    Different,
+    Different = 2,
     /// <summary>Exists on both sides and matches, by the chosen criteria.</summary>
-    Same
+    Same = 3
 }
 
 /// <summary>Why two files were judged different.</summary>

@@ -12,41 +12,41 @@ namespace CL.Storage.Sync;
 public enum StorageSyncDirection
 {
     /// <summary>Copies files that are new or changed at the source; never deletes.</summary>
-    Update,
+    Update = 0,
     /// <summary>Makes the destination match the source; deletes destination-only items when <see cref="StorageSyncOptions.DeleteExtraneous"/> is set.</summary>
-    Mirror,
+    Mirror = 1,
     /// <summary>
     /// Changes flow both ways. With a baseline (<see cref="StorageSyncOptions.StateStore"/>) it is a three-way sync:
     /// edits and deletions made on one side are carried to the other, and changes on both sides are conflicts.
     /// Without one, files missing on a side are copied there and files that differ are conflicts.
     /// </summary>
-    TwoWay
+    TwoWay = 2
 }
 
 /// <summary>What a two-way sync does when both sides changed the same file.</summary>
 public enum StorageSyncConflictPolicy
 {
     /// <summary>Plans a <see cref="StorageSyncActionKind.Conflict"/>; the plan cannot be applied until it is resolved.</summary>
-    Block,
+    Block = 0,
     /// <summary>
     /// Keeps both: the source's version keeps the name on both sides, and the destination's version is kept on
     /// both sides as <c>name (conflict xxxxxxxx).ext</c>, named from its identity so repeated runs agree. For
     /// a delete against a modify, the modified file is kept.
     /// </summary>
-    KeepBoth,
+    KeepBoth = 1,
     /// <summary>The later modification wins; equal or unknown times stay conflicts. A modify beats a delete.</summary>
-    NewerWins
+    NewerWins = 2
 }
 
 /// <summary>How the two sides of a two-way sync changed one path.</summary>
 public enum StorageSyncConflictKind
 {
     /// <summary>Both sides edited a file they shared.</summary>
-    BothModified,
+    BothModified = 0,
     /// <summary>Both sides created different files at the same path.</summary>
-    BothCreated,
+    BothCreated = 1,
     /// <summary>One side deleted a file the other side edited.</summary>
-    DeleteVersusModify
+    DeleteVersusModify = 2
 }
 
 /// <summary>What a sync does to one path. The numbers are stable: kinds are only ever added at the end.</summary>
@@ -74,15 +74,15 @@ public enum StorageSyncActionKind
 public enum StorageSyncActionOutcome
 {
     /// <summary>Not run: a dry run, a blocked conflict, or the run stopped first.</summary>
-    NotRun,
+    NotRun = 0,
     /// <summary>Done.</summary>
-    Applied,
+    Applied = 1,
     /// <summary>Failed; see the error.</summary>
-    Failed,
+    Failed = 2,
     /// <summary>The item changed after the plan was made, so the step was not taken.</summary>
-    Stale,
+    Stale = 3,
     /// <summary>A deletion held back by a safety rule; see <see cref="StorageSyncAction.WithheldReason"/>.</summary>
-    Withheld
+    Withheld = 4
 }
 
 /// <summary>What identifies one version of a file: size, time, ETag, version, and a digest when known.</summary>

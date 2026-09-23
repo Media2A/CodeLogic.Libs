@@ -10,62 +10,65 @@ namespace CL.Storage.Queue;
 public enum StorageTransferKind
 {
     /// <summary>Copies an item between (or within) connections.</summary>
-    Copy,
+    Copy = 0,
     /// <summary>Moves an item between (or within) connections.</summary>
-    Move,
+    Move = 1,
     /// <summary>Uploads a local file.</summary>
-    UploadFile,
+    UploadFile = 2,
     /// <summary>Downloads to a local file.</summary>
-    DownloadFile,
+    DownloadFile = 3,
     /// <summary>Uploads a local directory tree.</summary>
-    UploadDirectory,
+    UploadDirectory = 4,
     /// <summary>Downloads a directory tree to a local directory.</summary>
-    DownloadDirectory
+    DownloadDirectory = 5
 }
 
-/// <summary>Where a job is in its life cycle.</summary>
+/// <summary>
+/// Where a job is in its life cycle. The numbers of the first five states are the ones 4.8.93 stored; states
+/// added since are appended, so a stored number keeps its meaning.
+/// </summary>
 public enum StorageTransferState
 {
     /// <summary>Waiting for a free slot, or for its retry time.</summary>
-    Queued,
+    Queued = 0,
     /// <summary>Transferring.</summary>
-    Running,
-    /// <summary>Held by <see cref="StorageTransferQueue.PauseJobAsync"/>; a resumable transfer continues where it stopped.</summary>
-    Paused,
+    Running = 1,
     /// <summary>Finished successfully (or skipped by its conflict policy).</summary>
-    Completed,
+    Completed = 2,
     /// <summary>Failed permanently or ran out of retries; can be retried.</summary>
-    Failed,
+    Failed = 3,
     /// <summary>Cancelled by the caller.</summary>
-    Cancelled,
+    Cancelled = 4,
+    /// <summary>Held by <see cref="StorageTransferQueue.PauseJobAsync"/>; a resumable transfer continues where it stopped.</summary>
+    Paused = 5,
     /// <summary>Stopped by something only a person can fix: an untrusted server identity or refused credentials. See <see cref="StorageTransferJob.BlockReason"/>.</summary>
-    Blocked,
+    Blocked = 6,
     /// <summary>Stopped part-way with a mixed state (see the job's report); decide, then retry or remove it.</summary>
-    NeedsReconciliation,
+    NeedsReconciliation = 7,
     /// <summary>Was running when its process stopped, after it may have changed the destination; decide, then retry or remove it.</summary>
-    Interrupted
+    Interrupted = 8
 }
 
 /// <summary>Why a job is <see cref="StorageTransferState.Blocked"/>.</summary>
 public enum StorageTransferBlockReason
 {
     /// <summary>The server's certificate or host key is not trusted.</summary>
-    Trust,
+    Trust = 0,
     /// <summary>The credentials, or the client certificate, were refused.</summary>
-    Credential
+    Credential = 1
 }
 
 /// <summary>How far a running job got, recorded so a restart knows what may have changed.</summary>
 public enum StorageTransferPhase
 {
     /// <summary>Nothing written yet.</summary>
-    NotStarted,
+    NotStarted = 0,
     /// <summary>Writing to a staging object; the destination is untouched.</summary>
-    Transferring,
+    Transferring = 1,
     /// <summary>Changing the destination.</summary>
-    Committing,
+    Committing = 2,
     /// <summary>The destination is complete; deleting the source of a move.</summary>
-    DeletingSource
+    DeletingSource = 3
 }
 
 /// <summary>A job's durable progress marker.</summary>

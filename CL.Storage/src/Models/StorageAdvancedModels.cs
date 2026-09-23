@@ -8,9 +8,9 @@ namespace CL.Storage.Models;
 public enum StorageMetadataUpdateMode
 {
     /// <summary>Overlay supplied keys while preserving metadata keys not present in the update.</summary>
-    Merge,
+    Merge = 0,
     /// <summary>Replace the complete user-metadata dictionary with the supplied values.</summary>
-    Replace
+    Replace = 1
 }
 
 /// <summary>Controls a capability-gated metadata update.</summary>
@@ -42,9 +42,9 @@ public sealed record StorageMetadataUpdateOptions
 public enum StorageSignedUrlMethod
 {
     /// <summary>Authorize an HTTP read of an existing object.</summary>
-    Read,
+    Read = 0,
     /// <summary>Authorize an HTTP write of object content.</summary>
-    Write
+    Write = 1
 }
 
 /// <summary>Controls creation of a temporary provider-signed object URL.</summary>
@@ -155,13 +155,13 @@ public sealed record StorageVersionPage(
 public enum StorageChecksumAlgorithm
 {
     /// <summary>MD5 for compatibility with legacy provider digests; not recommended for security decisions.</summary>
-    Md5,
+    Md5 = 0,
     /// <summary>SHA-256 digest.</summary>
-    Sha256,
+    Sha256 = 1,
     /// <summary>SHA-384 digest.</summary>
-    Sha384,
+    Sha384 = 2,
     /// <summary>SHA-512 digest.</summary>
-    Sha512
+    Sha512 = 3
 }
 
 /// <summary>A lowercase hexadecimal digest and the number of bytes included in it.</summary>
@@ -179,20 +179,20 @@ public sealed record StorageChecksum(
 public enum StorageChecksumSource
 {
     /// <summary>Computed by streaming the content through the client.</summary>
-    Computed,
+    Computed = 0,
     /// <summary>Reported by the server without downloading the content; <see cref="StorageChecksum.BytesProcessed"/> is zero.</summary>
-    Server
+    Server = 1
 }
 
 /// <summary>Chooses between a server-reported checksum and computing one from the content.</summary>
 public enum StorageChecksumMode
 {
     /// <summary>Uses the server's checksum when available and falls back to computing it.</summary>
-    PreferServer,
+    PreferServer = 0,
     /// <summary>Uses only the server's checksum; fails with <c>storage.unsupported</c> when there is none.</summary>
-    ServerOnly,
+    ServerOnly = 1,
     /// <summary>Always downloads and computes the checksum.</summary>
-    ComputeOnly
+    ComputeOnly = 2
 }
 
 /// <summary>The actual digest and constant-time comparison outcome for an expected digest.</summary>
@@ -217,9 +217,9 @@ public sealed record StorageDirectoryTransferReport(
 public enum StorageTagUpdateMode
 {
     /// <summary>Overlay supplied keys while preserving tags not present in the update.</summary>
-    Merge,
+    Merge = 0,
     /// <summary>Replace the complete tag set with the supplied values.</summary>
-    Replace
+    Replace = 1
 }
 
 /// <summary>Controls a capability-gated object tag update.</summary>

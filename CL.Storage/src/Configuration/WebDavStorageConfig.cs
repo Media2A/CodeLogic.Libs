@@ -7,19 +7,19 @@ namespace CL.Storage.Configuration;
 public enum WebDavAuthenticationMode
 {
     /// <summary>Sends no authentication credentials.</summary>
-    None,
+    None = 0,
     /// <summary>Uses HTTP Basic authentication.</summary>
-    Basic,
+    Basic = 1,
     /// <summary>Uses an HTTP bearer token.</summary>
-    BearerToken,
+    BearerToken = 2,
     /// <summary>Uses the current Windows credentials.</summary>
-    Windows,
+    Windows = 3,
     /// <summary>Uses HTTP Digest authentication with <see cref="WebDavConnectionConfig.Username"/> and <see cref="WebDavConnectionConfig.Password"/>.</summary>
-    Digest,
+    Digest = 4,
     /// <summary>Uses NTLM authentication with explicit credentials.</summary>
-    Ntlm,
+    Ntlm = 5,
     /// <summary>Uses Negotiate (Kerberos, falling back to NTLM) with explicit credentials.</summary>
-    Negotiate
+    Negotiate = 6
 }
 
 /// <summary>Defines named WebDAV connections.</summary>

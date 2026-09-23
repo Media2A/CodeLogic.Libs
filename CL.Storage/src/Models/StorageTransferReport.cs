@@ -6,50 +6,50 @@ namespace CL.Storage.Models;
 public enum StorageTransferOutcome
 {
     /// <summary>Everything was written and, for a move, the source removed.</summary>
-    Completed,
+    Completed = 0,
     /// <summary>The conflict policy left the destination as it was; see <see cref="StorageTransferReport.SkipReason"/>.</summary>
-    Skipped,
+    Skipped = 1,
     /// <summary>Nothing was committed and nothing needs attention; the destination is as it was.</summary>
-    Failed,
+    Failed = 2,
     /// <summary>
     /// The transfer stopped part-way and the state is mixed — for example the destination committed but the
     /// source could not be deleted, or a rollback did not finish. The report's state fields say exactly what.
     /// </summary>
-    NeedsReconciliation,
+    NeedsReconciliation = 3,
     /// <summary>
     /// The caller cancelled the transfer before anything was committed. Staging and backups were cleaned up,
     /// except the staged bytes of a resumable transfer, which <see cref="StorageTransferReport.ResumeToken"/> continues.
     /// </summary>
-    Cancelled
+    Cancelled = 4
 }
 
 /// <summary>Why a conflict policy skipped a file.</summary>
 public enum StorageSkipReason
 {
     /// <summary><see cref="StorageConflictPolicy.Skip"/>: the destination exists.</summary>
-    DestinationExists,
+    DestinationExists = 0,
     /// <summary><see cref="StorageConflictPolicy.OverwriteIfNewer"/>: the source is not newer.</summary>
-    SourceNotNewer,
+    SourceNotNewer = 1,
     /// <summary><see cref="StorageConflictPolicy.OverwriteIfSizeDiffers"/>: the sizes are equal.</summary>
-    SameSize,
+    SameSize = 2,
     /// <summary><see cref="StorageConflictPolicy.OverwriteIfNewerOrSizeDiffers"/>: neither newer nor a different size.</summary>
-    Unchanged,
+    Unchanged = 3,
     /// <summary><see cref="StorageConflictPolicy.Resume"/>: the destination is already complete.</summary>
-    AlreadyComplete
+    AlreadyComplete = 4
 }
 
 /// <summary>How firmly a destination condition (create-new, or replace-only-this-version) was enforced.</summary>
 public enum StorageConditionEnforcement
 {
     /// <summary>No condition applied.</summary>
-    None,
+    None = 0,
     /// <summary>The provider enforced it in the same operation that committed the data; no race is possible.</summary>
-    Atomic,
+    Atomic = 1,
     /// <summary>
     /// Checked immediately before the commit. A writer that changes the destination in the short window
     /// between the check and the commit is not detected; the provider has no atomic form.
     /// </summary>
-    CheckedBeforeCommit
+    CheckedBeforeCommit = 2
 }
 
 /// <summary>

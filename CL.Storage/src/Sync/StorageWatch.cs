@@ -10,19 +10,19 @@ namespace CL.Storage.Sync;
 public enum StorageChangeKind
 {
     /// <summary>The item appeared.</summary>
-    Created,
+    Created = 0,
     /// <summary>The item's content, size, or time changed.</summary>
-    Changed,
+    Changed = 1,
     /// <summary>The item disappeared.</summary>
-    Deleted,
+    Deleted = 2,
     /// <summary>The item was renamed (native watching only; polling reports a delete and a create).</summary>
-    Renamed,
+    Renamed = 3,
     /// <summary>
     /// Changes may have been missed (native watching only): notifications arrived faster than they could be
     /// buffered, or native watching stopped — the folder was removed or a network share dropped — and watching
     /// continues by polling. <see cref="StorageChange.Path"/> is the watched directory; list it again to catch up.
     /// </summary>
-    Overflow
+    Overflow = 4
 }
 
 /// <summary>One observed change.</summary>

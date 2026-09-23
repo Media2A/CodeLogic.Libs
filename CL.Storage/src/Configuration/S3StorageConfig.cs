@@ -7,9 +7,9 @@ namespace CL.Storage.Configuration;
 public enum S3AuthenticationMode
 {
     /// <summary>Uses the SDK default credential chain.</summary>
-    DefaultCredentialChain,
+    DefaultCredentialChain = 0,
     /// <summary>Uses the access key, secret key, and optional session token in configuration.</summary>
-    StaticCredentials
+    StaticCredentials = 1
 }
 
 /// <summary>Defines named Amazon S3 and S3-compatible connections.</summary>
