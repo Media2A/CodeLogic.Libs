@@ -36,6 +36,9 @@ internal sealed record StagedContent(string StagingPath, long Bytes, long BytesR
 /// <summary>The outcome of writing to staging: the content, or the error and what was left behind.</summary>
 internal sealed record StagedWriteResult(StagedContent? Content, Error? Error, string? StagingLeft, long BytesStaged)
 {
+    /// <summary>Whether the caller cancelled; a resumable write's staged bytes are kept, anything else removed.</summary>
+    public bool Cancelled { get; init; }
+
     /// <summary>Why a staging object that should have been removed was not.</summary>
     public Error? CleanupError { get; init; }
 
@@ -72,6 +75,10 @@ internal static class StagedWriter
         string.Join('|', sourcePath ?? string.Empty, length?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
             modified?.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty, eTag ?? string.Empty, versionId ?? string.Empty);
 
+    /// <summary>
+    /// Writes through staging. Cancellation is reported, not thrown: the staging object is removed, or kept
+    /// with its size for a resumable write, and <see cref="StagedWriteResult.Cancelled"/> is set.
+    /// </summary>
     public static async Task<StagedWriteResult> WriteAsync(
         IStorageService destination,
         StagedWriteRequest request,
@@ -90,11 +97,39 @@ internal static class StagedWriter
         }
         else
         {
-            var allocated = await AllocateStagingPathAsync(destination, parent, cancellationToken).ConfigureAwait(false);
+            Result<string> allocated;
+            try { allocated = await AllocateStagingPathAsync(destination, parent, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return CancelledResult(null, 0); }
             if (allocated.IsFailure) return new StagedWriteResult(null, allocated.Error, null, 0);
             staging = allocated.Value!;
         }
+        try
+        {
+            return await WriteToStagingAsync(destination, request, open, staging, parent, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            if (!request.Resumable)
+            {
+                var deleted = await DeleteAsync(destination, staging).ConfigureAwait(false);
+                return CancelledResult(deleted.IsFailure ? staging : null, 0);
+            }
+            var kept = await destination.GetInfoAsync(staging, CancellationToken.None).ConfigureAwait(false);
+            return kept.IsSuccess ? CancelledResult(staging, kept.Value!.Size ?? 0) : CancelledResult(null, 0);
+        }
+    }
 
+    private static StagedWriteResult CancelledResult(string? stagingLeft, long bytes) =>
+        new(null, StorageErrors.Cancelled("The write was cancelled."), stagingLeft, bytes) { Cancelled = true };
+
+    private static async Task<StagedWriteResult> WriteToStagingAsync(
+        IStorageService destination,
+        StagedWriteRequest request,
+        StagedSourceOpener open,
+        string staging,
+        string parent,
+        CancellationToken cancellationToken)
+    {
         var verify = request.Verify || request.ExpectedSha256 is not null;
         long offset = 0;
         using var hash = verify ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
@@ -156,7 +191,7 @@ internal static class StagedWriter
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                if (!request.Resumable) await DeleteAsync(destination, staging).ConfigureAwait(false);
+                // Cleaned up (or kept, for resume) by WriteAsync.
                 throw;
             }
         }
@@ -225,6 +260,30 @@ internal static class StagedWriter
             new StorageTransferOptions { Overwrite = overwrite, CreateParents = createParents },
             cancellationToken).ConfigureAwait(false);
         return (moved, enforcement);
+    }
+
+    /// <summary>
+    /// Confirms a promoted destination: it has the staged length and, where the server keeps a SHA-256, the
+    /// digest that was verified. A rename does not change content, so nothing is read back.
+    /// </summary>
+    public static async Task<Result<StorageItem>> ConfirmPromotedAsync(IStorageService destination, string path, StagedContent content, CancellationToken cancellationToken)
+    {
+        var info = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        if (info.IsFailure) return info;
+        var total = content.Bytes + content.BytesResumed;
+        if (info.Value!.Size is { } size && size != total)
+            return Result<StorageItem>.Failure(StorageErrors.Conflict(
+                $"The destination '{path}' does not hold what was committed: it is {size} bytes, not {total}.",
+                $"expectedLength={total};actualLength={size}"));
+        if (content.Sha256 is { } digest)
+        {
+            var server = await destination.GetServerChecksumAsync(path, StorageChecksumAlgorithm.Sha256, cancellationToken).ConfigureAwait(false);
+            if (server.IsSuccess && !string.Equals(server.Value!.HexValue, digest, StringComparison.OrdinalIgnoreCase))
+                return Result<StorageItem>.Failure(StorageErrors.Conflict(
+                    $"The destination '{path}' does not hold what was committed.",
+                    $"expectedSha256={digest};actualSha256={server.Value.HexValue.ToLowerInvariant()}"));
+        }
+        return Result<StorageItem>.Success(info.Value with { Sha256 = content.Sha256 });
     }
 
     /// <summary>Succeeds when the destination exists and still has the expected ETag and version.</summary>

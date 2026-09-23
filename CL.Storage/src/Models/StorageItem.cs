@@ -45,6 +45,11 @@ public sealed record StorageItem
     public DateTimeOffset? LastAccessed { get; init; }
     /// <summary>Gets whether the item is hidden: a dot-file, or marked hidden on Windows.</summary>
     public bool IsHidden { get; init; }
+    /// <summary>
+    /// Gets the content's SHA-256 (lowercase hex) when the operation that returned this item computed it — a
+    /// verified upload or streamed write; listings and info leave it null.
+    /// </summary>
+    public string? Sha256 { get; init; }
 
     /// <summary>Gets an immutable snapshot of provider metadata.</summary>
     public IReadOnlyDictionary<string, string> Metadata

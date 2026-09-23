@@ -846,6 +846,11 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             {
                 result = Result.Failure(StorageErrors.FromException(error, "Queued transfer"));
             }
+            // A transfer the queue stopped reports itself cancelled; what that means for the job is decided below.
+            if (result.IsFailure && result.Error!.Code == StorageErrors.CancelledCode && attempt.IsCancellationRequested)
+                result = Result.Failure(StorageErrors.Unavailable(holder.StoreFailed
+                    ? "The transfer was stopped because the job store failed."
+                    : "The transfer was stopped."));
             await attempt.CancelAsync().ConfigureAwait(false);
             try { await renewal.ConfigureAwait(false); } catch (Exception) { }
 

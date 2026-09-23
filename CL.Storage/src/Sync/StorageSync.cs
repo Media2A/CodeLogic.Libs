@@ -814,6 +814,7 @@ public static class StorageSync
                 },
                 (offset, token) => from.DownloadAsync(fromPath, new StorageDownloadOptions { Offset = offset, VersionId = fromItem.VersionId }, token),
                 cancellationToken).ConfigureAwait(false);
+            if (written.Cancelled) cancellationToken.ThrowIfCancellationRequested();
             if (!written.IsSuccess) return Result.Failure(written.Error!);
 
             // Without a version the source is read again: it must not have changed while it streamed.
@@ -836,7 +837,16 @@ public static class StorageSync
                     return Stale(toPath);
                 }
             }
-            var (promoted, _) = await StagedWriter.PromoteAsync(to, written.Content!.StagingPath, toPath, overwrite: plannedTarget is not null, condition: null, createParents: true, cancellationToken).ConfigureAwait(false);
+            Result promoted;
+            try
+            {
+                (promoted, _) = await StagedWriter.PromoteAsync(to, written.Content!.StagingPath, toPath, overwrite: plannedTarget is not null, condition: null, createParents: true, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await StagedWriter.DeleteAsync(to, written.Content!.StagingPath).ConfigureAwait(false);
+                throw;
+            }
             if (promoted.IsFailure)
             {
                 await StagedWriter.DeleteAsync(to, written.Content.StagingPath).ConfigureAwait(false);

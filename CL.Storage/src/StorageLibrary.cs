@@ -1138,6 +1138,16 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 publisher = CaptureEventPublisher();
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Reported rather than thrown, so the caller learns what the transfer left behind.
+            return report with
+            {
+                Outcome = report.DestinationCommitted == true ? StorageTransferOutcome.NeedsReconciliation : StorageTransferOutcome.Cancelled,
+                Error = StorageErrors.Cancelled("The transfer was cancelled."),
+                SourceDeleted = move ? false : null
+            };
+        }
         finally
         {
             destinationLease?.Dispose();
@@ -1201,7 +1211,9 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
         return report with
         {
-            Outcome = mixed ? StorageTransferOutcome.NeedsReconciliation : StorageTransferOutcome.Failed,
+            Outcome = mixed ? StorageTransferOutcome.NeedsReconciliation
+                : error.Code == StorageErrors.CancelledCode ? StorageTransferOutcome.Cancelled
+                : StorageTransferOutcome.Failed,
             Error = error,
             SourceType = state.Source?.ItemType,
             DestinationCommitted = state.DestinationCommitted,

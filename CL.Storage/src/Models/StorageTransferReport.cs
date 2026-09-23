@@ -15,7 +15,12 @@ public enum StorageTransferOutcome
     /// The transfer stopped part-way and the state is mixed — for example the destination committed but the
     /// source could not be deleted, or a rollback did not finish. The report's state fields say exactly what.
     /// </summary>
-    NeedsReconciliation
+    NeedsReconciliation,
+    /// <summary>
+    /// The caller cancelled the transfer before anything was committed. Staging and backups were cleaned up,
+    /// except the staged bytes of a resumable transfer, which <see cref="StorageTransferReport.ResumeToken"/> continues.
+    /// </summary>
+    Cancelled
 }
 
 /// <summary>Why a conflict policy skipped a file.</summary>

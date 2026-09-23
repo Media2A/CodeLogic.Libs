@@ -162,19 +162,30 @@ internal static class StorageTransferPipeline
                 return Task.FromResult(Result<Stream>.Success(new NonClosingStream(source)));
             },
             cancellationToken).ConfigureAwait(false);
+        if (written.Cancelled) cancellationToken.ThrowIfCancellationRequested();
         if (!written.IsSuccess)
         {
             var details = written.StagingLeft is { } left ? $"stagingPath={left};bytesStaged={written.BytesStaged}" : written.Error!.Details ?? string.Empty;
             return Result<StorageItem>.Failure(written.Error!.WithDetails(details));
         }
-        var (promoted, _) = await StagedWriter.PromoteAsync(
-            destination, written.Content!.StagingPath, path, overwrite, options.Condition, options.CreateParents, cancellationToken).ConfigureAwait(false);
+        Result promoted;
+        try
+        {
+            (promoted, _) = await StagedWriter.PromoteAsync(
+                destination, written.Content!.StagingPath, path, overwrite, options.Condition, options.CreateParents, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await StagedWriter.DeleteAsync(destination, written.Content!.StagingPath).ConfigureAwait(false);
+            throw;
+        }
         if (promoted.IsFailure)
         {
             await StagedWriter.DeleteAsync(destination, written.Content.StagingPath).ConfigureAwait(false);
             return Result<StorageItem>.Failure(promoted.Error!);
         }
-        return await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        // Committed: report the result even if the caller cancels now.
+        return await StagedWriter.ConfirmPromotedAsync(destination, path, written.Content, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>

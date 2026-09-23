@@ -104,38 +104,59 @@ public sealed class StorageWriteStream : Stream
         if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
             return Result<StorageItem>.Failure(StorageErrors.Conflict("The write was already committed or aborted."));
         await _pipe.Writer.CompleteAsync().ConfigureAwait(false);
-        var written = await _upload.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var stop = cancellationToken.Register(() => _cancel.Cancel());
+        // The staged write cleans up after itself when cancelled, so it is always awaited to the end.
+        var written = await _upload.ConfigureAwait(false);
+        if (written.Cancelled) cancellationToken.ThrowIfCancellationRequested();
         if (!written.IsSuccess)
             return Result<StorageItem>.Failure(written.Error!);
-        if (_options.Condition is { IsEmpty: false } condition)
+        var staging = written.Content!.StagingPath;
+        Result promoted;
+        try
         {
-            var check = await StagedWriter.CheckConditionAsync(_destination, _path, condition, cancellationToken).ConfigureAwait(false);
-            if (check.IsFailure)
+            if (_options.Condition is { IsEmpty: false } condition)
             {
-                await StagedWriter.DeleteAsync(_destination, written.Content!.StagingPath).ConfigureAwait(false);
-                return Result<StorageItem>.Failure(check.Error!);
+                var check = await StagedWriter.CheckConditionAsync(_destination, _path, condition, cancellationToken).ConfigureAwait(false);
+                if (check.IsFailure)
+                {
+                    await StagedWriter.DeleteAsync(_destination, staging).ConfigureAwait(false);
+                    return Result<StorageItem>.Failure(check.Error!);
+                }
             }
+            (promoted, _) = await StagedWriter.PromoteAsync(
+                _destination, staging, _path, _overwrite, _options.Condition, _options.CreateParents, cancellationToken).ConfigureAwait(false);
         }
-        var (promoted, _) = await StagedWriter.PromoteAsync(
-            _destination, written.Content!.StagingPath, _path, _overwrite, _options.Condition, _options.CreateParents, cancellationToken).ConfigureAwait(false);
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            await StagedWriter.DeleteAsync(_destination, staging).ConfigureAwait(false);
+            throw;
+        }
         if (promoted.IsFailure)
         {
-            await StagedWriter.DeleteAsync(_destination, written.Content.StagingPath).ConfigureAwait(false);
+            await StagedWriter.DeleteAsync(_destination, staging).ConfigureAwait(false);
             return Result<StorageItem>.Failure(promoted.Error!);
         }
-        return await _destination.GetInfoAsync(_path, cancellationToken).ConfigureAwait(false);
+        // Committed: report the result even if the caller cancels now.
+        return await StagedWriter.ConfirmPromotedAsync(_destination, _path, written.Content, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>Discards everything written; the destination is left as it was.</summary>
     /// <returns>A task that completes when the staging object is removed.</returns>
     public async Task AbortAsync()
     {
-        if (Interlocked.CompareExchange(ref _state, 2, 0) != 0)
-            return;
-        await _pipe.Writer.CompleteAsync(new OperationCanceledException("The write was aborted.")).ConfigureAwait(false);
-        _cancel.Cancel();
+        if (!BeginAbort()) return;
         try { await _upload.ConfigureAwait(false); }
         catch (OperationCanceledException) { }
+    }
+
+    /// <summary>Stops the staged write; it removes its staging object on its own.</summary>
+    private bool BeginAbort()
+    {
+        if (Interlocked.CompareExchange(ref _state, 2, 0) != 0)
+            return false;
+        _pipe.Writer.Complete(new OperationCanceledException("The write was aborted."));
+        _cancel.Cancel();
+        return true;
     }
 
     /// <inheritdoc />
@@ -147,12 +168,16 @@ public sealed class StorageWriteStream : Stream
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Disposing synchronously without committing aborts without waiting: the staging object is removed in the
+    /// background. Prefer <see cref="DisposeAsync"/> or <see cref="AbortAsync"/> to know when it is gone.
+    /// </remarks>
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        if (disposing && BeginAbort())
         {
-            AbortAsync().GetAwaiter().GetResult();
-            _cancel.Dispose();
+            // The token source is disposed once the staged write has finished with it.
+            _ = _upload.ContinueWith(_ => _cancel.Dispose(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
         base.Dispose(disposing);
     }

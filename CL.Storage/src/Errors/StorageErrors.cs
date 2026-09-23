@@ -43,6 +43,8 @@ public static class StorageErrors
     public const string ServerBusyCode = "storage.server_busy";
     /// <summary>Stable code for exhausted disk space or storage quota on the server.</summary>
     public const string QuotaExceededCode = "storage.quota_exceeded";
+    /// <summary>The operation was cancelled by the caller; reported (instead of thrown) where a report says what was left.</summary>
+    public const string CancelledCode = "storage.cancelled";
 
     /// <summary>Creates an invalid-path error.</summary>
     /// <param name="message">Safe caller-facing explanation.</param>
@@ -140,6 +142,12 @@ public static class StorageErrors
     /// <returns>A validation error with <see cref="QuotaExceededCode"/>.</returns>
     public static Error QuotaExceeded(string message, string details = "") => Error.Validation(QuotaExceededCode, message, details);
 
+    /// <summary>Creates a cancellation error, for results and reports that describe what a cancelled operation left.</summary>
+    /// <param name="message">Safe diagnostic message.</param>
+    /// <param name="details">Optional sanitized details.</param>
+    /// <returns>An error with <see cref="CancelledCode"/>.</returns>
+    public static Error Cancelled(string message, string details = "") => Error.Unavailable(CancelledCode, message, details);
+
     /// <summary>Recreates an error from its code, message, and details, for errors read back from a store.</summary>
     /// <param name="code">A <c>storage.*</c> code; unknown codes become <c>storage.provider_error</c>.</param>
     /// <param name="message">The message.</param>
@@ -165,6 +173,7 @@ public static class StorageErrors
         ConnectionLostCode => ConnectionLost(message, details),
         ServerBusyCode => ServerBusy(message, details),
         QuotaExceededCode => QuotaExceeded(message, details),
+        CancelledCode => Cancelled(message, details),
         _ => ProviderError(message, details)
     };
 
