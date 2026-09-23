@@ -9,9 +9,13 @@ namespace CL.Storage.Providers;
 /// only reports markers would hide it from sync and comparison.
 /// </summary>
 /// <remarks>
-/// Keys arrive in lexicographic order, so every key under a folder is contiguous: a folder is new exactly
-/// when the previous key was not inside it. The previous key is carried across pages in the continuation
-/// token, so a folder is reported once even when its keys straddle a page boundary.
+/// Keys usually arrive in lexicographic order, so every key under a folder is contiguous: a folder is new
+/// exactly when the previous key was not inside it. The previous key is carried across pages in the
+/// continuation token, so a folder is reported once even when its keys straddle a page boundary. Only a key
+/// inside the folder counts: a file named like the folder (<c>a/b</c> beside <c>a/b/c</c>) does not hide it.
+/// A folder is never left out, but it can be reported again (on a later page) when keys arrive out of order,
+/// as S3 Express directory buckets list them, or when a folder marker ends a page; and pages are sorted each
+/// on their own, so an inferred folder can follow items that sort after it. Build trees by path, not by order.
 /// </remarks>
 internal static class ImplicitDirectories
 {
@@ -33,7 +37,7 @@ internal static class ImplicitDirectories
         for (var i = parents.Count - 1; i >= 0; i--)
         {
             var folder = parents[i];
-            if (previous is not null && (previous == folder || previous.StartsWith(folder + "/", StringComparison.Ordinal)))
+            if (previous is not null && previous.StartsWith(folder + "/", StringComparison.Ordinal))
                 continue;
             items.Add(directory(folder));
         }

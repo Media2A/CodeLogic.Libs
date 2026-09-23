@@ -8,10 +8,9 @@ namespace Storage.Integration.Tests;
 /// <summary>Sync against real servers: object-store times and three-way runs that settle.</summary>
 public sealed class SyncLiveTests2
 {
-    [SftpFact]
+    [SftpAndS3Fact] // needs-review E: skipped, not passed silently, when S3 is not configured
     public async Task Two_way_sync_with_an_object_store_settles_after_the_first_run()
     {
-        if (!CloudEmulators.S3Configured) return;
         await using var live = await LiveLibrary.StartAsync(("sftp", LiveServers.Sftp()), ("s3", CloudEmulators.S3()));
         var dir = $"settle-{Guid.NewGuid():N}";
         var sftp = live.Library.GetStorage("sftp");
@@ -44,10 +43,9 @@ public sealed class SyncLiveTests2
         }
     }
 
-    [SftpFact]
+    [SftpAndS3Fact] // needs-review E: skipped, not passed silently, when S3 is not configured
     public async Task One_way_copies_to_an_object_store_keep_the_source_time()
     {
-        if (!CloudEmulators.S3Configured) return;
         await using var live = await LiveLibrary.StartAsync(("sftp", LiveServers.Sftp()), ("s3", CloudEmulators.S3()));
         var dir = $"mtime-{Guid.NewGuid():N}";
         var sftp = live.Library.GetStorage("sftp");

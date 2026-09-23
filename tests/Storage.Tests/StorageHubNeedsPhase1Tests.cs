@@ -89,14 +89,18 @@ public sealed class NativeWatchThroughProxyTests
             }
             catch (OperationCanceledException) { }
         });
-        await Task.Delay(300);
-
-        await File.WriteAllTextAsync(Path.Combine(root, "a.txt"), "x");
-        File.Move(Path.Combine(root, "a.txt"), Path.Combine(root, "b.txt"));
+        // needs-review E: the watcher starts in the background, so instead of guessing how long that takes, a
+        // rename is made again until one is seen (polling never reports renames, so any one proves native watching).
+        for (var i = 0; !watching.IsCompleted && i < 100; i++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(root, $"a{i}.txt"), "x");
+            File.Move(Path.Combine(root, $"a{i}.txt"), Path.Combine(root, $"b{i}.txt"));
+            await Task.WhenAny(watching, Task.Delay(150));
+        }
         await watching.WaitAsync(TimeSpan.FromSeconds(15));
 
         // Only native watching reports renames; polling would report a delete and a create.
-        lock (seen) Assert.Contains(seen, change => change is { Kind: StorageChangeKind.Renamed, Path: "b.txt" });
+        lock (seen) Assert.Contains(seen, change => change.Kind == StorageChangeKind.Renamed && change.Path.StartsWith('b') && change.OldPath!.StartsWith('a'));
     }
 }
 
