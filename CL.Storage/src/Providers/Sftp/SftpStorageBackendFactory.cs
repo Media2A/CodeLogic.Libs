@@ -15,9 +15,9 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
 
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
-        var value = (SftpConnectionConfig)configuration;
-        // Registrations with identical settings share one pool, so re-registering keeps warm sessions.
-        var key = ProviderSettingsKey.For(value);
+        // Registrations with identical settings share one pool, so re-registering keeps warm sessions. The pool works
+        // from a copy of the settings, so the caller's object changing later cannot make it differ from its key.
+        var (value, key) = ProviderSettingsKey.Snapshot((SftpConnectionConfig)configuration);
         var shared = SharedResources.Acquire(key, () =>
         {
             var recorder = new ServerIdentityRecorder();

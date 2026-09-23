@@ -104,7 +104,7 @@ internal sealed class ProviderRetryPolicy
         CancellationToken cancellationToken)
     {
         if (!source.CanSeek)
-            return upload(cancellationToken);
+            return UploadOnceAsync(upload, cancellationToken);
         var start = source.Position;
         return ExecuteAsync(
             operation,
@@ -115,6 +115,14 @@ internal sealed class ProviderRetryPolicy
                 return upload(token);
             },
             cancellationToken);
+    }
+
+    /// <summary>A single attempt, whose failure is still explained by <see cref="Enrich"/> like a retried one's.</summary>
+    private async Task<Result<T>> UploadOnceAsync<T>(Func<CancellationToken, Task<Result<T>>> upload, CancellationToken cancellationToken)
+    {
+        var started = DateTimeOffset.UtcNow;
+        var result = await upload(cancellationToken).ConfigureAwait(false);
+        return result.IsFailure && Enrich is { } enrich ? Result<T>.Failure(enrich(result.Error!, started)) : result;
     }
 
     /// <summary>Computes the delay before retry number <paramref name="attempt"/> (zero-based).</summary>

@@ -111,10 +111,10 @@ public sealed class GuaranteedTransferLiveTests
         }
     }
 
-    [SftpFact]
+    // needs-review E: skipped, not silently passed, when S3 is not configured
+    [SftpAndS3Fact]
     public async Task Verified_copy_from_sftp_to_an_object_store()
     {
-        if (!CloudEmulators.S3Configured) return;
         await using var live = await LiveLibrary.StartAsync(("sftp", LiveServers.Sftp()), ("s3", CloudEmulators.S3()));
         var dir = $"verified-{Guid.NewGuid():N}";
         var content = Content(70_000);

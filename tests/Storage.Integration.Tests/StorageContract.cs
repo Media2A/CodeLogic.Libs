@@ -56,9 +56,11 @@ internal static class StorageContract
     }
 
     /// <summary>Renames a folder tree natively and checks every file arrived and the source is gone.</summary>
-    public static async Task DirectoryMoveAsync(IStorageBackend storage)
+    public static async Task DirectoryMoveAsync(IStorageBackend storage, bool atomic = true)
     {
-        Assert.True(storage.Capabilities.Supports(StorageFeature.DirectoryMove | StorageFeature.AtomicMove));
+        Assert.True(storage.Capabilities.Supports(StorageFeature.DirectoryMove));
+        // needs-review B18: WebDAV may move a collection member by member (207 Multi-Status), so it is not atomic.
+        Assert.Equal(atomic, storage.Capabilities.Supports(StorageFeature.AtomicMove));
         var dir = $"cl-move-{Guid.NewGuid():N}";
         try
         {
@@ -76,10 +78,11 @@ internal static class StorageContract
             var blocked = await storage.MoveAsync($"{dir}/renamed", $"{dir}/other", new StorageTransferOptions { Overwrite = false });
             Assert.Equal(StorageErrors.ConflictCode, blocked.Error?.Code);
 
+            // needs-review A3: an existing directory is never replaced (that would delete what it holds), overwrite or not.
             var replaced = await storage.MoveAsync($"{dir}/renamed", $"{dir}/other", new StorageTransferOptions { Overwrite = true });
-            Assert.True(replaced.IsSuccess, replaced.Error?.ToString());
-            Assert.False((await storage.ExistsAsync($"{dir}/other/x.txt")).Value);
-            Assert.True((await storage.ExistsAsync($"{dir}/other/sub/deeper/c.txt")).Value);
+            Assert.Equal(StorageErrors.ConflictCode, replaced.Error?.Code);
+            Assert.True((await storage.ExistsAsync($"{dir}/other/x.txt")).Value);
+            Assert.True((await storage.ExistsAsync($"{dir}/renamed/sub/deeper/c.txt")).Value);
         }
         finally
         {

@@ -12,6 +12,25 @@ public enum S3AuthenticationMode
     StaticCredentials = 1
 }
 
+/// <summary>Says whether an S3-compatible server enforces the conditions sent on writes, copies, and deletes.</summary>
+public enum S3ConditionalRequestSupport
+{
+    /// <summary>
+    /// Conditional uploads (<c>PutObject</c> and <c>CompleteMultipartUpload</c> with <c>If-None-Match</c> or
+    /// <c>If-Match</c>) are trusted, as on AWS and MinIO. Whether the server enforces <c>If-None-Match</c> and
+    /// <c>If-Match</c> on <c>CopyObject</c> and <c>If-Match</c> on <c>DeleteObject</c> is probed once per connection
+    /// with two temporary <c>.cl-storage-probe-*</c> objects under the prefix.
+    /// </summary>
+    Auto = 0,
+    /// <summary>The server enforces every condition in the request that commits; nothing is probed.</summary>
+    Enforced = 1,
+    /// <summary>
+    /// The server does not enforce conditions: none are sent, the connection does not declare conditional
+    /// capabilities, and every condition is checked immediately before the request that commits.
+    /// </summary>
+    NotEnforced = 2
+}
+
 /// <summary>Defines named Amazon S3 and S3-compatible connections.</summary>
 [ConfigSection("storage.s3")]
 public sealed class S3StorageConfig : ProviderStorageConfigBase<S3ConnectionConfig> { }
@@ -69,6 +88,13 @@ public sealed class S3ConnectionConfig : StorageConnectionConfigBase
 
     /// <summary>Gets or sets an optional HTTP or SOCKS proxy for this connection.</summary>
     public StorageProxyConfig Proxy { get; set; } = new();
+
+    /// <summary>
+    /// Gets or sets whether the server enforces request conditions; <see cref="S3ConditionalRequestSupport.Auto"/>
+    /// by default. Set <see cref="S3ConditionalRequestSupport.NotEnforced"/> for an S3-compatible server that
+    /// ignores or rejects <c>If-None-Match</c> and <c>If-Match</c>, so conditions are checked by the library instead.
+    /// </summary>
+    public S3ConditionalRequestSupport ConditionalRequests { get; set; } = S3ConditionalRequestSupport.Auto;
 
     /// <inheritdoc />
     public override string MountRoot => Prefix;

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
@@ -82,12 +83,35 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             handler.SslOptions.ClientCertificates = [certificate];
         if (identity is not null)
         {
-            // Asked for during the handshake whether or not a certificate is configured; see RecordClientCertificateRequest.
-            handler.SslOptions.LocalCertificateSelectionCallback = (_, _, _, _, _) =>
+            // Called at the start of every handshake and again when the server asks for a certificate; only the
+            // server asking counts, and it is attributed to the connection it asked on (see TlsConnectionWatch).
+            handler.SslOptions.LocalCertificateSelectionCallback = (sender, _, _, remoteCertificate, acceptableIssuers) =>
             {
-                identity.RecordClientCertificateRequest();
+                if (remoteCertificate is not null || acceptableIssuers is { Length: > 0 })
+                {
+                    identity.RecordClientCertificateRequest();
+                    TlsConnectionWatch.OnCertificateSelection(sender, remoteCertificate, acceptableIssuers);
+                }
                 return certificate!;
             };
+            if (endpoint.Scheme == Uri.UriSchemeHttps)
+            {
+                // Each connection's transport is watched, so a certificate refusal is told from an ordinary drop.
+                handler.ConnectCallback = async (context, cancellationToken) =>
+                {
+                    var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                    try
+                    {
+                        await socket.ConnectAsync(context.DnsEndPoint, cancellationToken).ConfigureAwait(false);
+                        return new TlsConnectionWatch(new NetworkStream(socket, ownsSocket: true), identity);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                };
+            }
         }
 
         switch (value.AuthenticationMode)

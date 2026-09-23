@@ -13,8 +13,21 @@ internal static class ProviderSettingsKey
     public static string For(object settings)
     {
         var json = JsonSerializer.Serialize(settings, settings.GetType(), Json);
-        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{settings.GetType().FullName}\n{json}")));
+        return Of(settings.GetType(), json);
     }
+
+    /// <summary>
+    /// A copy of the settings and their key, taken from the same JSON: a shared pool creates its sessions from the
+    /// copy, so a caller changing its settings object later cannot make the pool differ from its key.
+    /// </summary>
+    public static (T Settings, string Key) Snapshot<T>(T settings) where T : class
+    {
+        var json = JsonSerializer.Serialize(settings, settings.GetType(), Json);
+        return ((T)JsonSerializer.Deserialize(json, settings.GetType(), Json)!, Of(settings.GetType(), json));
+    }
+
+    private static string Of(Type type, string json) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{type.FullName}\n{json}")));
 }
 
 /// <summary>A pool a backend uses, either its own or one shared by every backend with the same settings.</summary>
@@ -56,19 +69,49 @@ internal static class SharedResources
     /// <summary>Returns the shared resource for a key, creating it for the first user.</summary>
     public static T Acquire<T>(string key, Func<T> create, Func<T, ValueTask> dispose) where T : class
     {
+        Holder? replaced = null;
+        T value;
         lock (Gate)
         {
-            if (!Resources.TryGetValue(key, out var holder) || holder.Value is not T)
+            if (Resources.TryGetValue(key, out var holder) && holder.Value is not T)
             {
-                holder = new Holder(create(), value => dispose((T)value));
+                // Keys include the settings type, so this is a misuse; an unused resource is retired, not leaked.
+                if (holder.Users > 0)
+                    throw new InvalidOperationException($"A shared resource of another type is in use under this key ({holder.Value.GetType().Name}).");
+                Resources.Remove(key);
+                CancelLinger(holder);
+                replaced = holder;
+                holder = null;
+            }
+            if (holder is null)
+            {
+                holder = new Holder(create(), resource => dispose((T)resource));
                 Resources[key] = holder;
             }
+            // The linger is ended before the use is counted: a failure here must not leave a use nobody releases.
+            CancelLinger(holder);
             holder.Users++;
             holder.Generation++;
-            holder.Linger?.Cancel();
-            holder.Linger = null;
-            return (T)holder.Value;
+            value = (T)holder.Value;
         }
+        if (replaced is not null)
+            _ = DisposeQuietlyAsync(replaced);
+        return value;
+    }
+
+    /// <summary>Cancels a holder's linger, if it still has one; a linger that already ran out is only forgotten.</summary>
+    private static void CancelLinger(Holder holder)
+    {
+        var linger = holder.Linger;
+        holder.Linger = null;
+        try { linger?.Cancel(); }
+        catch (ObjectDisposedException) { /* The linger already ended and disposed its token source. */ }
+    }
+
+    private static async Task DisposeQuietlyAsync(Holder holder)
+    {
+        try { await holder.Dispose(holder.Value).ConfigureAwait(false); }
+        catch (Exception) { /* Retiring an unused resource is best effort. */ }
     }
 
     /// <summary>Releases one use; the resource is disposed after <paramref name="linger"/> if nobody took it again.</summary>
@@ -91,7 +134,15 @@ internal static class SharedResources
             // Cut short by a new user (which keeps the resource) or by FlushIdleAsync (which disposes it).
             try { await Task.Delay(linger, lingering.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) { }
-            finally { lingering.Dispose(); }
+            finally
+            {
+                // Forgotten before it is disposed, so a racing Acquire never cancels a disposed token source.
+                lock (Gate)
+                {
+                    if (ReferenceEquals(released.Linger, lingering)) released.Linger = null;
+                }
+                lingering.Dispose();
+            }
         }
         Holder? retired = null;
         lock (Gate)
@@ -118,7 +169,7 @@ internal static class SharedResources
             idle = [.. Resources.Values.Where(holder => holder.Users == 0)];
             foreach (var key in Resources.Where(pair => pair.Value.Users == 0).Select(pair => pair.Key).ToList())
                 Resources.Remove(key);
-            foreach (var holder in idle) holder.Linger?.Cancel();
+            foreach (var holder in idle) CancelLinger(holder);
         }
         foreach (var holder in idle)
         {
@@ -129,6 +180,9 @@ internal static class SharedResources
 
     /// <summary>How many resources are alive, for tests.</summary>
     internal static int Count { get { lock (Gate) return Resources.Count; } }
+
+    /// <summary>Whether a resource is alive under a key, for tests.</summary>
+    internal static bool Holds(string key) { lock (Gate) return Resources.ContainsKey(key); }
 }
 
 /// <summary>A session pool and the identity recorder its clients report to, shared per settings key.</summary>

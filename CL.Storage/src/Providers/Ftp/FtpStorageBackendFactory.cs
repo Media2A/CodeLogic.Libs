@@ -16,14 +16,18 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
 
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
     {
-        var value = (FtpConnectionConfig)configuration;
-        // Registrations with identical settings share one pool, so re-registering keeps warm sessions.
-        var key = ProviderSettingsKey.For(value);
+        // Registrations with identical settings share one pool, so re-registering keeps warm sessions. The pool works
+        // from a copy of the settings, so the caller's object changing later cannot make it differ from its key.
+        var (value, key) = ProviderSettingsKey.Snapshot((FtpConnectionConfig)configuration);
+        // Loaded outside the shared-resource lock; dropped again when the pool already exists.
+        var loaded = ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword);
+        var used = false;
         var shared = SharedResources.Acquire(key, () =>
         {
+            used = true;
             var recorder = new ServerIdentityRecorder();
             // One client certificate for every session of the pool, disposed with it.
-            var certificate = ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword);
+            var certificate = loaded;
             return new SharedPool<AsyncFtpClient>(FtpStorageBackend.CreatePool(() => CreateClient(value, recorder, certificate), value.Session, AfterConnect(value)), recorder)
             {
                 Owned = certificate
@@ -33,6 +37,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             await pool.Pool.DisposeAsync().ConfigureAwait(false);
             pool.Owned?.Dispose();
         });
+        if (!used) loaded?.Dispose();
         var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new FtpStorageBackend(
             connectionId,
@@ -48,7 +53,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
         };
     }
 
-    private static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
+    internal static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
     {
         var config = new FtpConfig
         {

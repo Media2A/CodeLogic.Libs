@@ -142,6 +142,7 @@ public sealed class AzureBlobStorageBackend :
         options ??= new StorageListOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StoragePage>.Failure(validation.Error!);
+        if (ProviderPaging.RecursiveTokenOnFlatListing(options) is { } mixed) return Result<StoragePage>.Failure(mixed);
         var normalized = Normalize(path);
         if (normalized.IsFailure) return Result<StoragePage>.Failure(normalized.Error!);
         if (normalized.Value!.Length > 0)
@@ -164,10 +165,12 @@ public sealed class AzureBlobStorageBackend :
                     cancellationToken).AsPages(nativeToken, options.PageSize).ConfigureAwait(false))
                 {
                     var items = new List<StorageItem>();
-                    foreach (var item in page.Values.Select(ToItem).Where(item => item is not null).Cast<StorageItem>())
+                    foreach (var blob in page.Values)
                     {
+                        if (ToItem(blob) is not { } item) continue;
                         ImplicitDirectories.AddParents(items, item.Path, normalized.Value!, previous, DirectoryItem);
-                        previous = item.Path;
+                        // The key itself, so a folder marker ("a/b/") that ends a page still covers "a/b" on the next.
+                        previous = FromKey(blob.Name);
                         items.Add(item);
                     }
                     var unique = items.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
@@ -383,6 +386,11 @@ public sealed class AzureBlobStorageBackend :
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// A blob is copied on the server pinned to the version it read (source <c>If-Match</c>, and
+    /// <see cref="StorageTransferOptions.SourceVersionId"/> when set); a create-only copy carries <c>If-None-Match: *</c>
+    /// and a <see cref="StorageTransferOptions.DestinationCondition"/> the destination's <c>If-Match</c>.
+    /// </remarks>
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -396,45 +404,140 @@ public sealed class AzureBlobStorageBackend :
         var destinationValue = destination.Value!;
         var relationship = StorageTransferPath.ValidateDistinct(sourceValue, destinationValue);
         if (relationship.IsFailure) return relationship;
-        try
+        var info = await SourceInfoAsync(sourceValue, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
+        if (info.IsFailure) return Result.Failure(info.Error!);
+        if (info.Value!.ItemType == StorageItemType.Directory)
         {
-            var info = await GetInfoAsync(sourceValue, cancellationToken).ConfigureAwait(false);
-            if (info.IsFailure) return Result.Failure(info.Error!);
-            if (info.Value!.ItemType == StorageItemType.Directory)
-            {
-                relationship = StorageTransferPath.ValidateDirectoryDestination(sourceValue, destinationValue);
-                if (relationship.IsFailure) return relationship;
-                var relayed = await StorageTransferCoordinator.CopyAsync(
-                    this,
-                    sourceValue,
-                    this,
-                    destinationValue,
-                    options,
-                    cancellationToken).ConfigureAwait(false);
-                return relayed.IsSuccess ? Result.Success() : Result.Failure(relayed.Error!);
-            }
-            await CopyBlobAsync(ToKey(sourceValue), ToKey(destinationValue), options.Overwrite, cancellationToken).ConfigureAwait(false);
-            return Result.Success();
+            relationship = StorageTransferPath.ValidateDirectoryDestination(sourceValue, destinationValue);
+            if (relationship.IsFailure) return relationship;
+            var relayed = await StorageTransferCoordinator.CopyAsync(
+                this,
+                sourceValue,
+                this,
+                destinationValue,
+                options,
+                cancellationToken).ConfigureAwait(false);
+            return relayed.IsSuccess ? Result.Success() : Result.Failure(relayed.Error!);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (RequestFailedException error) when (!options.Overwrite && error.Status is 409 or 412)
-        {
-            return Result.Failure(StorageErrors.Conflict("The Azure blob destination already exists."));
-        }
-        catch (Exception error) { return Result.Failure(Map(error, "Copy Azure blob")); }
+        var copied = await CopyFileAsync(sourceValue, destinationValue, info.Value, options, cancellationToken).ConfigureAwait(false);
+        return copied.IsSuccess ? Result.Success() : Result.Failure(copied.Error!);
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// A blob is copied as <see cref="CopyAsync"/> does, then deleted only while it still has the ETag that was
+    /// copied. Once the copy committed, a failure to delete the source returns <c>storage.partial_failure</c> with
+    /// <c>destinationState=complete</c> and <c>leftBehind</c> naming the source, and cancellation no longer applies.
+    /// A directory is copied through the relay and each copied blob deleted under the identity it was listed with.
+    /// </remarks>
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
-        var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
+        options ??= new StorageTransferOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
+        var source = NormalizeRequired(sourcePath);
+        if (source.IsFailure) return Result.Failure(source.Error!);
+        var destination = NormalizeRequired(destinationPath);
+        if (destination.IsFailure) return Result.Failure(destination.Error!);
+        var relationship = StorageTransferPath.ValidateDistinct(source.Value!, destination.Value!);
+        if (relationship.IsFailure) return relationship;
+        var info = await SourceInfoAsync(source.Value!, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
+        if (info.IsFailure) return Result.Failure(info.Error!);
+        if (info.Value!.ItemType == StorageItemType.Directory)
+        {
+            relationship = StorageTransferPath.ValidateDirectoryDestination(source.Value!, destination.Value!);
+            if (relationship.IsFailure) return relationship;
+            return await ObjectStoreMoves.MoveDirectoryAsync(this, source.Value!, destination.Value!, options, cancellationToken).ConfigureAwait(false);
+        }
+        var copied = await CopyFileAsync(source.Value!, destination.Value!, info.Value, options, cancellationToken).ConfigureAwait(false);
         if (copied.IsFailure) return copied;
-        var deleted = await DeleteAsync(sourcePath, new StorageDeleteOptions { Recursive = true }, cancellationToken).ConfigureAwait(false);
-        return deleted.IsSuccess
-            ? Result.Success()
-            : Result.Failure(StorageErrors.PartialFailure(
-                "The Azure Blob destination completed, but the source could not be deleted.",
-                $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+        // Committed: the source goes only while it is the blob that was copied, and a cancel no longer applies.
+        try
+        {
+            await Blob(source.Value!).DeleteAsync(
+                DeleteSnapshotsOption.IncludeSnapshots,
+                new BlobRequestConditions { IfMatch = new ETag(info.Value.ETag!) },
+                CancellationToken.None).ConfigureAwait(false);
+            return Result.Success();
+        }
+        catch (RequestFailedException error) when (error.Status == 404)
+        {
+            return Result.Success();
+        }
+        catch (RequestFailedException error) when (error.Status == 412)
+        {
+            return Result.Failure(ObjectStoreMoves.SourceKept("Azure Blob", source.Value!,
+                StorageErrors.Conflict("The Azure blob source changed after it was copied, so it was not deleted.")));
+        }
+        catch (Exception error)
+        {
+            return Result.Failure(ObjectStoreMoves.SourceKept("Azure Blob", source.Value!, Map(error, "Delete moved Azure blob")));
+        }
+    }
+
+    /// <summary>A copy or move source: the blob (at <paramref name="versionId"/> when set), or a directory.</summary>
+    private async Task<Result<StorageItem>> SourceInfoAsync(string path, string? versionId, CancellationToken cancellationToken)
+    {
+        if (versionId is null)
+            return await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var properties = await Blob(path).WithVersion(versionId).GetPropertiesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            return Result<StorageItem>.Success(ToItem(path, properties.Value));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Azure blob version")); }
+    }
+
+    /// <summary>Copies one blob on the server, pinned to the version <paramref name="source"/> describes.</summary>
+    private async Task<Result> CopyFileAsync(string sourcePath, string destinationPath, StorageItem source, StorageTransferOptions options, CancellationToken cancellationToken)
+    {
+        if (options.ExpectedSourceETag is { } expected && !StagedWriter.SameETag(expected, source.ETag))
+            return Result.Failure(StorageErrors.Conflict(
+                $"The Azure blob source '{sourcePath}' changed since it was read.",
+                $"expectedETag={expected.Trim('"')};actualETag={source.ETag}"));
+        try
+        {
+            BlobRequestConditions? destinationConditions = null;
+            if (!options.Overwrite)
+            {
+                destinationConditions = new BlobRequestConditions { IfNoneMatch = ETag.All };
+            }
+            else if (options.DestinationCondition is { IsEmpty: false } condition)
+            {
+                var expectedETag = condition.ExpectedETag;
+                if (condition.ExpectedVersionId is not null)
+                {
+                    var current = await GetInfoAsync(destinationPath, cancellationToken).ConfigureAwait(false);
+                    if (current.IsFailure)
+                        return Result.Failure(current.Error!.Code == StorageErrors.NotFoundCode
+                            ? StorageErrors.Conflict("The Azure blob destination no longer exists for the requested condition.")
+                            : current.Error!);
+                    var check = ValidateCurrentCondition(current.Value!, condition, "Azure blob");
+                    if (check.IsFailure) return check;
+                    expectedETag ??= current.Value!.ETag;
+                }
+                destinationConditions = new BlobRequestConditions { IfMatch = new ETag(expectedETag!) };
+            }
+            var sourceBlob = options.SourceVersionId is { } version ? Blob(sourcePath).WithVersion(version) : Blob(sourcePath);
+            var operation = await Blob(destinationPath).StartCopyFromUriAsync(sourceBlob.Uri, new BlobCopyFromUriOptions
+            {
+                SourceConditions = source.ETag is null ? null : new BlobRequestConditions { IfMatch = new ETag(source.ETag) },
+                DestinationConditions = destinationConditions
+            }, cancellationToken).ConfigureAwait(false);
+            await operation.WaitForCompletionAsync(cancellationToken).ConfigureAwait(false);
+            return Result.Success();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (RequestFailedException error) when (error.Status is 409 or 412)
+        {
+            return Result.Failure(StorageErrors.Conflict(
+                !options.Overwrite
+                    ? "The Azure blob destination already exists, or the source changed since it was read."
+                    : "The Azure blob source changed since it was read, or the destination no longer matches its condition.",
+                ProviderErrorMapper.Details(StorageErrorInfo.HttpStatusKey, error.Status.ToString(CultureInfo.InvariantCulture), error.ErrorCode)));
+        }
+        catch (Exception error) { return Result.Failure(Map(error, "Copy Azure blob")); }
     }
 
     /// <inheritdoc />
@@ -715,17 +818,6 @@ public sealed class AzureBlobStorageBackend :
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StorageItem>.Failure(Map(error, "Get Azure blob directory info")); }
-    }
-
-    private async Task CopyBlobAsync(string sourceName, string destinationName, bool overwrite, CancellationToken cancellationToken)
-    {
-        var source = _container.GetBlobClient(sourceName);
-        var destination = _container.GetBlobClient(destinationName);
-        var operation = await destination.StartCopyFromUriAsync(source.Uri, new BlobCopyFromUriOptions
-        {
-            DestinationConditions = overwrite ? null : new BlobRequestConditions { IfNoneMatch = ETag.All }
-        }, cancellationToken).ConfigureAwait(false);
-        await operation.WaitForCompletionAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private BlobClient Blob(string path) => _container.GetBlobClient(ToKey(path));
