@@ -56,9 +56,11 @@ internal static class StorageContract
     }
 
     /// <summary>Renames a folder tree natively and checks every file arrived and the source is gone.</summary>
-    public static async Task DirectoryMoveAsync(IStorageBackend storage)
+    public static async Task DirectoryMoveAsync(IStorageBackend storage, bool atomic = true)
     {
-        Assert.True(storage.Capabilities.Supports(StorageFeature.DirectoryMove | StorageFeature.AtomicMove));
+        Assert.True(storage.Capabilities.Supports(StorageFeature.DirectoryMove));
+        // needs-review B18: WebDAV may move a collection member by member (207 Multi-Status), so it is not atomic.
+        Assert.Equal(atomic, storage.Capabilities.Supports(StorageFeature.AtomicMove));
         var dir = $"cl-move-{Guid.NewGuid():N}";
         try
         {
