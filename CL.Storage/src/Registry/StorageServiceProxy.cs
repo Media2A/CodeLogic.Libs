@@ -19,7 +19,8 @@ internal sealed class StorageServiceProxy :
     IStorageAppendService,
     IStorageCommandService,
     IStorageSpaceService,
-    Sync.IStorageWatchService
+    Sync.IStorageWatchService,
+    IStorageConditionEnforcementSource
 {
     private readonly StorageLibrary _library;
     private readonly string _connectionId;
@@ -268,6 +269,15 @@ internal sealed class StorageServiceProxy :
         return lease.Backend is Sync.IStorageWatchService native
             ? native.WatchNativeAsync(normalized.Value!, recursive, cancellationToken)
             : throw new NotSupportedException("This storage connection has no native change notifications.");
+    }
+
+    public async ValueTask<StorageConditionEnforcement> GetEnforcementAsync(
+        StorageConditionKind kind,
+        bool serverSideCopy,
+        CancellationToken cancellationToken)
+    {
+        using var lease = _library.AcquireOperation(_connectionId);
+        return await StorageConditionEnforcements.ForAsync(lease.Backend, kind, serverSideCopy, cancellationToken).ConfigureAwait(false);
     }
 
     private T Read<T>(Func<IStorageBackend, T> read)

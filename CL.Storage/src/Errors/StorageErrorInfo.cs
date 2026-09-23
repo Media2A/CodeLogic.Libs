@@ -27,6 +27,14 @@ public static class StorageErrorInfo
     public const string PresentedPublicKeyKey = "presentedPublicKeySha256";
     /// <summary>Details key with the fingerprint of a refused SSH host key.</summary>
     public const string PresentedFingerprintKey = "presentedFingerprint";
+    /// <summary>
+    /// Details key saying what state a failed mutation left the destination in. <c>complete</c> means the
+    /// destination was committed before the failure (for example a backup or staging object could not be
+    /// removed afterwards); such an error must be treated as a committed destination, never rolled back.
+    /// </summary>
+    public const string DestinationStateKey = "destinationState";
+    /// <summary>Details key naming an internal object (a provider's own backup or staging copy) a mutation left behind.</summary>
+    public const string LeftBehindKey = "leftBehind";
 
     private static readonly HashSet<string> TransientCodes = new(StringComparer.Ordinal)
     {
@@ -61,6 +69,12 @@ public static class StorageErrorInfo
         delay = TimeSpan.FromMilliseconds(ms);
         return true;
     }
+
+    /// <summary>Returns whether the error was raised after the destination had already been committed.</summary>
+    /// <param name="error">Error to inspect.</param>
+    /// <returns><see langword="true"/> when the details carry <c>destinationState=complete</c>.</returns>
+    public static bool DestinationCommitted(Error? error) =>
+        TryGetDetail(error, DestinationStateKey, out var state) && string.Equals(state, "complete", StringComparison.Ordinal);
 
     /// <summary>Reads a <c>key=value</c> entry from the error details.</summary>
     /// <param name="error">Error to inspect.</param>
