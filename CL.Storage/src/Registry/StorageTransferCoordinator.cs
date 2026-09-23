@@ -3,6 +3,7 @@ using System.IO.Pipelines;
 using CL.Storage.Abstractions;
 using CL.Storage.Errors;
 using CL.Storage.Models;
+using CL.Storage.Providers;
 using CodeLogic.Core.Results;
 
 namespace CL.Storage.Registry;
@@ -750,8 +751,10 @@ internal static class StorageTransferCoordinator
             string? resumeKey = null;
             string? tokenStaging = null;
             // Staged bytes are only reused for a source that can be identified (an ETag, a time, or a version);
-            // otherwise a different source of the same length would be appended onto an old prefix.
-            if (resumable && HasIdentity(sourceFile))
+            // otherwise a different source of the same length would be appended onto an old prefix. A weak ETag
+            // (the local provider's write time, creation time and length) cannot prove the content is unchanged
+            // on a coarse file-system clock, so such a source resumes only when Verify re-reads the staged prefix.
+            if (resumable && HasIdentity(sourceFile) && (!StorageETags.IsWeak(sourceFile.ETag) || options.Verify))
             {
                 resumeKey = StagedWriter.SourceKey(sourceFile.Path, sourceFile.Size, sourceFile.LastModified, sourceFile.ETag, sourceFile.VersionId);
                 var expectedStaging = StagedWriter.ResumableStagingPath(destinationPath, resumeKey);
@@ -1231,7 +1234,12 @@ internal static class StorageTransferCoordinator
     internal static bool SameVersion(StorageItem committed, StorageItem current)
     {
         if (committed.ETag is not null && current.ETag is not null)
-            return StagedWriter.SameETag(committed.ETag, current.ETag);
+        {
+            // A strong match proves the version; any mismatch proves a change. Weak validators that match prove
+            // nothing more than size and time do, so they fall through to that comparison.
+            if (!StorageETags.WeakEquals(committed.ETag, current.ETag)) return false;
+            if (!StorageETags.IsWeak(committed.ETag) && !StorageETags.IsWeak(current.ETag)) return true;
+        }
         if (committed.VersionId is not null && current.VersionId is not null)
             return string.Equals(committed.VersionId, current.VersionId, StringComparison.Ordinal);
         return committed.Size == current.Size && committed.LastModified == current.LastModified;

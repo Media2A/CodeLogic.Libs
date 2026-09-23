@@ -106,7 +106,12 @@ public sealed record StorageSyncIdentity(long? Size, DateTimeOffset? Modified, s
     {
         if (item is null || item.ItemType == StorageItemType.Directory) return false;
         if (VersionId is not null && item.VersionId is not null) return VersionId == item.VersionId;
-        if (ETag is not null && item.ETag is not null) return Registry.StagedWriter.SameETag(ETag, item.ETag);
+        if (ETag is not null && item.ETag is not null)
+        {
+            // A mismatch proves a change; only a strong match proves there was none (weak validators fall through).
+            if (!Providers.StorageETags.WeakEquals(ETag, item.ETag)) return false;
+            if (!Providers.StorageETags.IsWeak(ETag) && !Providers.StorageETags.IsWeak(item.ETag)) return true;
+        }
         var modified = StorageCompare.EffectiveModified(item);
         return Size == item.Size &&
                (Modified is null || modified is null || (Modified.Value - modified.Value).Duration() <= tolerance);
@@ -117,7 +122,11 @@ public sealed record StorageSyncIdentity(long? Size, DateTimeOffset? Modified, s
     {
         if (other is null) return false;
         if (VersionId is not null && other.VersionId is not null) return VersionId == other.VersionId;
-        if (ETag is not null && other.ETag is not null) return Registry.StagedWriter.SameETag(ETag, other.ETag);
+        if (ETag is not null && other.ETag is not null)
+        {
+            if (!Providers.StorageETags.WeakEquals(ETag, other.ETag)) return false;
+            if (!Providers.StorageETags.IsWeak(ETag) && !Providers.StorageETags.IsWeak(other.ETag)) return true;
+        }
         return Size == other.Size && (Modified is null || other.Modified is null || (Modified.Value - other.Modified.Value).Duration() <= tolerance);
     }
 }
