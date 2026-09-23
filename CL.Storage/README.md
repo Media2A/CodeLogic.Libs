@@ -520,28 +520,50 @@ item's size is looked up once when the stream cannot report it.
 
 ### Transfer queue
 
-`CreateTransferQueue` runs transfers in the background, like FileZilla's queue:
+`OpenTransferQueueAsync` runs transfers in the background, like FileZilla's queue:
 
 ```csharp
-await using var queue = storage.CreateTransferQueue(new StorageTransferQueueOptions
+var opened = await storage.OpenTransferQueueAsync(new StorageTransferQueueOptions
 {
     MaxConcurrentTransfers = 4,
     MaxTransfersPerConnection = 2,
-    AutomaticRetries = 2
+    AutomaticRetries = 3,
+    Store = myDurableStore          // optional: jobs survive restarts
 });
+await using var queue = opened.Value!;
 queue.ProgressChanged += job => Console.WriteLine($"{job.Destination}: {job.Progress?.BytesTransferred:N0} B");
-queue.EnqueueUploadDirectory(@"C:\exports", "sftp", "incoming");
-var urgent = queue.EnqueueCopy("s3", "reports/q3.pdf", "sftp", "outbox/q3.pdf", priority: StorageTransferPriority.High);
+
+await queue.EnqueueUploadDirectoryAsync(@"C:\exports", "sftp", "incoming");
+await queue.EnqueueCopyAsync("s3", "reports/q3.pdf", "sftp", "outbox/q3.pdf",
+    new StorageTransferOptions { Verify = true, ConflictPolicy = StorageConflictPolicy.Resume },
+    priority: 10, jobId: "q3-report");   // same id + same work = same job
+
 await queue.WaitForIdleAsync();
-foreach (var failed in queue.FailedJobs) Console.WriteLine($"{failed.Source}: {failed.Error?.Code}");
-queue.RetryFailed();
 ```
 
-Jobs cover copies, moves, and file and directory uploads and downloads. The queue respects a global
-and a per-connection limit, starts `High` priority jobs first, supports `Pause`/`Resume`/`Cancel`, and
-re-queues transient failures automatically before moving a job to `FailedJobs`. `JobChanged` and
-`ProgressChanged` suit a UI; `StorageTransferStartedEvent`, `StorageTransferCompletedEvent`, and
-`StorageTransferFailedEvent` go to the event bus. Jobs live in memory only.
+- **Jobs are data.** A `StorageTransferJobSpec` describes the kind, both endpoints, and every option;
+  `ToJson`/`FromJson` store it. Caller-chosen ids make enqueueing idempotent: the same id with the same
+  work returns the existing job, the same id with different work fails with `storage.conflict`.
+- **Durable, shared store.** `IStorageTransferJobStore` (in memory by default) holds every job. Workers claim
+  a job with a lease carrying a fencing token and renew it while running; a save with a stale lease is
+  refused, so a worker that lost its lease never records an outcome, and two processes never run one job.
+- **Restarts.** The transfer records its phase as it goes. A job found running from an earlier process goes
+  straight back to the queue when its destination was never touched (and a resumable transfer continues
+  from its staged bytes); otherwise it becomes `Interrupted` for a person to decide.
+- **States.** `Queued`, `Running`, `Paused`, `Completed`, `Failed`, `Cancelled`, `Blocked` (with
+  `BlockReason` `Trust` — an untrusted host key or certificate — or `Credential`), `NeedsReconciliation`
+  (the job's `LastReport` says what state it left), and `Interrupted`. Only transient failures are retried,
+  with exponential backoff and jitter that honours a server's `Retry-After`.
+- **Control.** `Pause`/`Resume` the queue, or `PauseJobAsync`/`ResumeJobAsync` one job (a running resumable
+  transfer keeps its staged data), `CancelAsync`, `RetryAsync`, `RemoveAsync`, integer priorities with
+  `SetPriorityAsync`, and `MoveUpAsync`/`MoveDownAsync`.
+- **History and events.** `MaxFinishedJobs` caps history and `ClearAsync(states)` clears by state. Progress
+  events are throttled (`ProgressInterval`), and `EventContext` raises `JobChanged`/`ProgressChanged` on a
+  UI thread. The event bus receives started, completed, failed, cancelled, retrying, blocked, and
+  needs-reconciliation events.
+- **Adaptive concurrency.** With `AdaptiveConcurrency`, the queue starts with one transfer, adds one after
+  each success, and halves after a transient failure, up to `MaxConcurrentTransfers`.
+- `EnqueueDownloadAsync` takes `StorageDownloadOptions`, so a job can fetch an exact version or a range.
 
 ### Compare and sync
 

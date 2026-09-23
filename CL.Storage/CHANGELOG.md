@@ -45,8 +45,19 @@
 - A move deletes its source only while it is still the version that was copied.
 - Local files carry an ETag (last-write time and size).
 
+- Durable transfer queue: jobs as data (`StorageTransferJobSpec`), an `IStorageTransferJobStore` hook with
+  leases and fencing, restart rules from recorded phases, idempotent caller-chosen ids, `Paused`,
+  `Blocked` (trust or credential), `NeedsReconciliation`, and `Interrupted` states, per-job pause, resume,
+  priority, reordering and removal, exponential backoff honouring `Retry-After`, throttled progress, an
+  event context, history limits, adaptive concurrency, and cancelled/retrying/blocked/reconciliation events.
+- `StorageErrors.Create` rebuilds an error from a stored code, message, and details.
+
 ### Changed (breaking)
 
+- `CreateTransferQueue` is replaced by `OpenTransferQueueAsync`; `Enqueue*` and every control method are
+  asynchronous and return results. Job ids are strings, priorities are integers (higher first), and
+  `StorageTransferPriority` is gone. `RetryDelay` became `RetryBaseDelay`/`RetryMaxDelay`. Disposing the
+  queue leaves queued jobs queued in the store instead of cancelling them. Queue events carry string job ids.
 - `StorageLibrary.CopyAsync` and `MoveAsync` return `StorageTransferReport` instead of `Result`; it has
   `IsSuccess`, `IsFailure`, `Error`, and `ToResult()`.
 - `StorageConflictPolicy.Resume` no longer appends to the destination in place: it resumes a staging

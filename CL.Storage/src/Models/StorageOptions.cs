@@ -272,6 +272,13 @@ public sealed record StorageTransferOptions
     /// <summary>Gets whether a directory transfer lists the source first so progress reports carry totals.</summary>
     public bool PreScan { get; init; }
 
+    /// <summary>
+    /// Called, and awaited, when the transfer reaches a phase that matters after a crash: before anything
+    /// is written, before the destination is touched, and before the source of a move is deleted. The
+    /// transfer queue records it so a restart knows whether the destination may have changed.
+    /// </summary>
+    internal Func<Queue.StorageTransferPhase, CancellationToken, Task>? PhaseChanged { get; init; }
+
     /// <summary>Gets whether an option that only makes sense for one file was set.</summary>
     internal bool HasSingleFileGuarantees =>
         DestinationCondition is { IsEmpty: false } || SourceVersionId is not null || ExpectedSourceETag is not null ||

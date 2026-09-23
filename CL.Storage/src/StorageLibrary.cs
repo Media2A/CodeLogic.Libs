@@ -1056,6 +1056,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     sourceBackend.Capabilities.Supports(requiredFeatures);
                 if (supportsNativeOperation)
                 {
+                    if (options.PhaseChanged is { } committing)
+                        await committing(Queue.StorageTransferPhase.Committing, cancellationToken).ConfigureAwait(false);
                     // A server-side operation moves no bytes through the client: report its start and end.
                     var total = sourceInfo.Value.ItemType == StorageItemType.File ? sourceInfo.Value.Size : null;
                     options.Progress?.Report(new StorageTransferProgress(0, total, false, ItemPath: normalizedSource.Value));
@@ -1107,6 +1109,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 if (summary.SkippedFiles > 0 && summary.Files == 0 && summary.SourceType == StorageItemType.File)
                     return report with { Outcome = StorageTransferOutcome.Skipped, SourceDeleted = move ? false : null };
 
+                if (move && options.PhaseChanged is { } deleting)
+                    await deleting(Queue.StorageTransferPhase.DeletingSource, cancellationToken).ConfigureAwait(false);
                 if (move && summary.SourceType == StorageItemType.Directory && LeavesSourcesBehind(options, summary))
                 {
                     var removed = await DeleteTransferredSourcesAsync(sourceBackend, normalizedSource.Value!, summary, cancellationToken).ConfigureAwait(false);
@@ -1393,18 +1397,19 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         Sync.StorageSync.SyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
 
     /// <summary>
-    /// Creates a background transfer queue over this library's connections, with concurrency limits,
-    /// priorities, pause and resume, cancellation, and automatic retries. Dispose it to stop its jobs.
+    /// Opens a background transfer queue. Its jobs live in <see cref="Queue.StorageTransferQueueOptions.Store"/>
+    /// (in memory by default); a durable store brings back the jobs of an earlier run, with those left
+    /// running either queued again (when their destination was never touched) or marked interrupted.
     /// </summary>
-    /// <param name="options">Queue limits; defaults to two transfers at once, two per connection.</param>
-    /// <returns>A new, empty queue.</returns>
-    public Queue.StorageTransferQueue CreateTransferQueue(Queue.StorageTransferQueueOptions? options = null)
+    /// <param name="options">Limits, retries, and the job store.</param>
+    /// <param name="cancellationToken">Token used to cancel loading the store.</param>
+    /// <returns>The queue, or why the options are invalid.</returns>
+    public Task<Result<Queue.StorageTransferQueue>> OpenTransferQueueAsync(
+        Queue.StorageTransferQueueOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
-        options ??= new Queue.StorageTransferQueueOptions();
-        var validation = options.Validate();
-        if (validation.IsFailure)
-            throw new ArgumentException(validation.Error!.Message, nameof(options));
-        return new Queue.StorageTransferQueue(this, options);
+        EnsureOperational();
+        return Queue.StorageTransferQueue.OpenAsync(this, options ?? new Queue.StorageTransferQueueOptions(), cancellationToken);
     }
 
     /// <summary>Returns an immutable snapshot containing sanitized connection information.</summary>

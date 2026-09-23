@@ -209,6 +209,9 @@ internal static class StorageTransferCoordinator
         TransferCleanupTracker cleanup,
         CancellationToken cancellationToken)
     {
+        // A directory changes the destination as soon as its first folder or file lands.
+        if (options.PhaseChanged is { } committing)
+            await committing(Queue.StorageTransferPhase.Committing, cancellationToken).ConfigureAwait(false);
         var destinationDirectory = await EnsureDirectoryAsync(
             destination,
             destinationPath,
@@ -562,6 +565,9 @@ internal static class StorageTransferCoordinator
             transferredMetadata = new Dictionary<string, string>();
         }
 
+        if (options.PhaseChanged is { } transferring)
+            await transferring(Queue.StorageTransferPhase.Transferring, cancellationToken).ConfigureAwait(false);
+
         StagedContent staged;
         var canUseNativeStagingCopy = ReferenceEquals(source, destination) &&
             source.Capabilities.Supports(StorageFeature.FileCopy | StorageFeature.ServerSideCopy) &&
@@ -673,6 +679,9 @@ internal static class StorageTransferCoordinator
                     $"expectedETag={options.ExpectedSourceETag};actualETag={(after.IsSuccess ? after.Value!.ETag : null)}"));
             }
         }
+
+        if (options.PhaseChanged is { } committing)
+            await committing(Queue.StorageTransferPhase.Committing, cancellationToken).ConfigureAwait(false);
 
         string? backupPath = null;
         if (destinationExists)

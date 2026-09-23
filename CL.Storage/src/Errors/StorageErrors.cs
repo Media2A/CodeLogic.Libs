@@ -140,6 +140,34 @@ public static class StorageErrors
     /// <returns>A validation error with <see cref="QuotaExceededCode"/>.</returns>
     public static Error QuotaExceeded(string message, string details = "") => Error.Validation(QuotaExceededCode, message, details);
 
+    /// <summary>Recreates an error from its code, message, and details, for errors read back from a store.</summary>
+    /// <param name="code">A <c>storage.*</c> code; unknown codes become <c>storage.provider_error</c>.</param>
+    /// <param name="message">The message.</param>
+    /// <param name="details">The details.</param>
+    /// <returns>An error of the same code and kind.</returns>
+    public static Error Create(string code, string message, string details = "") => code switch
+    {
+        InvalidPathCode => InvalidPath(message, details),
+        InvalidContentCode => InvalidContent(message, details),
+        NotFoundCode => NotFound(message, details),
+        UnauthorizedCode => Unauthorized(message, details),
+        TimeoutCode => Timeout(message, details),
+        ConflictCode => Conflict(message, details),
+        UnavailableCode => Unavailable(message, details),
+        UnsupportedCode => Unsupported(message, details),
+        TooLargeCode => TooLarge(message, details),
+        PartialFailureCode => PartialFailure(message, details),
+        AuthenticationFailedCode => AuthenticationFailed(message, details),
+        PermissionDeniedCode => PermissionDenied(message, details),
+        TlsFailureCode => TlsFailure(message, details),
+        HostKeyRejectedCode => HostKeyRejected(message, details),
+        ConnectionFailedCode => ConnectionFailed(message, details),
+        ConnectionLostCode => ConnectionLost(message, details),
+        ServerBusyCode => ServerBusy(message, details),
+        QuotaExceededCode => QuotaExceeded(message, details),
+        _ => ProviderError(message, details)
+    };
+
     /// <summary>Maps common filesystem exceptions without exposing exception messages or secrets.</summary>
     /// <param name="exception">Exception to classify.</param>
     /// <param name="operation">Safe operation label included in the public message.</param>

@@ -1,0 +1,237 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using CL.Storage.Errors;
+using CL.Storage.Models;
+using CodeLogic.Core.Results;
+
+namespace CL.Storage.Queue;
+
+/// <summary>What a queued job does.</summary>
+public enum StorageTransferKind
+{
+    /// <summary>Copies an item between (or within) connections.</summary>
+    Copy,
+    /// <summary>Moves an item between (or within) connections.</summary>
+    Move,
+    /// <summary>Uploads a local file.</summary>
+    UploadFile,
+    /// <summary>Downloads to a local file.</summary>
+    DownloadFile,
+    /// <summary>Uploads a local directory tree.</summary>
+    UploadDirectory,
+    /// <summary>Downloads a directory tree to a local directory.</summary>
+    DownloadDirectory
+}
+
+/// <summary>Where a job is in its life cycle.</summary>
+public enum StorageTransferState
+{
+    /// <summary>Waiting for a free slot, or for its retry time.</summary>
+    Queued,
+    /// <summary>Transferring.</summary>
+    Running,
+    /// <summary>Held by <see cref="StorageTransferQueue.PauseJobAsync"/>; a resumable transfer continues where it stopped.</summary>
+    Paused,
+    /// <summary>Finished successfully (or skipped by its conflict policy).</summary>
+    Completed,
+    /// <summary>Failed permanently or ran out of retries; can be retried.</summary>
+    Failed,
+    /// <summary>Cancelled by the caller.</summary>
+    Cancelled,
+    /// <summary>Stopped by something only a person can fix: an untrusted server identity or refused credentials. See <see cref="StorageTransferJob.BlockReason"/>.</summary>
+    Blocked,
+    /// <summary>Stopped part-way with a mixed state (see the job's report); decide, then retry or remove it.</summary>
+    NeedsReconciliation,
+    /// <summary>Was running when its process stopped, after it may have changed the destination; decide, then retry or remove it.</summary>
+    Interrupted
+}
+
+/// <summary>Why a job is <see cref="StorageTransferState.Blocked"/>.</summary>
+public enum StorageTransferBlockReason
+{
+    /// <summary>The server's certificate or host key is not trusted.</summary>
+    Trust,
+    /// <summary>The credentials, or the client certificate, were refused.</summary>
+    Credential
+}
+
+/// <summary>How far a running job got, recorded so a restart knows what may have changed.</summary>
+public enum StorageTransferPhase
+{
+    /// <summary>Nothing written yet.</summary>
+    NotStarted,
+    /// <summary>Writing to a staging object; the destination is untouched.</summary>
+    Transferring,
+    /// <summary>Changing the destination.</summary>
+    Committing,
+    /// <summary>The destination is complete; deleting the source of a move.</summary>
+    DeletingSource
+}
+
+/// <summary>A job's durable progress marker.</summary>
+/// <param name="Phase">How far the last attempt got.</param>
+/// <param name="ResumeToken">Staged data the next attempt can continue.</param>
+public sealed record StorageTransferCheckpoint(StorageTransferPhase Phase, StorageResumeToken? ResumeToken = null);
+
+/// <summary>
+/// A job described entirely as data — what to transfer, between which endpoints, with which options — so it
+/// can be stored and rebuilt after a restart. Progress sinks are not part of a spec; the queue supplies them.
+/// </summary>
+public sealed record StorageTransferJobSpec
+{
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    /// <summary>Gets what the job does.</summary>
+    public required StorageTransferKind Kind { get; init; }
+    /// <summary>Gets the source connection, for copies, moves, and downloads.</summary>
+    public string? SourceConnectionId { get; init; }
+    /// <summary>Gets the source path, or the local file or directory for uploads.</summary>
+    public required string SourcePath { get; init; }
+    /// <summary>Gets the destination connection, for copies, moves, and uploads.</summary>
+    public string? DestinationConnectionId { get; init; }
+    /// <summary>Gets the destination path, or the local file or directory for downloads.</summary>
+    public required string DestinationPath { get; init; }
+    /// <summary>Gets options for copies, moves, and directory transfers.</summary>
+    public StorageTransferOptions? TransferOptions { get; init; }
+    /// <summary>Gets options for file uploads.</summary>
+    public StorageUploadOptions? UploadOptions { get; init; }
+    /// <summary>Gets options for file downloads (version, range).</summary>
+    public StorageDownloadOptions? DownloadOptions { get; init; }
+    /// <summary>Gets the conflict policy for the local file of a download.</summary>
+    public StorageConflictPolicy? DownloadConflictPolicy { get; init; }
+
+    /// <summary>Gets a short description of the source, <c>connection:path</c> or a local path.</summary>
+    [JsonIgnore]
+    public string SourceLabel => SourceConnectionId is null ? SourcePath : $"{SourceConnectionId}:{SourcePath}";
+    /// <summary>Gets a short description of the destination, <c>connection:path</c> or a local path.</summary>
+    [JsonIgnore]
+    public string DestinationLabel => DestinationConnectionId is null ? DestinationPath : $"{DestinationConnectionId}:{DestinationPath}";
+
+    /// <summary>Gets the connections the job uses, for per-connection limits.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> Connections =>
+        [.. new[] { SourceConnectionId, DestinationConnectionId }.Where(id => id is not null).Cast<string>().Distinct(StringComparer.OrdinalIgnoreCase)];
+
+    /// <summary>Serializes the spec, for stores that keep jobs as JSON.</summary>
+    public string ToJson() => JsonSerializer.Serialize(this, Json);
+
+    /// <summary>Reads a spec written by <see cref="ToJson"/>.</summary>
+    public static StorageTransferJobSpec FromJson(string json) =>
+        JsonSerializer.Deserialize<StorageTransferJobSpec>(json, Json) ?? throw new JsonException("The job spec is empty.");
+
+    /// <summary>Whether two specs describe the same work.</summary>
+    public bool SameWorkAs(StorageTransferJobSpec other) => ToJson() == other.ToJson();
+
+    internal Result Validate()
+    {
+        if (string.IsNullOrWhiteSpace(SourcePath) || string.IsNullOrWhiteSpace(DestinationPath))
+            return Result.Failure(StorageErrors.InvalidContent("A job needs a source and a destination."));
+        var needsSource = Kind is StorageTransferKind.Copy or StorageTransferKind.Move or StorageTransferKind.DownloadFile or StorageTransferKind.DownloadDirectory;
+        var needsDestination = Kind is StorageTransferKind.Copy or StorageTransferKind.Move or StorageTransferKind.UploadFile or StorageTransferKind.UploadDirectory;
+        if (needsSource && string.IsNullOrWhiteSpace(SourceConnectionId))
+            return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job needs a source connection."));
+        if (needsDestination && string.IsNullOrWhiteSpace(DestinationConnectionId))
+            return Result.Failure(StorageErrors.InvalidContent($"A {Kind} job needs a destination connection."));
+        if (TransferOptions?.Progress is not null || UploadOptions?.Progress is not null || DownloadOptions?.Progress is not null)
+            return Result.Failure(StorageErrors.InvalidContent("A job spec cannot carry a progress sink; subscribe to the queue's ProgressChanged instead."));
+        return Result.Success();
+    }
+}
+
+/// <summary>A failure recorded on a job, in a form a store can keep.</summary>
+/// <param name="Code">The <c>storage.*</c> code.</param>
+/// <param name="Message">The message.</param>
+/// <param name="Details">Provider-neutral details.</param>
+public sealed record StorageTransferFailure(string Code, string Message, string? Details)
+{
+    internal static StorageTransferFailure? From(Error? error) => error is null ? null : new(error.Code, error.Message, error.Details);
+
+    internal Error ToError() => StorageErrors.Create(Code, Message, Details ?? string.Empty);
+}
+
+/// <summary>
+/// A job as a store keeps it. Everything a queue needs to rebuild the job after a restart is here; progress
+/// and the full report are not persisted.
+/// </summary>
+public sealed record StorageTransferJobRecord
+{
+    /// <summary>Gets the job's identifier, chosen by the caller or generated.</summary>
+    public required string Id { get; init; }
+    /// <summary>Gets the work.</summary>
+    public required StorageTransferJobSpec Spec { get; init; }
+    /// <summary>Gets the priority; higher starts first.</summary>
+    public int Priority { get; init; }
+    /// <summary>Gets the position among jobs of the same priority; lower starts first.</summary>
+    public long Order { get; init; }
+    /// <summary>Gets the state.</summary>
+    public StorageTransferState State { get; init; }
+    /// <summary>Gets why a blocked job is blocked.</summary>
+    public StorageTransferBlockReason? BlockReason { get; init; }
+    /// <summary>Gets the attempts so far.</summary>
+    public int Attempts { get; init; }
+    /// <summary>Gets the automatic retries still available.</summary>
+    public int RetriesLeft { get; init; }
+    /// <summary>Gets when a queued job may start next.</summary>
+    public DateTimeOffset? NextAttemptAt { get; init; }
+    /// <summary>Gets the last failure.</summary>
+    public StorageTransferFailure? Failure { get; init; }
+    /// <summary>Gets how far the last attempt got, and what it staged.</summary>
+    public StorageTransferCheckpoint Checkpoint { get; init; } = new(StorageTransferPhase.NotStarted);
+    /// <summary>Gets when the job was added.</summary>
+    public DateTimeOffset EnqueuedAt { get; init; }
+    /// <summary>Gets when the last attempt started.</summary>
+    public DateTimeOffset? StartedAt { get; init; }
+    /// <summary>Gets when the job finished.</summary>
+    public DateTimeOffset? FinishedAt { get; init; }
+    /// <summary>Gets the worker holding the job's lease, while it runs.</summary>
+    public string? LeaseOwner { get; init; }
+    /// <summary>Gets when the lease expires.</summary>
+    public DateTimeOffset? LeaseExpiresAt { get; init; }
+    /// <summary>Gets the fencing token of the current lease; it grows with every claim.</summary>
+    public long FencingToken { get; init; }
+
+    /// <summary>Gets whether the job is finished and will not run again unless retried.</summary>
+    [JsonIgnore]
+    public bool IsFinished => State is StorageTransferState.Completed or StorageTransferState.Failed or StorageTransferState.Cancelled;
+}
+
+/// <summary>A worker's claim on a job. Saves carrying a lease that is no longer current are refused.</summary>
+/// <param name="JobId">The claimed job.</param>
+/// <param name="WorkerId">The worker.</param>
+/// <param name="FencingToken">Grows with every claim; an older token is stale.</param>
+/// <param name="ExpiresAt">When the claim lapses unless renewed.</param>
+public sealed record StorageTransferLease(string JobId, string WorkerId, long FencingToken, DateTimeOffset ExpiresAt);
+
+/// <summary>A snapshot of one job, with its live progress and last report.</summary>
+public sealed record StorageTransferJob
+{
+    /// <summary>Gets the stored form of the job.</summary>
+    public required StorageTransferJobRecord Record { get; init; }
+    /// <summary>Gets the latest progress of a running job.</summary>
+    public StorageTransferProgress? Progress { get; init; }
+    /// <summary>Gets the report of the last copy or move attempt, in this process.</summary>
+    public StorageTransferReport? LastReport { get; init; }
+
+    /// <summary>Gets the job's identifier.</summary>
+    public string Id => Record.Id;
+    /// <summary>Gets what the job does.</summary>
+    public StorageTransferKind Kind => Record.Spec.Kind;
+    /// <summary>Gets the state.</summary>
+    public StorageTransferState State => Record.State;
+    /// <summary>Gets why a blocked job is blocked.</summary>
+    public StorageTransferBlockReason? BlockReason => Record.BlockReason;
+    /// <summary>Gets the priority; higher starts first.</summary>
+    public int Priority => Record.Priority;
+    /// <summary>Gets the attempts so far.</summary>
+    public int Attempts => Record.Attempts;
+    /// <summary>Gets a description of the source.</summary>
+    public string Source => Record.Spec.SourceLabel;
+    /// <summary>Gets a description of the destination.</summary>
+    public string Destination => Record.Spec.DestinationLabel;
+    /// <summary>Gets the last failure.</summary>
+    public Error? Error => Record.Failure?.ToError();
+}

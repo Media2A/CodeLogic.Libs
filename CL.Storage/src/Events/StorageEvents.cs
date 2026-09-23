@@ -178,7 +178,7 @@ public sealed record StorageConnectionRetryEvent(
 /// <param name="Destination">Destination description.</param>
 /// <param name="Timestamp">UTC start time.</param>
 public sealed record StorageTransferStartedEvent(
-    Guid JobId,
+    string JobId,
     StorageTransferKind Kind,
     string Source,
     string Destination,
@@ -192,7 +192,7 @@ public sealed record StorageTransferStartedEvent(
 /// <param name="Attempts">Attempts it took, including automatic retries.</param>
 /// <param name="Timestamp">UTC completion time.</param>
 public sealed record StorageTransferCompletedEvent(
-    Guid JobId,
+    string JobId,
     StorageTransferKind Kind,
     string Source,
     string Destination,
@@ -208,7 +208,7 @@ public sealed record StorageTransferCompletedEvent(
 /// <param name="ErrorCode">Stable <c>storage.*</c> code of the last failure.</param>
 /// <param name="Timestamp">UTC failure time.</param>
 public sealed record StorageTransferFailedEvent(
-    Guid JobId,
+    string JobId,
     StorageTransferKind Kind,
     string Source,
     string Destination,
@@ -249,5 +249,69 @@ public sealed record StorageOperationFailedEvent(
     StorageProvider Provider,
     string Operation,
     string? Path,
+    string ErrorCode,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a queued transfer job is cancelled.</summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job did.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="Timestamp">UTC time.</param>
+public sealed record StorageTransferCancelledEvent(
+    string JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a queued transfer job failed transiently and will be retried.</summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job does.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="Attempts">Attempts made so far.</param>
+/// <param name="Delay">Backoff before the next attempt.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> code of the failure.</param>
+/// <param name="Timestamp">UTC time.</param>
+public sealed record StorageTransferRetryingEvent(
+    string JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
+    int Attempts,
+    TimeSpan Delay,
+    string ErrorCode,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a queued transfer job is blocked on trust or credentials.</summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job does.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="Reason">What a person needs to fix.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> code of the failure.</param>
+/// <param name="Timestamp">UTC time.</param>
+public sealed record StorageTransferBlockedEvent(
+    string JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
+    StorageTransferBlockReason Reason,
+    string ErrorCode,
+    DateTimeOffset Timestamp) : IEvent;
+
+/// <summary>Published when a queued transfer job stopped with a mixed state that needs reconciling.</summary>
+/// <param name="JobId">Queue job identifier.</param>
+/// <param name="Kind">What the job did.</param>
+/// <param name="Source">Source description.</param>
+/// <param name="Destination">Destination description.</param>
+/// <param name="ErrorCode">Stable <c>storage.*</c> code of the failure.</param>
+/// <param name="Timestamp">UTC time.</param>
+public sealed record StorageTransferNeedsReconciliationEvent(
+    string JobId,
+    StorageTransferKind Kind,
+    string Source,
+    string Destination,
     string ErrorCode,
     DateTimeOffset Timestamp) : IEvent;

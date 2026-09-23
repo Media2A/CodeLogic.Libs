@@ -159,6 +159,20 @@ positional members are unchanged. Use `TestConnectionAsync` to check settings be
   `storage.unsupported`.
 - Local items now have an `ETag`. Code that treated a null ETag as "local" should check `Provider`.
 
+### Transfer queue (2026-09-23)
+
+| Before | Now |
+|---|---|
+| `storage.CreateTransferQueue(options)` | `(await storage.OpenTransferQueueAsync(options)).Value!` |
+| `queue.EnqueueCopy(...)` returns a job | `await queue.EnqueueCopyAsync(...)` returns `Result<StorageTransferJob>` |
+| `StorageTransferPriority.High` | an integer, e.g. `priority: 10` (higher starts first) |
+| `Guid` job ids | `string` ids, optionally chosen by the caller |
+| `queue.Cancel(id)`, `Retry(id)`, `RetryFailed()`, `ClearFinished()` | `CancelAsync`, `RetryAsync`, `RetryFailedAsync`, `ClearAsync()` |
+| `RetryDelay` | `RetryBaseDelay` and `RetryMaxDelay` (exponential backoff) |
+
+Authentication and trust failures now stop as `Blocked` instead of `Failed`; transient failures are retried
+as before. Handle the new states `Paused`, `Blocked`, `NeedsReconciliation`, and `Interrupted`.
+
 ## Recommended rollout
 
 1. Add `CodeLogic.Storage` beside the legacy package.
