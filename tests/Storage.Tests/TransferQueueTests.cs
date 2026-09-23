@@ -292,19 +292,20 @@ public sealed class TransferQueueTests
         var store = new InMemoryStorageTransferJobStore();
         await using (var first = await fixture.OpenAsync(new StorageTransferQueueOptions { Store = store, StartPaused = true }))
             await first.EnqueueCopyAsync("Source", "a.bin", "Destination", "b.bin", jobId: "shared");
-        var lease = await store.TryClaimAsync("shared", "other-worker", TimeSpan.FromMinutes(5), default);
+        var revision = (await store.GetAsync("shared", default))!.Revision;
+        var lease = await store.TryClaimAsync("shared", "other-worker", revision, TimeSpan.FromMinutes(5), default);
         Assert.NotNull(lease);
 
         await using var second = await fixture.OpenAsync(new StorageTransferQueueOptions { Store = store });
         await Task.Delay(300);
 
         Assert.False((await fixture.Destination.ExistsAsync("b.bin")).Value);
-        Assert.Null(await store.TryClaimAsync("shared", "second", TimeSpan.FromMinutes(1), default));
+        Assert.Null(await store.TryClaimAsync("shared", "second", revision, TimeSpan.FromMinutes(1), default));
         // A worker that lost its lease cannot record an outcome.
         var stale = lease! with { FencingToken = lease.FencingToken - 1 };
         var record = (await store.GetAsync("shared", default))!;
-        Assert.False(await store.SaveAsync(record with { State = StorageTransferState.Completed }, stale, default));
-        Assert.True(await store.SaveAsync(record with { State = StorageTransferState.Completed, LeaseOwner = null }, lease, default));
+        Assert.Null(await store.SaveAsync(record with { State = StorageTransferState.Completed }, stale, releaseLease: true, default));
+        Assert.NotNull(await store.SaveAsync(record with { State = StorageTransferState.Completed }, lease, releaseLease: true, default));
     }
 
     [Fact]

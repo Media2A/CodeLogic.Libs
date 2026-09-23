@@ -79,11 +79,20 @@ public sealed record StorageTransferCheckpoint(StorageTransferPhase Phase, Stora
 /// </summary>
 public sealed record StorageTransferJobSpec
 {
+    /// <summary>The spec format this version of the library writes.</summary>
+    public const int CurrentSchemaVersion = 1;
+
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         Converters = { new JsonStringEnumConverter() }
     };
+
+    /// <summary>
+    /// Gets the format the spec was written in. Enums are stored by name. A spec from a newer format fails
+    /// to read instead of being misread.
+    /// </summary>
+    public int SchemaVersion { get; init; } = CurrentSchemaVersion;
 
     /// <summary>Gets what the job does.</summary>
     public required StorageTransferKind Kind { get; init; }
@@ -120,8 +129,14 @@ public sealed record StorageTransferJobSpec
     public string ToJson() => JsonSerializer.Serialize(this, Json);
 
     /// <summary>Reads a spec written by <see cref="ToJson"/>.</summary>
-    public static StorageTransferJobSpec FromJson(string json) =>
-        JsonSerializer.Deserialize<StorageTransferJobSpec>(json, Json) ?? throw new JsonException("The job spec is empty.");
+    /// <exception cref="JsonException">The JSON is empty or was written by a newer schema version.</exception>
+    public static StorageTransferJobSpec FromJson(string json)
+    {
+        var spec = JsonSerializer.Deserialize<StorageTransferJobSpec>(json, Json) ?? throw new JsonException("The job spec is empty.");
+        if (spec.SchemaVersion > CurrentSchemaVersion)
+            throw new JsonException($"The job spec has schema version {spec.SchemaVersion}; this library reads up to {CurrentSchemaVersion}.");
+        return spec;
+    }
 
     /// <summary>Whether two specs describe the same work.</summary>
     public bool SameWorkAs(StorageTransferJobSpec other) => ToJson() == other.ToJson();
@@ -159,8 +174,18 @@ public sealed record StorageTransferFailure(string Code, string Message, string?
 /// </summary>
 public sealed record StorageTransferJobRecord
 {
+    /// <summary>The record format this version of the library writes.</summary>
+    public const int CurrentSchemaVersion = 1;
+
     /// <summary>Gets the job's identifier, chosen by the caller or generated.</summary>
     public required string Id { get; init; }
+    /// <summary>Gets the record format; a store that serializes records should keep it.</summary>
+    public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+    /// <summary>
+    /// Gets the store's revision of this record: 1 when added, one more with every save. A save carrying an
+    /// older revision is refused, so a stale copy never overwrites a newer state.
+    /// </summary>
+    public long Revision { get; init; }
     /// <summary>Gets the work.</summary>
     public required StorageTransferJobSpec Spec { get; init; }
     /// <summary>Gets the priority; higher starts first.</summary>
@@ -171,7 +196,7 @@ public sealed record StorageTransferJobRecord
     public StorageTransferState State { get; init; }
     /// <summary>Gets why a blocked job is blocked.</summary>
     public StorageTransferBlockReason? BlockReason { get; init; }
-    /// <summary>Gets the attempts so far.</summary>
+    /// <summary>Gets the attempts since the job was added or last retried by hand.</summary>
     public int Attempts { get; init; }
     /// <summary>Gets the automatic retries still available.</summary>
     public int RetriesLeft { get; init; }
@@ -187,11 +212,11 @@ public sealed record StorageTransferJobRecord
     public DateTimeOffset? StartedAt { get; init; }
     /// <summary>Gets when the job finished.</summary>
     public DateTimeOffset? FinishedAt { get; init; }
-    /// <summary>Gets the worker holding the job's lease, while it runs.</summary>
+    /// <summary>Gets the worker holding the job's lease, while it runs. Owned by the store.</summary>
     public string? LeaseOwner { get; init; }
-    /// <summary>Gets when the lease expires.</summary>
+    /// <summary>Gets when the lease expires. Owned by the store.</summary>
     public DateTimeOffset? LeaseExpiresAt { get; init; }
-    /// <summary>Gets the fencing token of the current lease; it grows with every claim.</summary>
+    /// <summary>Gets the fencing token of the latest lease; it grows with every claim. Owned by the store.</summary>
     public long FencingToken { get; init; }
 
     /// <summary>Gets whether the job is finished and will not run again unless retried.</summary>

@@ -5,39 +5,53 @@ namespace CL.Storage.Queue;
 /// between processes. Implement it over a database to make the queue durable; the default keeps jobs in memory.
 /// </summary>
 /// <remarks>
-/// <para>Implementations must make each method atomic for its job:</para>
+/// <para>Each method must be atomic for its job. Two rules keep concurrent queues from overwriting each other:</para>
 /// <list type="bullet">
-/// <item><see cref="TryClaimAsync"/> succeeds only when the job has no unexpired lease, and then records the
-/// new owner, expiry, and a fencing token greater than any issued before for that job.</item>
-/// <item><see cref="SaveAsync"/> with a lease succeeds only while that lease is the job's current one (same
-/// owner and fencing token, not expired); it releases the lease when the saved record has no
-/// <see cref="StorageTransferJobRecord.LeaseOwner"/>. Without a lease it succeeds only when no other worker
-/// holds an unexpired lease. A refused save means another worker owns the job.</item>
+/// <item><b>Revisions.</b> Every stored record has a <see cref="StorageTransferJobRecord.Revision"/>.
+/// <see cref="AddAsync"/> stores revision 1, and every successful <see cref="SaveAsync"/> stores the next one.
+/// A save whose record does not carry the current revision is refused: the caller worked from a stale copy.
+/// Claims and renewals do not change the revision.</item>
+/// <item><b>Leases.</b> The store owns <see cref="StorageTransferJobRecord.LeaseOwner"/>,
+/// <see cref="StorageTransferJobRecord.LeaseExpiresAt"/>, and <see cref="StorageTransferJobRecord.FencingToken"/>;
+/// the values in a record passed to <see cref="SaveAsync"/> are ignored. <see cref="TryClaimAsync"/> succeeds
+/// only for the expected revision and when no other worker holds an unexpired lease (the same worker may claim
+/// again, which a restarted process needs), and issues a fencing token greater than any before. A save with a
+/// lease succeeds only while that lease is current (same owner and token, unexpired); a save without one only
+/// while no worker holds an unexpired lease.</item>
 /// </list>
+/// <para>Records carry a <see cref="StorageTransferJobRecord.SchemaVersion"/>; a store that serializes them
+/// should keep it, so a later version of the library can read old rows.</para>
 /// </remarks>
 public interface IStorageTransferJobStore
 {
     /// <summary>Returns every stored job.</summary>
     Task<IReadOnlyList<StorageTransferJobRecord>> LoadAsync(CancellationToken cancellationToken);
 
-    /// <summary>Adds a job.</summary>
-    /// <returns><see langword="false"/> when a job with the same id already exists.</returns>
-    Task<bool> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken);
+    /// <summary>Adds a job at revision 1.</summary>
+    /// <returns>The stored record, or null when a job with the same id already exists.</returns>
+    Task<StorageTransferJobRecord?> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken);
 
     /// <summary>Returns one job, or null.</summary>
     Task<StorageTransferJobRecord?> GetAsync(string jobId, CancellationToken cancellationToken);
 
-    /// <summary>Claims a job for a worker.</summary>
-    /// <returns>The lease, or null when another worker holds an unexpired lease or the job is gone.</returns>
-    Task<StorageTransferLease?> TryClaimAsync(string jobId, string workerId, TimeSpan duration, CancellationToken cancellationToken);
+    /// <summary>Claims a job for a worker, provided it is still at <paramref name="expectedRevision"/>.</summary>
+    /// <returns>The lease, or null when the job changed, is gone, or another worker holds an unexpired lease.</returns>
+    Task<StorageTransferLease?> TryClaimAsync(string jobId, string workerId, long expectedRevision, TimeSpan duration, CancellationToken cancellationToken);
 
     /// <summary>Extends a lease.</summary>
     /// <returns>The renewed lease, or null when it is no longer current.</returns>
     Task<StorageTransferLease?> RenewAsync(StorageTransferLease lease, TimeSpan duration, CancellationToken cancellationToken);
 
-    /// <summary>Replaces a job's record, fenced by <paramref name="lease"/> when given.</summary>
-    /// <returns><see langword="false"/> when the save was refused (see the remarks on the interface).</returns>
-    Task<bool> SaveAsync(StorageTransferJobRecord record, StorageTransferLease? lease, CancellationToken cancellationToken);
+    /// <summary>
+    /// Replaces a job's record if it still has the record's <see cref="StorageTransferJobRecord.Revision"/>,
+    /// fenced by <paramref name="lease"/> when given (see the remarks on the interface).
+    /// </summary>
+    /// <param name="record">The new content; its lease fields are ignored.</param>
+    /// <param name="lease">The caller's lease, or null.</param>
+    /// <param name="releaseLease">Whether to end <paramref name="lease"/> with this save.</param>
+    /// <param name="cancellationToken">Token used to cancel the save.</param>
+    /// <returns>The stored record at its new revision, or null when the save was refused.</returns>
+    Task<StorageTransferJobRecord?> SaveAsync(StorageTransferJobRecord record, StorageTransferLease? lease, bool releaseLease, CancellationToken cancellationToken);
 
     /// <summary>Removes a job; does nothing when it is gone.</summary>
     Task RemoveAsync(string jobId, CancellationToken cancellationToken);
@@ -64,9 +78,10 @@ public sealed class InMemoryStorageTransferJobStore : IStorageTransferJobStore
     }
 
     /// <inheritdoc />
-    public Task<bool> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken)
+    public Task<StorageTransferJobRecord?> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken)
     {
-        lock (_gate) return Task.FromResult(_jobs.TryAdd(record.Id, record));
+        var stored = record with { Revision = 1, LeaseOwner = null, LeaseExpiresAt = null, FencingToken = 0 };
+        lock (_gate) return Task.FromResult(_jobs.TryAdd(record.Id, stored) ? stored : null);
     }
 
     /// <inheritdoc />
@@ -76,13 +91,13 @@ public sealed class InMemoryStorageTransferJobStore : IStorageTransferJobStore
     }
 
     /// <inheritdoc />
-    public Task<StorageTransferLease?> TryClaimAsync(string jobId, string workerId, TimeSpan duration, CancellationToken cancellationToken)
+    public Task<StorageTransferLease?> TryClaimAsync(string jobId, string workerId, long expectedRevision, TimeSpan duration, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
-            if (!_jobs.TryGetValue(jobId, out var record)) return Task.FromResult<StorageTransferLease?>(null);
+            if (!_jobs.TryGetValue(jobId, out var record) || record.Revision != expectedRevision) return Task.FromResult<StorageTransferLease?>(null);
             var now = _time.GetUtcNow();
-            if (record.LeaseOwner is not null && record.LeaseExpiresAt > now) return Task.FromResult<StorageTransferLease?>(null);
+            if (record.LeaseOwner is not null && record.LeaseOwner != workerId && record.LeaseExpiresAt > now) return Task.FromResult<StorageTransferLease?>(null);
             var lease = new StorageTransferLease(jobId, workerId, record.FencingToken + 1, now + duration);
             _jobs[jobId] = record with { LeaseOwner = workerId, LeaseExpiresAt = lease.ExpiresAt, FencingToken = lease.FencingToken };
             return Task.FromResult<StorageTransferLease?>(lease);
@@ -102,22 +117,29 @@ public sealed class InMemoryStorageTransferJobStore : IStorageTransferJobStore
     }
 
     /// <inheritdoc />
-    public Task<bool> SaveAsync(StorageTransferJobRecord record, StorageTransferLease? lease, CancellationToken cancellationToken)
+    public Task<StorageTransferJobRecord?> SaveAsync(StorageTransferJobRecord record, StorageTransferLease? lease, bool releaseLease, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
-            if (!_jobs.TryGetValue(record.Id, out var current)) return Task.FromResult(false);
+            if (!_jobs.TryGetValue(record.Id, out var current) || current.Revision != record.Revision)
+                return Task.FromResult<StorageTransferJobRecord?>(null);
+            var leased = current.LeaseOwner is not null && current.LeaseExpiresAt > _time.GetUtcNow();
+            StorageTransferJobRecord stored;
             if (lease is not null)
             {
-                if (!IsCurrent(lease, out _)) return Task.FromResult(false);
-                _jobs[record.Id] = record.LeaseOwner is null
-                    ? record with { LeaseExpiresAt = null, FencingToken = current.FencingToken }
-                    : record with { LeaseOwner = lease.WorkerId, LeaseExpiresAt = current.LeaseExpiresAt, FencingToken = current.FencingToken };
-                return Task.FromResult(true);
+                if (!IsCurrent(lease, out _)) return Task.FromResult<StorageTransferJobRecord?>(null);
+                stored = releaseLease
+                    ? record with { LeaseOwner = null, LeaseExpiresAt = null }
+                    : record with { LeaseOwner = current.LeaseOwner, LeaseExpiresAt = current.LeaseExpiresAt };
             }
-            if (current.LeaseOwner is not null && current.LeaseExpiresAt > _time.GetUtcNow()) return Task.FromResult(false);
-            _jobs[record.Id] = record with { LeaseOwner = null, LeaseExpiresAt = null, FencingToken = current.FencingToken };
-            return Task.FromResult(true);
+            else
+            {
+                if (leased) return Task.FromResult<StorageTransferJobRecord?>(null);
+                stored = record with { LeaseOwner = null, LeaseExpiresAt = null };
+            }
+            stored = stored with { FencingToken = current.FencingToken, Revision = current.Revision + 1 };
+            _jobs[record.Id] = stored;
+            return Task.FromResult<StorageTransferJobRecord?>(stored);
         }
     }
 
