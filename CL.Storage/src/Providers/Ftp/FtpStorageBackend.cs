@@ -93,7 +93,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             _sessionOpened = () => observer.SessionOpened(connectionId, StorageProvider.Ftp);
         }
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Ftp, observer);
-        _retry.Enrich = (error, started) => TlsDiagnosis.Enrich(error, Identity, started);
+        _retry.Enrich = (error, attempt) => TlsDiagnosis.Enrich(error, Identity, attempt);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
@@ -478,12 +478,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             if (item.Type == FtpObjectType.Directory)
             {
                 if (!options.Recursive)
-                {
-                    var children = await client.GetListing(resolved.Value.RemotePath, FtpListOption.Auto, cancellationToken).ConfigureAwait(false);
-                    if (children.Length > 0)
-                        return Result.Failure(StorageErrors.Conflict("The FTP directory is not empty."));
-                    await client.DeleteDirectory(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
-                }
+                    return await RemoveEmptyDirectoryAsync(client, resolved.Value, cancellationToken).ConfigureAwait(false);
                 else
                 {
                     await client.DeleteDirectory(resolved.Value.RemotePath, FtpListOption.Recursive, cancellationToken).ConfigureAwait(false);
@@ -498,6 +493,31 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Fail(client, error, "Delete FTP item")); }
         finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
+    }
+
+    /// <summary>
+    /// Removes a directory only if it is empty, with a raw <c>RMD</c>: the server itself refuses a directory that
+    /// holds anything, hidden names included, so there is no window between a check and the removal. (FluentFTP's
+    /// <c>DeleteDirectory</c> deletes the contents first, and its listing can miss names LIST hides.) When the server
+    /// refuses, the directory is listed with hidden names to tell "not empty" from other refusals.
+    /// </summary>
+    private static async Task<Result> RemoveEmptyDirectoryAsync(AsyncFtpClient client, ResolvedRemotePath resolved, CancellationToken cancellationToken)
+    {
+        var reply = await client.Execute($"RMD {resolved.RemotePath}", cancellationToken).ConfigureAwait(false);
+        if (reply.Success) return Result.Success();
+        FtpListItem[] children;
+        try
+        {
+            children = await client.GetListing(resolved.RemotePath, FtpListOption.Auto | FtpListOption.AllFiles, cancellationToken).ConfigureAwait(false);
+        }
+        catch (FtpCommandException)
+        {
+            // A server that rejects "LIST -a" still lists what it shows.
+            children = await client.GetListing(resolved.RemotePath, FtpListOption.Auto, cancellationToken).ConfigureAwait(false);
+        }
+        if (children.Any(child => child.Name is not ("." or "..")))
+            return Result.Failure(StorageErrors.Conflict("The FTP directory is not empty.", $"{StorageErrorInfo.FtpReplyKey}={reply.Code}"));
+        return Result.Failure(MapReply(new FtpCommandException(reply), "Delete FTP directory"));
     }
 
     /// <inheritdoc />
