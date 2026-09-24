@@ -52,6 +52,20 @@ public sealed record StorageUploadOptions
     public StorageConflictPolicy? ConflictPolicy { get; init; }
     /// <summary>Gets the source's modification time, compared by <see cref="StorageConflictPolicy.OverwriteIfNewer"/>.</summary>
     public DateTimeOffset? SourceLastModified { get; init; }
+    /// <summary>
+    /// Gets a caller-chosen identity for the source content. With <see cref="StorageConflictPolicy.Resume"/> it
+    /// keys the staged bytes together with the length and <see cref="SourceLastModified"/>, so only the same
+    /// source continues them. Resume needs <see cref="SourceLastModified"/>, or this identity marked with
+    /// <see cref="SourceIdentityIsContentVersion"/>; a path alone is refused, as an edited file of the same length
+    /// would continue the old prefix. <c>UploadFileAsync</c> sets the path and the time.
+    /// </summary>
+    public string? SourceIdentity { get; init; }
+    /// <summary>
+    /// Gets whether <see cref="SourceIdentity"/> changes whenever the content changes (a content hash, an ETag, a
+    /// version id), so it identifies the content on its own and resume needs no <see cref="SourceLastModified"/>.
+    /// Never set it for a name or a path.
+    /// </summary>
+    public bool SourceIdentityIsContentVersion { get; init; }
     /// <summary>Gets an optional progress sink, reported at most every 250 ms with speed and remaining time.</summary>
     public IProgress<StorageTransferProgress>? Progress { get; init; }
     /// <summary>Set once progress, speed limits, and conflict policy have been applied, so they are not applied twice.</summary>
@@ -62,6 +76,19 @@ public sealed record StorageUploadOptions
     public string? ContentType { get; init; }
     /// <summary>Optional condition applied atomically by providers that advertise conditional updates.</summary>
     public StorageMutationCondition? Condition { get; init; }
+    /// <summary>
+    /// Gets the exact number of bytes the source must deliver. A source that ends early or runs longer fails
+    /// the upload without committing anything.
+    /// </summary>
+    public long? ExpectedLength { get; init; }
+    /// <summary>
+    /// Gets whether to verify the upload: SHA-256 is computed while the content streams to a staging object,
+    /// compared with <see cref="ExpectedSha256"/> when set, and the staged object is confirmed (by the
+    /// server's SHA-256 where it keeps one, otherwise by reading it back) before it replaces the destination.
+    /// </summary>
+    public bool Verify { get; init; }
+    /// <summary>Gets the SHA-256 (hex) the content must have; implies <see cref="Verify"/>.</summary>
+    public string? ExpectedSha256 { get; init; }
     /// <summary>Gets an immutable snapshot of user metadata stored with the object.</summary>
     public IReadOnlyDictionary<string, string> Metadata
     {
@@ -81,6 +108,13 @@ public sealed record StorageUploadOptions
         if (metadata.IsFailure) return metadata;
         var condition = Condition?.Validate() ?? Result.Success();
         if (condition.IsFailure) return condition;
+        if (ExpectedLength is < 0)
+            return Result.Failure(StorageErrors.InvalidContent("ExpectedLength cannot be negative."));
+        if (ExpectedSha256 is not null && !StorageOptionValidation.IsSha256Hex(ExpectedSha256))
+            return Result.Failure(StorageErrors.InvalidContent("ExpectedSha256 must be 64 hexadecimal characters."));
+        if (Condition is { IsEmpty: false } && ConflictPolicy is not (null or StorageConflictPolicy.Overwrite))
+            return Result.Failure(StorageErrors.InvalidContent(
+                "A Condition replaces a known version, so it cannot be combined with a conflict policy other than Overwrite."));
         return !Overwrite && Condition is { IsEmpty: false }
             ? Result.Failure(StorageErrors.InvalidPath(
                 "Overwrite=false cannot be combined with an expected ETag or version condition."))
@@ -155,6 +189,9 @@ internal static class StorageOptionValidation
             : Result.Success();
     }
 
+    public static bool IsSha256Hex(string value) =>
+        value.Length == 64 && value.All(Uri.IsHexDigit);
+
     public static Result OptionalToken(string? value, string name)
     {
         if (value is null) return Result.Success();
@@ -218,8 +255,64 @@ public sealed record StorageTransferOptions
     public StorageMetadataPreservation MetadataPreservation { get; init; } = StorageMetadataPreservation.BestEffort;
     /// <summary>Gets an optional progress sink for relayed transfers; bytes accumulate across the files of a directory.</summary>
     public IProgress<StorageTransferProgress>? Progress { get; init; }
-    /// <summary>Gets how symbolic links are treated when a transfer relays content through the client.</summary>
+    /// <summary>
+    /// Gets how symbolic links are treated when a transfer relays content through the client. A native
+    /// same-connection directory move (a rename on Local, FTP, SFTP, or WebDAV) moves the links inside it as they
+    /// are, whatever this is set to.
+    /// </summary>
     public StorageLinkHandling LinkHandling { get; init; } = StorageLinkHandling.Reject;
+    /// <summary>
+    /// Gets the version the destination must still have for a single-file transfer to replace it: the ETag
+    /// and/or version the caller saw. The check applies again right before the staged content is promoted.
+    /// A missing destination fails the condition. <see cref="StorageTransferReport.ConditionEnforcement"/>
+    /// says whether the provider enforced it atomically.
+    /// </summary>
+    public StorageMutationCondition? DestinationCondition { get; init; }
+    /// <summary>Gets the exact source version to read (providers with versioning).</summary>
+    public string? SourceVersionId { get; init; }
+    /// <summary>
+    /// Gets the ETag the source must have. It is checked before reading and again after the content has
+    /// streamed; a changed source fails with <c>storage.conflict</c> without committing.
+    /// </summary>
+    public string? ExpectedSourceETag { get; init; }
+    /// <summary>Gets the exact length the single-file source must have; a shorter or longer source fails without committing.</summary>
+    public long? ExpectedSourceLength { get; init; }
+    /// <summary>
+    /// Gets whether to verify each file: SHA-256 is computed during the relay, compared with
+    /// <see cref="ExpectedSha256"/> when set, and the staged copy confirmed (server SHA-256, or read back)
+    /// before it is promoted. The digest is returned in <see cref="StorageTransferReport.Sha256"/>.
+    /// </summary>
+    public bool Verify { get; init; }
+    /// <summary>Gets the SHA-256 (hex) a single-file source must have; implies <see cref="Verify"/>.</summary>
+    public string? ExpectedSha256 { get; init; }
+    /// <summary>
+    /// Gets a token from an earlier report to continue that transfer's staged data. The source must still
+    /// be the same version; otherwise the staged data is discarded and the transfer starts again. A token does
+    /// not allow replacing the destination by itself: use it with <see cref="StorageConflictPolicy.Resume"/> or
+    /// with <see cref="Overwrite"/>; <see cref="Validate"/> refuses it with <c>Overwrite = false</c>. A token
+    /// naming any file other than its own part file for this destination is ignored, never deleted.
+    /// </summary>
+    public StorageResumeToken? ResumeToken { get; init; }
+    /// <summary>Gets whether a directory transfer lists the source first so progress reports carry totals.</summary>
+    public bool PreScan { get; init; }
+
+    /// <summary>
+    /// Called, and awaited, when the transfer reaches a phase that matters after a crash: before anything
+    /// is written, before the destination is touched, and before the source of a move is deleted. The
+    /// transfer queue records it so a restart knows whether the destination may have changed.
+    /// </summary>
+    internal Func<Queue.StorageTransferPhase, CancellationToken, Task>? PhaseChanged { get; init; }
+
+    /// <summary>Gets whether an option that only makes sense for one file was set.</summary>
+    internal bool HasSingleFileGuarantees =>
+        DestinationCondition is { IsEmpty: false } || SourceVersionId is not null || ExpectedSourceETag is not null ||
+        ExpectedSourceLength is not null || ExpectedSha256 is not null || ResumeToken is not null;
+
+    /// <summary>Gets whether any single-file guarantee (condition, pinning, length, verification, resume) was requested.</summary>
+    internal bool RequiresGuarantees =>
+        DestinationCondition is { IsEmpty: false } || SourceVersionId is not null || ExpectedSourceETag is not null ||
+        ExpectedSourceLength is not null || Verify || ExpectedSha256 is not null || ResumeToken is not null ||
+        ConflictPolicy == StorageConflictPolicy.Resume;
 
     /// <summary>Validates the metadata-preservation and link-handling modes.</summary>
     /// <returns>A provider-neutral validation result.</returns>
@@ -229,6 +322,22 @@ public sealed record StorageTransferOptions
             return Result.Failure(StorageErrors.InvalidPath("MetadataPreservation is invalid."));
         if (ConflictPolicy is { } policy && !Enum.IsDefined(policy))
             return Result.Failure(StorageErrors.InvalidPath("ConflictPolicy is invalid."));
+        var condition = DestinationCondition?.Validate() ?? Result.Success();
+        if (condition.IsFailure) return condition;
+        if (ExpectedSourceLength is < 0)
+            return Result.Failure(StorageErrors.InvalidContent("ExpectedSourceLength cannot be negative."));
+        if (ExpectedSha256 is not null && !StorageOptionValidation.IsSha256Hex(ExpectedSha256))
+            return Result.Failure(StorageErrors.InvalidContent("ExpectedSha256 must be 64 hexadecimal characters."));
+        if (DestinationCondition is { IsEmpty: false } && (!Overwrite || ConflictPolicy is not (null or StorageConflictPolicy.Overwrite)))
+            return Result.Failure(StorageErrors.InvalidContent("DestinationCondition replaces a known version, so it needs Overwrite and no other conflict policy."));
+        var sourceVersion = StorageOptionValidation.OptionalToken(SourceVersionId, nameof(SourceVersionId));
+        if (sourceVersion.IsFailure) return sourceVersion;
+        var sourceETag = StorageOptionValidation.OptionalToken(ExpectedSourceETag, nameof(ExpectedSourceETag));
+        if (sourceETag.IsFailure) return sourceETag;
+        // A token continues staged bytes; it never allows replacing a destination the options would not replace.
+        if (ResumeToken is not null && (ConflictPolicy == StorageConflictPolicy.Fail || (ConflictPolicy is null && !Overwrite)))
+            return Result.Failure(StorageErrors.InvalidContent(
+                "A ResumeToken does not allow replacing the destination: use ConflictPolicy Resume (or Overwrite), not Overwrite=false."));
         return Enum.IsDefined(LinkHandling)
             ? Result.Success()
             : Result.Failure(StorageErrors.InvalidPath("LinkHandling is invalid."));
@@ -239,40 +348,42 @@ public sealed record StorageTransferOptions
 public enum StorageConflictPolicy
 {
     /// <summary>Fails with <c>storage.conflict</c>.</summary>
-    Fail,
+    Fail = 0,
     /// <summary>Replaces the destination.</summary>
-    Overwrite,
+    Overwrite = 1,
     /// <summary>Leaves the destination untouched.</summary>
-    Skip,
+    Skip = 2,
     /// <summary>Replaces the destination only when the source is newer (2-second tolerance; unknown times count as newer).</summary>
-    OverwriteIfNewer,
+    OverwriteIfNewer = 3,
     /// <summary>Replaces the destination only when the sizes differ (unknown sizes count as different).</summary>
-    OverwriteIfSizeDiffers,
+    OverwriteIfSizeDiffers = 4,
     /// <summary>Replaces the destination when the source is newer or the sizes differ.</summary>
-    OverwriteIfNewerOrSizeDiffers,
+    OverwriteIfNewerOrSizeDiffers = 5,
     /// <summary>Writes to the first free name <c>name (1).ext</c>, <c>name (2).ext</c>, … instead.</summary>
-    Rename,
+    Rename = 6,
     /// <summary>
-    /// Continues an interrupted upload: when the destination is a shorter prefix, only the missing tail is
-    /// appended. A destination of equal size is left alone and a larger one is overwritten. Needs a seekable
-    /// source and <see cref="StorageFeature.Append"/>; resumed bytes are written in place, not staged.
+    /// Writes through a resumable staging object and replaces the destination only when it is complete. When
+    /// an earlier attempt left staged data for the same destination and the same source (same length,
+    /// time, ETag, or version), only the missing tail is read and appended to it; the destination itself is
+    /// never half-written. Appending needs <see cref="StorageFeature.Append"/> on the destination (otherwise
+    /// the staging object is rewritten from the start), and uploads need a seekable source.
     /// </summary>
-    Resume
+    Resume = 7
 }
 
 /// <summary>How relayed transfers treat symbolic links.</summary>
 public enum StorageLinkHandling
 {
     /// <summary>Fails the transfer when it meets a link, because link targets are provider-specific.</summary>
-    Reject,
+    Reject = 0,
     /// <summary>Leaves links out of the transfer.</summary>
-    Skip,
+    Skip = 1,
     /// <summary>Copies the content of the file a link points to. Links to directories are refused, which also rules out loops.</summary>
-    Follow,
+    Follow = 2,
     /// <summary>
     /// Creates an equivalent link at the destination. A target inside the transferred directory is remapped
     /// to the copy; the source must support <see cref="StorageFeature.ReadLinks"/> and the destination
     /// <see cref="StorageFeature.CreateLinks"/>.
     /// </summary>
-    Recreate
+    Recreate = 3
 }

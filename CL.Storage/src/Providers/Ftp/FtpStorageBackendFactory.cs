@@ -9,31 +9,60 @@ using FluentFTP.Proxy.AsyncProxy;
 
 namespace CL.Storage.Providers.Ftp;
 
-internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
+internal sealed class FtpStorageBackendFactory : IStorageBackendFactory, IIsolatedStorageBackendFactory
 {
     public Type ConfigurationType => typeof(FtpConnectionConfig);
     public StorageProvider Provider => StorageProvider.Ftp;
 
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
+        => Create(connectionId, configuration, maxBufferedDownloadBytes, observer, share: true);
+
+    public IStorageBackend CreateIsolated(string connectionId, object configuration, long maxBufferedDownloadBytes)
+        => Create(connectionId, configuration, maxBufferedDownloadBytes, observer: null, share: false);
+
+    private static FtpStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer, bool share)
     {
-        var value = (FtpConnectionConfig)configuration;
-        var identity = new ServerIdentityRecorder();
+        // Registrations with identical settings share one pool, so re-registering keeps warm sessions. The pool works
+        // from a copy of the settings, so the caller's object changing later cannot make it differ from its key.
+        var (value, key) = ProviderSettingsKey.Snapshot((FtpConnectionConfig)configuration);
+        // Loaded outside the shared-resource lock; dropped again when the pool already exists.
+        var loaded = ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword);
+        var used = false;
+        SharedPool<AsyncFtpClient> Build()
+        {
+            used = true;
+            var recorder = new ServerIdentityRecorder();
+            // One client certificate for every session of the pool, disposed with it.
+            var certificate = loaded;
+            return new SharedPool<AsyncFtpClient>(FtpStorageBackend.CreatePool(() => CreateClient(value, recorder, certificate), value.Session, AfterConnect(value)), recorder)
+            {
+                Owned = certificate
+            };
+        }
+        static async ValueTask DisposePool(SharedPool<AsyncFtpClient> pool)
+        {
+            await pool.Pool.DisposeAsync().ConfigureAwait(false);
+            pool.Owned?.Dispose();
+        }
+        // The observer is the registering library's own, so it identifies the library the pool lingers for.
+        var shared = share ? SharedResources.Acquire(key, Build, DisposePool, observer) : Build();
+        if (!used) loaded?.Dispose();
+        var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new FtpStorageBackend(
             connectionId,
-            () => CreateClient(value, identity),
+            share ? new SharedPoolHandle<AsyncFtpClient>(key, shared, linger) : new IsolatedPoolHandle<AsyncFtpClient>(shared.Pool, () => DisposePool(shared)),
             value.Root,
             maxBufferedDownloadBytes,
-            value.Session,
             value.Retry,
-            observer,
-            AfterConnect(value))
+            observer)
         {
             AllowRawCommands = value.AllowRawCommands,
-            Identity = identity
+            Identity = shared.Identity,
+            ListingScope = key
         };
     }
 
-    private static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null)
+    internal static AsyncFtpClient CreateClient(FtpConnectionConfig value, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
     {
         var config = new FtpConfig
         {
@@ -95,12 +124,8 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             config.NoopInterval = checked(session.KeepAliveSeconds * 1000);
         }
 
-        if (!string.IsNullOrWhiteSpace(value.ClientCertificatePath))
-        {
-#pragma warning disable SYSLIB0057
-            config.ClientCertificates.Add(new X509Certificate2(value.ClientCertificatePath, value.ClientCertificatePassword));
-#pragma warning restore SYSLIB0057
-        }
+        if (certificate is not null)
+            config.ClientCertificates.Add(certificate);
 
         var client = CreateProxiedClient(value, config);
         client.Encoding = StorageEncodings.Get(value.Encoding);

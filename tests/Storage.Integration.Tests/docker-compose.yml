@@ -38,7 +38,9 @@ services:
 
   # Cloud object-store emulators: no cloud account required.
   minio:
-    image: quay.io/minio/minio
+    # MinIO no longer publishes public images (quay.io and Docker Hub refuse pulls); pgsty/minio is a
+    # community build of the same server, pinned so CI does not float.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     command: server /data
     ports:
       - "9010:9000"
@@ -137,7 +139,17 @@ services:
   # WebDAV over HTTPS: Caddy terminates TLS with a certificate from its own internal CA (untrusted
   # by the host) and forwards to the plain WebDAV server, for pinning and TLS-failure tests.
   webdav-tls:
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine
     command: caddy reverse-proxy --from https://localhost:443 --to webdav:80 --internal-certs
     ports:
       - "8443:443"
+
+  # WebDAV over TLS 1.3 only that requires a client certificate from fixtures/mtls/client-ca.crt, for
+  # mutual TLS, refused-client-certificate, and protocol-mismatch tests.
+  webdav-mtls:
+    image: caddy:2.11.4-alpine
+    command: caddy run --config /mtls/Caddyfile --adapter caddyfile
+    volumes:
+      - ./fixtures/mtls:/mtls:ro
+    ports:
+      - "8444:443"

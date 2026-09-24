@@ -7,13 +7,13 @@ namespace CL.Storage.Configuration;
 public enum GoogleCloudAuthenticationMode
 {
     /// <summary>Uses Google application default credentials.</summary>
-    ApplicationDefaultCredentials,
+    ApplicationDefaultCredentials = 0,
     /// <summary>Loads service-account credentials from a file.</summary>
-    ServiceAccountFile,
+    ServiceAccountFile = 1,
     /// <summary>Loads service-account credentials from inline JSON.</summary>
-    ServiceAccountJson,
+    ServiceAccountJson = 2,
     /// <summary>Sends no credentials; for public buckets and local emulators such as fake-gcs-server.</summary>
-    Anonymous
+    Anonymous = 3
 }
 
 /// <summary>Defines named Google Cloud Storage connections.</summary>

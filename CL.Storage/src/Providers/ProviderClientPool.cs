@@ -153,7 +153,13 @@ internal sealed class ProviderClientPool<TClient> : IAsyncDisposable where TClie
     /// <param name="cancellationToken">Token observed while waiting for a slot and connecting.</param>
     /// <returns>A connected client owned by the caller until it is returned.</returns>
     /// <exception cref="ProviderPoolExhaustedException">No session slot became free within the acquire timeout.</exception>
-    public async Task<TClient> RentAsync(CancellationToken cancellationToken)
+    public Task<TClient> RentAsync(CancellationToken cancellationToken) => RentAsync(cancellationToken, opened: null);
+
+    /// <summary>Takes a connected client; <paramref name="opened"/> runs when this rent had to open a new session.</summary>
+    /// <param name="cancellationToken">Token observed while waiting for a slot and connecting.</param>
+    /// <param name="opened">Called after a new session connected for this caller (a shared pool serves several registrations).</param>
+    /// <returns>A connected client owned by the caller until it is returned.</returns>
+    public async Task<TClient> RentAsync(CancellationToken cancellationToken, Action? opened)
     {
         if (!await _slots.WaitAsync(_acquireTimeout, cancellationToken).ConfigureAwait(false))
             throw new ProviderPoolExhaustedException(_maxSessions, _acquireTimeout);
@@ -167,6 +173,7 @@ internal sealed class ProviderClientPool<TClient> : IAsyncDisposable where TClie
             await _connectAsync(client, cancellationToken).ConfigureAwait(false);
             Interlocked.Increment(ref _connectionsOpened);
             SessionOpened?.Invoke();
+            opened?.Invoke();
             return client;
         }
         catch
@@ -185,7 +192,7 @@ internal sealed class ProviderClientPool<TClient> : IAsyncDisposable where TClie
     }
 
     /// <summary>Returns a client so the next operation can reuse its session.</summary>
-    /// <param name="client">Client previously handed out by <see cref="RentAsync"/>.</param>
+    /// <param name="client">Client previously handed out by <see cref="RentAsync(CancellationToken)"/>.</param>
     /// <returns>A task representing the return or the disconnect that replaced it.</returns>
     public async ValueTask ReturnAsync(TClient client)
     {

@@ -55,6 +55,14 @@ public sealed class StorageSessionConfig
     /// <summary>Gets or sets the keep-alive interval in seconds for connected sessions; zero disables keep-alives.</summary>
     public int KeepAliveSeconds { get; set; }
 
+    /// <summary>
+    /// Gets or sets how long, in seconds, idle sessions stay open after the last registration using these exact
+    /// settings is removed, so a registration added again with the same settings reuses them. Registrations
+    /// with identical settings always share one pool while they coexist. Zero (the default) closes the
+    /// sessions at once, which keeps servers with per-user connection limits from seeing lingering sessions.
+    /// </summary>
+    public int LingerSeconds { get; set; }
+
     internal IEnumerable<string> GetValidationErrors(string prefix)
     {
         if (MaxSessions is < 1 or > 256)
@@ -69,6 +77,8 @@ public sealed class StorageSessionConfig
             yield return $"{prefix}ValidateAfterIdleSeconds must be between 0 and 86400";
         if (KeepAliveSeconds is < 0 or > 3_600)
             yield return $"{prefix}KeepAliveSeconds must be between 0 and 3600";
+        if (LingerSeconds is < 0 or > 3_600)
+            yield return $"{prefix}LingerSeconds must be between 0 and 3600";
     }
 }
 

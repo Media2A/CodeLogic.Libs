@@ -32,9 +32,17 @@ internal interface IStorageDiagnosticsSource
 /// </summary>
 internal sealed class ServerIdentityRecorder
 {
-    private StorageServerIdentity? _last;
+    /// <summary>The identity and when it was recorded, replaced together so a reader never pairs one with the other's time.</summary>
+    private sealed record Recorded(StorageServerIdentity Identity, DateTimeOffset At);
 
-    public StorageServerIdentity? Last => Volatile.Read(ref _last);
+    private Recorded? _last;
+
+    public StorageServerIdentity? Last => Volatile.Read(ref _last)?.Identity;
+
+    /// <summary>Gets when <see cref="Last"/> was recorded.</summary>
+    public DateTimeOffset? LastRecordedAt => Volatile.Read(ref _last)?.At;
+
+    private void Set(StorageServerIdentity identity) => Volatile.Write(ref _last, new Recorded(identity, DateTimeOffset.UtcNow));
 
     public void RecordCertificate(X509Certificate? certificate, bool trusted)
     {
@@ -42,7 +50,7 @@ internal sealed class ServerIdentityRecorder
         try
         {
             using var parsed = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
-            Volatile.Write(ref _last, new StorageServerIdentity(
+            Set(new StorageServerIdentity(
                 "tls-certificate",
                 Convert.ToHexString(SHA256.HashData(parsed.RawData)),
                 TlsPins.PublicKeyPin(parsed),
@@ -58,8 +66,32 @@ internal sealed class ServerIdentityRecorder
         }
     }
 
+    private long _clientCertificateRequestTicks;
+
+    /// <summary>Gets when a server last asked for a client certificate during a TLS handshake.</summary>
+    public DateTimeOffset? ClientCertificateRequestedAt =>
+        Interlocked.Read(ref _clientCertificateRequestTicks) is var ticks and > 0 ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
+
+    /// <summary>
+    /// Records that a server asked a connection for a client certificate (it sent its certificate or the issuers it
+    /// accepts). Only a hint: servers that request but do not require one ask on every handshake.
+    /// </summary>
+    public void RecordClientCertificateRequest() => Interlocked.Exchange(ref _clientCertificateRequestTicks, DateTimeOffset.UtcNow.UtcTicks);
+
+    private long _clientCertificateRefusalTicks;
+
+    /// <summary>Gets when a connection asked for a client certificate last failed before the server accepted our reply.</summary>
+    public DateTimeOffset? ClientCertificateRefusedAt =>
+        Interlocked.Read(ref _clientCertificateRefusalTicks) is var ticks and > 0 ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
+
+    /// <summary>
+    /// Records that a connection the server asked for a client certificate failed after our reply and before the server
+    /// sent anything but an alert: the server refused the certificate (see <see cref="TlsConnectionWatch"/>).
+    /// </summary>
+    public void RecordClientCertificateRefusal() => Interlocked.Exchange(ref _clientCertificateRefusalTicks, DateTimeOffset.UtcNow.UtcTicks);
+
     public void RecordHostKey(string? algorithm, string fingerprintSha256, bool trusted) =>
-        Volatile.Write(ref _last, new StorageServerIdentity(
+        Set(new StorageServerIdentity(
             "ssh-host-key",
             fingerprintSha256.StartsWith("SHA256:", StringComparison.Ordinal) ? fingerprintSha256 : $"SHA256:{fingerprintSha256}",
             null,

@@ -18,7 +18,9 @@ internal sealed class StorageServiceProxy :
     IStorageChecksumService,
     IStorageAppendService,
     IStorageCommandService,
-    IStorageSpaceService
+    IStorageSpaceService,
+    Sync.IStorageWatchService,
+    IStorageConditionEnforcementSource
 {
     private readonly StorageLibrary _library;
     private readonly string _connectionId;
@@ -114,23 +116,34 @@ internal sealed class StorageServiceProxy :
             (connectionId, provider, normalized) => new StorageItemDeletedEvent(
                 connectionId, provider, normalized, DateTimeOffset.UtcNow));
 
-    public Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
-        _library.CopyAsync(
+    public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
+        AsResult(await _library.CopyAsync(
             _connectionId,
             sourcePath,
             _connectionId,
             destinationPath,
             options,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false), cancellationToken);
 
-    public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
-        _library.MoveAsync(
+    public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
+        AsResult(await _library.MoveAsync(
             _connectionId,
             sourcePath,
             _connectionId,
             destinationPath,
             options,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false), cancellationToken);
+
+    /// <summary>
+    /// A connection's copy and move behave like every other connection call: a clean cancel throws, as it does
+    /// on a backend. A report that needs reconciliation stays a failure, since something was committed.
+    /// </summary>
+    private static Result AsResult(StorageTransferReport report, CancellationToken cancellationToken)
+    {
+        if (report.Outcome == StorageTransferOutcome.Cancelled)
+            throw new OperationCanceledException(report.Error?.Message ?? "The transfer was cancelled.", cancellationToken);
+        return report.ToResult();
+    }
 
     public Task<Result<IReadOnlyDictionary<string, string>>> GetMetadataAsync(
         string path,
@@ -252,6 +265,30 @@ internal sealed class StorageServiceProxy :
             : Task.FromResult(Result.Failure(
                 StorageErrors.Unsupported("This storage connection does not support object versions."))),
             normalized.Value!);
+    }
+
+    /// <summary>
+    /// Watches natively when the connection's backend can. The lease is held only while the watch starts,
+    /// so a long-running watch never blocks replacing the connection; it keeps watching the root it began on.
+    /// </summary>
+    public IAsyncEnumerable<Sync.StorageChange> WatchNativeAsync(string path, bool recursive, CancellationToken cancellationToken)
+    {
+        var normalized = StoragePath.Normalize(path);
+        if (normalized.IsFailure)
+            throw new ArgumentException(normalized.Error!.Message, nameof(path));
+        using var lease = _library.AcquireOperation(_connectionId);
+        return lease.Backend is Sync.IStorageWatchService native
+            ? native.WatchNativeAsync(normalized.Value!, recursive, cancellationToken)
+            : throw new NotSupportedException("This storage connection has no native change notifications.");
+    }
+
+    public async ValueTask<StorageConditionEnforcement> GetEnforcementAsync(
+        StorageConditionKind kind,
+        bool serverSideCopy,
+        CancellationToken cancellationToken)
+    {
+        using var lease = _library.AcquireOperation(_connectionId);
+        return await StorageConditionEnforcements.ForAsync(lease.Backend, kind, serverSideCopy, cancellationToken).ConfigureAwait(false);
     }
 
     private T Read<T>(Func<IStorageBackend, T> read)

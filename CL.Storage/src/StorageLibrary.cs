@@ -17,6 +17,7 @@ using CL.Storage.Providers.Sftp;
 using CL.Storage.Providers.Swift;
 using CL.Storage.Providers.WebDav;
 using CL.Storage.Registry;
+using CodeLogic.Core.Configuration;
 using CodeLogic.Core.Logging;
 using CodeLogic.Core.Results;
 using CodeLogic.Framework.Libraries;
@@ -28,6 +29,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 {
     private readonly object _stateGate = new();
     private readonly object _registryGate = new();
+    // Transfer queues opened from this library; stopping the library stops them first (B43).
+    private readonly List<Queue.StorageTransferQueue> _queues = [];
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
     private readonly Dictionary<string, BackendEntry> _registry = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, StorageServiceProxy> _proxies = new(StringComparer.OrdinalIgnoreCase);
@@ -35,6 +38,9 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private readonly IReadOnlyDictionary<Type, IStorageBackendFactory> _factories;
     private readonly Action? _defaultConnectionSnapshotCaptured;
     private readonly StorageConnectionObserver _connectionObserver;
+    private readonly bool _runtimeOnly;
+    private readonly StorageConfig? _runtimeSettings;
+    private readonly ConcurrentDictionary<Type, object> _memoryConfig = new();
     private readonly ConcurrentDictionary<string, StorageConnectionHealth> _health = new(StringComparer.OrdinalIgnoreCase);
     private LibraryContext? _context;
     private StorageConfig? _storageConfig;
@@ -47,7 +53,13 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     private bool _enabled;
 
     /// <summary>Initializes the storage library with every built-in provider factory.</summary>
-    public StorageLibrary() : this([
+    public StorageLibrary() : this(new StorageLibraryOptions())
+    {
+    }
+
+    /// <summary>Initializes the storage library with every built-in provider factory and the given options.</summary>
+    /// <param name="options">Library options, such as <see cref="StorageLibraryOptions.RuntimeOnly"/>.</param>
+    public StorageLibrary(StorageLibraryOptions options) : this([
         new LocalStorageBackendFactory(),
         new S3StorageBackendFactory(),
         new FtpStorageBackendFactory(),
@@ -56,16 +68,20 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         new AzureBlobStorageBackendFactory(),
         new GoogleCloudStorageBackendFactory(),
         new SwiftStorageBackendFactory()
-    ], null)
+    ], null, options)
     { }
 
     internal StorageLibrary(IEnumerable<IStorageBackendFactory> factories) : this(factories, null) { }
 
     internal StorageLibrary(
         IEnumerable<IStorageBackendFactory> factories,
-        Action? defaultConnectionSnapshotCaptured)
+        Action? defaultConnectionSnapshotCaptured,
+        StorageLibraryOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(factories);
+        _runtimeOnly = options?.RuntimeOnly ?? false;
+        // A copy: the caller changing its settings object later must not change the library's.
+        _runtimeSettings = options?.Settings is { } settings ? CloneStorageConfig(settings) : null;
         _factories = factories.ToDictionary(factory => factory.ConfigurationType);
         _defaultConnectionSnapshotCaptured = defaultConnectionSnapshotCaptured;
         _connectionObserver = new StorageConnectionObserver(TryCaptureEventPublisher, TryCaptureLogger);
@@ -99,6 +115,9 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             _state = LifecycleState.Configured;
         }
 
+        // Runtime-only libraries never touch configuration files; sections live in memory instead.
+        if (_runtimeOnly)
+            return Task.CompletedTask;
         context.Configuration.Register<StorageConfig>("storage");
         context.Configuration.Register<LocalStorageConfig>("storage.local");
         context.Configuration.Register<S3StorageConfig>("storage.s3");
@@ -123,15 +142,15 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 throw new InvalidOperationException("Storage library lifecycle phases must use the same LibraryContext.");
         }
 
-        var storage = context.Configuration.Get<StorageConfig>();
-        var local = context.Configuration.Get<LocalStorageConfig>();
-        var s3 = context.Configuration.Get<S3StorageConfig>();
-        var ftp = context.Configuration.Get<FtpStorageConfig>();
-        var sftp = context.Configuration.Get<SftpStorageConfig>();
-        var webDav = context.Configuration.Get<WebDavStorageConfig>();
-        var azure = context.Configuration.Get<AzureStorageConfig>();
-        var gcs = context.Configuration.Get<GoogleCloudStorageConfig>();
-        var swift = context.Configuration.Get<SwiftStorageConfig>();
+        var storage = ReadConfig<StorageConfig>(context);
+        var local = ReadConfig<LocalStorageConfig>(context);
+        var s3 = ReadConfig<S3StorageConfig>(context);
+        var ftp = ReadConfig<FtpStorageConfig>(context);
+        var sftp = ReadConfig<SftpStorageConfig>(context);
+        var webDav = ReadConfig<WebDavStorageConfig>(context);
+        var azure = ReadConfig<AzureStorageConfig>(context);
+        var gcs = ReadConfig<GoogleCloudStorageConfig>(context);
+        var swift = ReadConfig<SwiftStorageConfig>(context);
 
         EnsureValid("storage", storage.Validate());
         EnsureValid("storage.local", local.Validate());
@@ -172,7 +191,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 AddProviderConnections(builtEntries, infos, gcs, StorageProvider.GoogleCloudStorage, storage.MaxBufferedDownloadBytes, libraryLimits);
                 AddProviderConnections(builtEntries, infos, swift, StorageProvider.OpenStackSwift, storage.MaxBufferedDownloadBytes, libraryLimits);
 
-                if (!builtEntries.ContainsKey(storage.DefaultConnection))
+                if (!_runtimeOnly && !builtEntries.ContainsKey(storage.DefaultConnection))
                     throw new InvalidOperationException(
                         $"The configured default storage connection '{storage.DefaultConnection}' is not available from an enabled provider factory.");
             }
@@ -242,6 +261,12 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         var gateEntered = false;
         try
         {
+            // Queues first, while their connections still work: running jobs record where they stopped
+            // (queued again or interrupted) instead of failing on retired connections.
+            Queue.StorageTransferQueue[] queues;
+            lock (_queues) queues = [.. _queues];
+            await Task.WhenAll(queues.Select(queue => queue.DisposeAsync().AsTask())).ConfigureAwait(false);
+
             await _mutationGate.WaitAsync().ConfigureAwait(false);
             gateEntered = true;
             try
@@ -279,6 +304,9 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 throw new InvalidOperationException(
                     $"Failed to dispose storage backend(s): {string.Join(", ", failedIds)}.");
             }
+            // Sessions kept warm for re-registration (LingerSeconds) do not outlive the library; another
+            // library's are left alone. Its connections were created with this observer, which identifies it.
+            await Providers.SharedResources.FlushIdleAsync(_connectionObserver).ConfigureAwait(false);
         }
         finally
         {
@@ -327,7 +355,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
             lock (_registryGate)
             {
-                if (!_registry.ContainsKey(runtime.DefaultConnection))
+                if (!_runtimeOnly && !_registry.ContainsKey(runtime.DefaultConnection))
                     return HealthStatus.Unhealthy($"Default storage connection '{runtime.DefaultConnection}' is unavailable");
                 foreach (var (id, entry) in _registry)
                 {
@@ -563,7 +591,10 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return TestConnectionCoreAsync(
             connection.GetValidationErrors().ToArray(),
             connection.GetType(),
-            () => _factories[connection.GetType()].Create("connection-test", CloneProviderConnection(connection), DefaultTestBufferBytes),
+            // A pool of its own: a test must never use or disturb the sessions of a live connection with the same settings.
+            () => _factories[connection.GetType()] is IIsolatedStorageBackendFactory isolated
+                ? isolated.CreateIsolated("connection-test", CloneProviderConnection(connection), DefaultTestBufferBytes)
+                : _factories[connection.GetType()].Create("connection-test", CloneProviderConnection(connection), DefaultTestBufferBytes),
             host,
             port,
             security,
@@ -621,7 +652,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            var invalid = StorageErrors.InvalidContent($"The connection settings could not be applied: {error.Message}");
+            // The exception type only: its message can carry hosts, paths, or credentials.
+            var invalid = StorageErrors.InvalidContent($"The connection settings could not be applied ({error.GetType().Name}).");
             steps.Add(new StorageConnectionTestStep("validate", false, Stopwatch.GetElapsedTime(started), invalid));
             return Fail(invalid, null);
         }
@@ -641,7 +673,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 catch (Exception error)
                 {
                     result = Result<T>.Failure(ProviderErrorMapper.FromTransport(error, $"Connection test '{name}'", "server")
-                        ?? StorageErrors.ProviderError($"Connection test step '{name}' failed: {error.Message}"));
+                        ?? StorageErrors.FromException(error, $"Connection test step '{name}'"));
                 }
                 steps.Add(new StorageConnectionTestStep(name, result.IsSuccess, Stopwatch.GetElapsedTime(stepStarted), result.Error));
                 return result;
@@ -675,7 +707,11 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     /// Copies a file or directory between mounted connections. Cross-connection transfers use a
     /// bounded streaming relay and a unique destination staging object before final commit.
     /// </summary>
-    public Task<Result> CopyAsync(
+    /// <returns>
+    /// What happened: committed or skipped (and why), the digest and new destination identity, and, when it
+    /// did not finish, exactly what state it left and a token to resume it.
+    /// </returns>
+    public Task<StorageTransferReport> CopyAsync(
         string sourceConnectionId,
         string sourcePath,
         string destinationConnectionId,
@@ -883,9 +919,11 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
     /// <summary>
     /// Moves a file or directory between mounted connections. The source is deleted only after the
-    /// complete destination tree has committed successfully.
+    /// complete destination tree has committed successfully, and a single file only while it is still the
+    /// version that was copied.
     /// </summary>
-    public Task<Result> MoveAsync(
+    /// <returns>What happened, including whether the source was deleted.</returns>
+    public Task<StorageTransferReport> MoveAsync(
         string sourceConnectionId,
         string sourcePath,
         string destinationConnectionId,
@@ -901,7 +939,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             move: true,
             cancellationToken);
 
-    private async Task<Result> TransferAsync(
+    private async Task<StorageTransferReport> TransferAsync(
         string sourceConnectionId,
         string sourcePath,
         string destinationConnectionId,
@@ -912,34 +950,56 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     {
         ValidateConnectionId(sourceConnectionId);
         ValidateConnectionId(destinationConnectionId);
-        cancellationToken.ThrowIfCancellationRequested();
         options ??= new StorageTransferOptions();
+        var report = new StorageTransferReport { Outcome = StorageTransferOutcome.Failed, SourcePath = sourcePath, DestinationPath = destinationPath };
+        StorageTransferReport Fail(Error error) => report with { Outcome = StorageTransferOutcome.Failed, Error = error };
+        // A transfer reports what happened rather than throwing; a cancel before it starts is reported too.
+        if (cancellationToken.IsCancellationRequested)
+            return report with
+            {
+                Outcome = StorageTransferOutcome.Cancelled,
+                Error = StorageErrors.Cancelled("The transfer was cancelled before it started."),
+                SourceDeleted = move ? false : null
+            };
+
         var optionsValidation = options.Validate();
         if (optionsValidation.IsFailure)
-            return optionsValidation;
+            return Fail(optionsValidation.Error!);
 
         var normalizedSource = NormalizeTransferPath(sourcePath, "source");
         if (normalizedSource.IsFailure)
-            return Result.Failure(normalizedSource.Error!);
+            return Fail(normalizedSource.Error!);
         var normalizedDestination = NormalizeTransferPath(destinationPath, "destination");
         if (normalizedDestination.IsFailure)
-            return Result.Failure(normalizedDestination.Error!);
+            return Fail(normalizedDestination.Error!);
+        report = report with { SourcePath = normalizedSource.Value!, DestinationPath = normalizedDestination.Value! };
 
         var destinationTarget = normalizedDestination.Value!;
         BackendEntry.BackendOperationLease? sourceLease = null;
         BackendEntry.BackendOperationLease? destinationLease = null;
         StorageEventPublisher? publisher = null;
         StorageTransferSummary? summary = null;
-        Result result = Result.Success();
         bool sameBackend = false;
+        // A move that committed its destination but kept (part of) its source is announced as a copy, so
+        // watchers and caches learn about the new destination.
+        var announceAsCopy = false;
         string? effectiveSourceId = null;
         string? effectiveDestinationId = null;
         StorageProvider sourceProvider = default;
         StorageProvider destinationProvider = default;
+        IStorageBackend? movedSource = null;
+        TransferState? state = null;
         try
         {
-            sourceLease = AcquireOperation(sourceConnectionId);
-            destinationLease = AcquireOperation(destinationConnectionId);
+            try
+            {
+                sourceLease = AcquireOperation(sourceConnectionId);
+                destinationLease = AcquireOperation(destinationConnectionId);
+            }
+            catch (KeyNotFoundException error)
+            {
+                return Fail(StorageErrors.NotFound(error.Message));
+            }
             var sourceBackend = sourceLease.Backend;
             var destinationBackend = destinationLease.Backend;
             sameBackend = ReferenceEquals(sourceBackend, destinationBackend);
@@ -952,11 +1012,24 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
             // Conditional conflict policies decide per file. A single file is decided here, so the
             // native operation can still run; a directory must relay so every file is decided on its own.
-            if (StorageConflictResolver.IsConditional(options.ConflictPolicy))
+            // Resume is decided by the coordinator, which owns the resumable staging.
+            // Rename picks the free name here only for a file the server can copy or move itself (a same-server
+            // rename stays a rename); the native call then retries the next free name when the chosen one is taken
+            // at commit. Anything that relays leaves Rename to the coordinator, which does the same for its promote.
+            var nativeCandidate = sameBackend && !options.RequiresGuarantees &&
+                options.MetadataPreservation != StorageMetadataPreservation.Discard;
+            string? renamedFrom = null;
+            var requestedOptions = options;
+            if (options.ConflictPolicy == StorageConflictPolicy.Rename && !nativeCandidate)
             {
-                var info = await sourceBackend.GetInfoAsync(normalizedSource.Value!, cancellationToken).ConfigureAwait(false);
+                perFileDecisions = true;
+            }
+            else if (StorageConflictResolver.IsConditional(options.ConflictPolicy) && options.ConflictPolicy != StorageConflictPolicy.Resume)
+            {
+                // A pinned version is judged by its own size and time, not the latest one's.
+                var info = await StorageTransferCoordinator.ResolveSourceAsync(sourceBackend, normalizedSource.Value!, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
                 if (info.IsFailure)
-                    return Result.Failure(info.Error!);
+                    return Fail(info.Error!);
                 if (info.Value!.ItemType == StorageItemType.File)
                 {
                     var decision = await StorageConflictResolver.ResolveAsync(
@@ -968,9 +1041,22 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                         info.Value.LastModified,
                         cancellationToken).ConfigureAwait(false);
                     if (decision.IsFailure)
-                        return Result.Failure(decision.Error!);
+                        return Fail(decision.Error!);
                     if (decision.Value.Skip)
-                        return Result.Success();
+                    {
+                        return report with
+                        {
+                            Outcome = StorageTransferOutcome.Skipped,
+                            SourceType = StorageItemType.File,
+                            SkippedFiles = 1,
+                            SkipReason = StorageConflictResolver.SkipReasonFor(options.ConflictPolicy!.Value),
+                            DestinationETag = decision.Value.Existing?.ETag,
+                            DestinationVersionId = decision.Value.Existing?.VersionId,
+                            SourceDeleted = move ? false : null
+                        };
+                    }
+                    if (options.ConflictPolicy == StorageConflictPolicy.Rename)
+                        renamedFrom = destinationTarget;
                     destinationTarget = decision.Value.Path;
                     options = options with { Overwrite = decision.Value.Overwrite, ConflictPolicy = null };
                 }
@@ -980,26 +1066,29 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 }
             }
 
-            if (sameBackend && !perFileDecisions)
+            // Guarantees (conditions, pinning, verification, resume) need the staged relay, not a native call, and
+            // so does discarding metadata, which a server-side copy would carry.
+            if (sameBackend && !perFileDecisions && !options.RequiresGuarantees &&
+                options.MetadataPreservation != StorageMetadataPreservation.Discard)
             {
                 var relationship = StorageTransferPath.ValidateDistinct(
                     normalizedSource.Value!,
                     destinationTarget);
                 if (relationship.IsFailure)
-                    return relationship;
+                    return Fail(relationship.Error!);
 
                 var sourceInfo = await sourceBackend.GetInfoAsync(
                     normalizedSource.Value!,
                     cancellationToken).ConfigureAwait(false);
                 if (sourceInfo.IsFailure)
-                    return Result.Failure(sourceInfo.Error!);
+                    return Fail(sourceInfo.Error!);
                 if (sourceInfo.Value!.ItemType == StorageItemType.Directory)
                 {
                     relationship = StorageTransferPath.ValidateDirectoryDestination(
                         normalizedSource.Value!,
                         destinationTarget);
                     if (relationship.IsFailure)
-                        return relationship;
+                        return Fail(relationship.Error!);
                 }
 
                 var requiredFeatures = (move, sourceInfo.Value.ItemType) switch
@@ -1016,63 +1105,251 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 };
                 var supportsNativeOperation = requiredFeatures != StorageFeature.None &&
                     sourceBackend.Capabilities.Supports(requiredFeatures);
+                var nativeOptions = options;
+                if (supportsNativeOperation && move && sourceInfo.Value.ItemType == StorageItemType.Directory)
+                {
+                    // A native directory move replaces or refuses an existing destination depending on the server;
+                    // onto an existing directory the relay runs instead, which merges.
+                    var destinationExists = await destinationBackend.ExistsAsync(destinationTarget, cancellationToken).ConfigureAwait(false);
+                    if (destinationExists.IsFailure)
+                        return Fail(destinationExists.Error!);
+                    supportsNativeOperation = !destinationExists.Value;
+                }
+                // A move that is not an atomic rename (a copy and a delete) is pinned to the version read here, so a
+                // write made in between is neither copied half-way nor deleted. Where the source has no identity to
+                // pin, or the connection refuses the pin (WebDAV), the source is compared immediately before the
+                // server's own move instead of relaying the bytes through the client, and the report says so.
+                var checkSourceBefore = false;
+                if (supportsNativeOperation && move && sourceInfo.Value.ItemType == StorageItemType.File &&
+                    !sourceBackend.Capabilities.Supports(StorageFeature.AtomicMove))
+                {
+                    if (sourceInfo.Value.ETag is { } eTag)
+                        nativeOptions = options with { ExpectedSourceETag = eTag };
+                    else if (sourceInfo.Value.VersionId is { } version)
+                        nativeOptions = options with { SourceVersionId = version };
+                    else
+                        checkSourceBefore = true;
+                }
+                if (!supportsNativeOperation && renamedFrom is not null)
+                {
+                    // The server cannot do it: the relay decides the name, and retries the next one at its commit.
+                    options = requestedOptions;
+                    destinationTarget = renamedFrom;
+                    renamedFrom = null;
+                }
                 if (supportsNativeOperation)
                 {
-                    result = move
-                        ? await sourceBackend.MoveAsync(
-                            normalizedSource.Value!,
-                            destinationTarget,
-                            options,
-                            cancellationToken).ConfigureAwait(false)
-                        : await sourceBackend.CopyAsync(
-                            normalizedSource.Value!,
-                            destinationTarget,
-                            options,
-                            cancellationToken).ConfigureAwait(false);
-                    if (result.IsSuccess)
+                    if (options.PhaseChanged is { } committing)
+                        await committing(Queue.StorageTransferPhase.Committing, cancellationToken).ConfigureAwait(false);
+                    // A server-side operation moves no bytes through the client: report its start and end.
+                    var total = sourceInfo.Value.ItemType == StorageItemType.File ? sourceInfo.Value.Size : null;
+                    options.Progress?.Report(new StorageTransferProgress(0, total, false, ItemPath: normalizedSource.Value));
+                    var native = await NativeAsync().ConfigureAwait(false);
+                    // Rename: a name taken between the choice and the server's rename is not a failure; the next free
+                    // one is used. Only a destination that is really there now counts as taken.
+                    for (var retry = 0; renamedFrom is not null && retry < RenameRetries && native.IsFailure &&
+                        native.Error!.Code == StorageErrors.ConflictCode && !StorageErrorInfo.DestinationCommitted(native.Error); retry++)
+                    {
+                        var taken = await destinationBackend.ExistsAsync(destinationTarget, cancellationToken).ConfigureAwait(false);
+                        if (taken.IsFailure || !taken.Value)
+                            break;
+                        var next = await StorageConflictResolver.ResolveAsync(
+                            destinationBackend, renamedFrom, StorageConflictPolicy.Rename, false, sourceInfo.Value.Size, sourceInfo.Value.LastModified, cancellationToken).ConfigureAwait(false);
+                        if (next.IsFailure || next.Value.Path == destinationTarget)
+                            break;
+                        destinationTarget = next.Value.Path;
+                        native = await NativeAsync().ConfigureAwait(false);
+                    }
+
+                    async Task<Result> NativeAsync()
+                    {
+                        if (checkSourceBefore)
+                        {
+                            var unchanged = await SourceUnchangedAsync(sourceBackend, normalizedSource.Value!, sourceInfo.Value!, cancellationToken).ConfigureAwait(false);
+                            if (unchanged.IsFailure)
+                                return unchanged;
+                        }
+                        var result = move
+                            ? await sourceBackend.MoveAsync(normalizedSource.Value!, destinationTarget, nativeOptions, cancellationToken).ConfigureAwait(false)
+                            : await sourceBackend.CopyAsync(normalizedSource.Value!, destinationTarget, nativeOptions, cancellationToken).ConfigureAwait(false);
+                        if (result.IsFailure && result.Error!.Code == StorageErrors.UnsupportedCode && !ReferenceEquals(nativeOptions, options))
+                        {
+                            // The connection cannot pin its move to a version: the source is compared immediately
+                            // before the server's move instead.
+                            checkSourceBefore = true;
+                            nativeOptions = options;
+                            return await NativeAsync().ConfigureAwait(false);
+                        }
+                        return result;
+                    }
+
+                    var nativeCommitted = native.IsSuccess || StorageErrorInfo.DestinationCommitted(native.Error);
+                    if (!nativeCommitted)
+                    {
+                        // A provider that stopped part-way (a WebDAV 207 multi-status) left a mixed state to reconcile.
+                        return native.Error!.Code == StorageErrors.PartialFailureCode
+                            ? report with { Outcome = StorageTransferOutcome.NeedsReconciliation, Error = native.Error, SourceDeleted = move ? false : null }
+                            : Fail(native.Error!);
+                    }
+                    else
+                    {
+                        // Committed. The report is built first and only then completed, with reads that ignore the
+                        // caller's cancel, so a cancel now cannot turn a finished copy or move into "Cancelled".
+                        usedNativeOperation = true;
+                        if (move)
+                            movedSource = sourceBackend;
+                        // A move whose source delete failed names the source itself; that is not an internal leftover.
+                        var leftBehind = StagedWriter.LeftBehind(native.Error)
+                            .Where(path => !string.Equals(path, normalizedSource.Value, StringComparison.Ordinal)).ToList();
+                        report = report with
+                        {
+                            Outcome = StorageTransferOutcome.Completed,
+                            SourceType = sourceInfo.Value.ItemType,
+                            WrittenPath = destinationTarget,
+                            Files = sourceInfo.Value.ItemType == StorageItemType.File ? 1 : 0,
+                            Directories = sourceInfo.Value.ItemType == StorageItemType.Directory ? 1 : 0,
+                            Bytes = sourceInfo.Value.Size ?? 0,
+                            DestinationCommitted = true,
+                            SourceDeleted = move ? true : null,
+                            BackupLeftBehind = leftBehind.FirstOrDefault(IsBackupName),
+                            StagingLeftBehind = leftBehind.FirstOrDefault(path => !IsBackupName(path))
+                        };
                         publisher = CaptureEventPublisher();
-                    usedNativeOperation = true;
+                        await CompleteNativeReportAsync().ConfigureAwait(false);
+
+                        async Task CompleteNativeReportAsync()
+                        {
+                            options.Progress?.Report(new StorageTransferProgress(total ?? 0, total ?? 0, true, ItemPath: normalizedSource.Value));
+                            if (move && native.IsFailure)
+                            {
+                                // The provider committed the destination but reported a failure after it: whether the
+                                // source is still there decides between a finished move and one to reconcile.
+                                var sourceLeft = await TryExistsAsync(sourceBackend, normalizedSource.Value!).ConfigureAwait(false);
+                                if (sourceLeft != false)
+                                {
+                                    announceAsCopy = true;
+                                    report = report with { Outcome = StorageTransferOutcome.NeedsReconciliation, SourceDeleted = false, Error = native.Error };
+                                }
+                            }
+                            if (sourceInfo.Value.ItemType == StorageItemType.File)
+                            {
+                                var committed = await TryGetInfoAsync(destinationBackend, destinationTarget).ConfigureAwait(false);
+                                if (committed is not null)
+                                    report = report with
+                                    {
+                                        Bytes = committed.Size ?? report.Bytes,
+                                        DestinationETag = committed.ETag,
+                                        DestinationVersionId = committed.VersionId
+                                    };
+                            }
+                            else
+                            {
+                                // A server-side directory move names no files; they are counted where they landed.
+                                var (files, directories, bytes) = await CountTreeAsync(destinationBackend, destinationTarget).ConfigureAwait(false);
+                                report = report with { Files = files, Directories = directories + 1, Bytes = bytes };
+                            }
+                            var enforcement = StorageConditionEnforcement.None;
+                            if (!options.Overwrite)
+                                enforcement = await StorageConditionEnforcements.ForAsync(
+                                    sourceBackend, StorageConditionKind.CreateOnly, serverSideCopy: true, CancellationToken.None).ConfigureAwait(false);
+                            // The source compared just before the move is the weaker guarantee, and it is what is reported.
+                            if (checkSourceBefore)
+                                enforcement = StorageConditionEnforcement.CheckedBeforeCommit;
+                            report = report with { ConditionEnforcement = enforcement };
+                        }
+                    }
                 }
             }
 
             if (!usedNativeOperation)
             {
+                // The relay reads the source and writes the destination at the same time. On one connection
+                // limited to a single session that cannot work; it fails now instead of waiting out the
+                // session timeout.
+                if (sameBackend && StorageTransferPipeline.SessionLimitFor(sourceBackend) is < 2)
+                    return Fail(StorageErrors.Unsupported(
+                        "This transfer relays through the client on one connection, which needs two sessions (one to read, one to write), but the connection allows one. Raise Session.MaxSessions to at least 2.",
+                        "requiredSessions=2;maxSessions=1"));
+
+                state = new TransferState();
                 var copied = await StorageTransferCoordinator.CopyAsync(
                     sourceBackend,
                     normalizedSource.Value!,
                     destinationBackend,
                     destinationTarget,
                     options,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    state).ConfigureAwait(false);
                 if (copied.IsFailure)
-                    return Result.Failure(copied.Error!);
-                summary = copied.Value!;
-
-                if (move && summary.SourceType == StorageItemType.Directory && LeavesSourcesBehind(options, summary))
                 {
-                    var removed = await DeleteTransferredSourcesAsync(sourceBackend, normalizedSource.Value!, summary, cancellationToken).ConfigureAwait(false);
-                    if (removed.IsFailure)
-                        return removed;
+                    report = FailedTransferReport(report, copied.Error!, state, move);
+                    if (!report.DestinationCommitted)
+                        return report;
+                    // Committed but not as it should be: still announced, so watchers see the new destination.
+                    announceAsCopy = true;
+                    publisher = CaptureEventPublisher();
+                    summary = new StorageTransferSummary(report.SourceType ?? StorageItemType.File, state.FilesCommitted, state.DirectoriesCreated, state.BytesCommitted);
                 }
-                else if (move)
+                else
                 {
-                    var deleted = await sourceBackend.DeleteAsync(
-                        normalizedSource.Value!,
-                        new StorageDeleteOptions
+                    summary = copied.Value!;
+                    report = SummaryReport(report, summary, move);
+                    // A resumed move whose destination already holds the content (for example after a crash between
+                    // commit and source deletion) still has to delete its source; any other skip leaves it.
+                    var alreadyMoved = move && summary.SkipReason == StorageSkipReason.AlreadyComplete;
+                    if (summary.SkippedFiles > 0 && summary.Files == 0 && summary.SourceType is StorageItemType.File or StorageItemType.Link && !alreadyMoved)
+                        return report with { Outcome = StorageTransferOutcome.Skipped, SourceDeleted = move ? false : null };
+
+                    report = report with { Outcome = StorageTransferOutcome.Completed, SourceDeleted = move ? false : null };
+                    // Announced even if deleting the source fails below: the destination is committed.
+                    publisher = CaptureEventPublisher();
+                    if (move)
+                        movedSource = sourceBackend;
+                    if (move && options.PhaseChanged is { } deleting)
+                        await deleting(Queue.StorageTransferPhase.DeletingSource, cancellationToken).ConfigureAwait(false);
+                    if (move && summary.SourceType == StorageItemType.Directory)
+                    {
+                        var removed = await DeleteMovedDirectoryAsync(sourceBackend, normalizedSource.Value!, summary, state, cancellationToken).ConfigureAwait(false);
+                        report = report with { SourceDeleted = removed.SourceDeleted };
+                        if (removed.Error is not null)
                         {
-                            Recursive = summary.SourceType == StorageItemType.Directory,
-                            IgnoreMissing = false
-                        },
-                        cancellationToken).ConfigureAwait(false);
-                    if (deleted.IsFailure)
-                        return Result.Failure(StorageErrors.PartialFailure(
-                            "The destination completed, but the source could not be deleted.",
-                            $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+                            announceAsCopy = true;
+                            report = report with { Outcome = StorageTransferOutcome.NeedsReconciliation, Error = removed.Error };
+                        }
+                    }
+                    else if (move)
+                    {
+                        var deleted = await DeleteIfUnchangedAsync(sourceBackend, normalizedSource.Value!, state.Source, ignoreMissing: false, cancellationToken).ConfigureAwait(false);
+                        if (deleted.IsFailure)
+                        {
+                            announceAsCopy = true;
+                            report = report with
+                            {
+                                Outcome = StorageTransferOutcome.NeedsReconciliation,
+                                SourceDeleted = false,
+                                Error = StorageErrors.PartialFailure(
+                                    "The destination completed, but the source could not be deleted.",
+                                    $"sourceDeleteError={deleted.Error!.Code};{StorageErrorInfo.DestinationStateKey}=complete")
+                            };
+                        }
+                        else
+                        {
+                            report = report with { SourceDeleted = true };
+                        }
+                    }
                 }
-
-                result = Result.Success();
-                publisher = CaptureEventPublisher();
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Reported rather than thrown, so the caller learns what the transfer left behind; a destination that
+            // was already committed is still announced below.
+            report = await StoppedReportAsync(StorageErrors.Cancelled("The transfer was cancelled.")).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // A provider that throws is reported like one that fails.
+            report = await StoppedReportAsync(StorageErrors.FromException(error, "Transfer")).ConfigureAwait(false);
         }
         finally
         {
@@ -1080,55 +1357,302 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             sourceLease?.Dispose();
         }
 
-        return await PublishTransferResultAsync(
-            result,
+        await PublishTransferResultAsync(
+            Result.Success(),
             publisher,
             sameBackend,
-            move,
+            move && !announceAsCopy,
             effectiveSourceId!,
             sourceProvider,
-            normalizedSource.Value!,
+            report.SourcePath,
             effectiveDestinationId!,
             destinationProvider,
-            destinationTarget,
-            summary).ConfigureAwait(false);
+            report.WrittenPath ?? destinationTarget,
+            summary ?? new StorageTransferSummary(report.SourceType ?? StorageItemType.File, report.Files, report.Directories, report.Bytes)).ConfigureAwait(false);
+        return report;
+
+        // A cancel or an exception: what was already done is reported as it is. Before the commit that is the
+        // relay's staging, backup and resume state; after it, the committed destination and how much of a moved
+        // source is already gone (read again, as the delete may have been under way).
+        async Task<StorageTransferReport> StoppedReportAsync(Error error)
+        {
+            if (!report.DestinationCommitted)
+            {
+                var stopped = state is null
+                    ? report with { Outcome = error.Code == StorageErrors.CancelledCode ? StorageTransferOutcome.Cancelled : StorageTransferOutcome.Failed, Error = error, SourceDeleted = move ? false : null }
+                    : FailedTransferReport(report, error, state, move);
+                if (stopped.DestinationCommitted)
+                {
+                    announceAsCopy = true;
+                    publisher ??= CaptureEventPublisher();
+                    summary ??= new StorageTransferSummary(stopped.SourceType ?? StorageItemType.File, state!.FilesCommitted, state.DirectoriesCreated, state.BytesCommitted);
+                }
+                return stopped;
+            }
+            var sourceDeleted = false;
+            if (move && movedSource is not null)
+                sourceDeleted = await IsGoneAsync(movedSource, report.SourcePath).ConfigureAwait(false);
+            publisher ??= CaptureEventPublisher();
+            if (!move || sourceDeleted)
+                return report with { Outcome = StorageTransferOutcome.Completed, Error = null, SourceDeleted = move ? true : null };
+            announceAsCopy = true;
+            var details = $"{StorageErrorInfo.DestinationStateKey}=complete";
+            if (state is { SourceItemsDeleted: > 0 })
+                details += $";sourceItemsDeleted={state.SourceItemsDeleted}";
+            return report with
+            {
+                Outcome = StorageTransferOutcome.NeedsReconciliation,
+                Error = StagedWriter.AppendDetails(error, details),
+                SourceDeleted = false
+            };
+        }
     }
 
-    /// <summary>Whether a directory move must keep some source items: skipped files or skipped links.</summary>
-    private static bool LeavesSourcesBehind(StorageTransferOptions options, StorageTransferSummary summary) =>
-        summary.SkippedFiles > 0 || options.LinkHandling == StorageLinkHandling.Skip;
+    /// <summary>How often a Rename tries the next free name when its chosen one is taken at the server's rename.</summary>
+    private const int RenameRetries = 8;
 
     /// <summary>
-    /// Completes a partial directory move: deletes only the source files that were transferred, then
-    /// removes directories left empty, deepest first. Skipped files and their directories stay in place.
+    /// Succeeds when the source is still the version <paramref name="read"/> describes, read immediately before
+    /// a native move that cannot be pinned to it.
     /// </summary>
-    private static async Task<Result> DeleteTransferredSourcesAsync(
+    private static async Task<Result> SourceUnchangedAsync(IStorageBackend source, string path, StorageItem read, CancellationToken cancellationToken)
+    {
+        var current = await source.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        if (current.IsFailure)
+            return Result.Failure(current.Error!);
+        return current.Value!.ItemType == read.ItemType && current.Value.Size == read.Size &&
+            current.Value.LastModified == read.LastModified && StorageTransferCoordinator.SameVersion(read, current.Value)
+            ? Result.Success()
+            : Result.Failure(StorageErrors.Conflict($"The source '{path}' changed after it was read, so it was not moved."));
+    }
+
+    /// <summary>Counts the files, folders and bytes below a directory, ignoring the caller's cancel; zeros when it cannot be listed.</summary>
+    private static async Task<(long Files, long Directories, long Bytes)> CountTreeAsync(IStorageBackend backend, string path)
+    {
+        long files = 0, directories = 0, bytes = 0;
+        try
+        {
+            await foreach (var item in backend.EnumerateItemsAsync(path, new StorageListOptions { Recursive = true }, CancellationToken.None).ConfigureAwait(false))
+            {
+                if (item.IsFailure) break;
+                if (item.Value!.ItemType == StorageItemType.Directory)
+                    directories++;
+                else
+                {
+                    files++;
+                    bytes += item.Value.Size ?? 0;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Only the report's counts depend on it.
+        }
+        return (files, directories, bytes);
+    }
+
+    /// <summary>Whether a provider's leftover is a backup rather than a staging copy.</summary>
+    private static bool IsBackupName(string path) => path.Contains("backup", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Reads an item after a commit, ignoring the caller's cancel; null when it cannot be read.</summary>
+    private static async Task<StorageItem?> TryGetInfoAsync(IStorageBackend backend, string path)
+    {
+        try
+        {
+            var info = await backend.GetInfoAsync(path, CancellationToken.None).ConfigureAwait(false);
+            return info.IsSuccess ? info.Value : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Whether an item exists, ignoring the caller's cancel; null when that cannot be told.</summary>
+    private static async Task<bool?> TryExistsAsync(IStorageBackend backend, string path)
+    {
+        try
+        {
+            var exists = await backend.ExistsAsync(path, CancellationToken.None).ConfigureAwait(false);
+            return exists.IsSuccess ? exists.Value : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Whether an item is provably gone (its read answers not-found), ignoring the caller's cancel.</summary>
+    private static async Task<bool> IsGoneAsync(IStorageBackend backend, string path)
+    {
+        try
+        {
+            var info = await backend.GetInfoAsync(path, CancellationToken.None).ConfigureAwait(false);
+            return info.IsFailure && info.Error!.Code == StorageErrors.NotFoundCode;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Folds a coordinator summary into the report.</summary>
+    private static StorageTransferReport SummaryReport(StorageTransferReport report, StorageTransferSummary summary, bool move) => report with
+    {
+        SourceType = summary.SourceType,
+        Files = summary.Files,
+        Directories = summary.Directories,
+        Bytes = summary.Bytes,
+        BytesResumed = summary.BytesResumed,
+        SkippedFiles = summary.SkippedFiles,
+        WrittenPath = summary.WrittenPath ?? (summary.SourceType == StorageItemType.File ? null : report.DestinationPath),
+        SkipReason = summary.SkipReason,
+        Sha256 = summary.Sha256,
+        VerifiedBy = summary.VerifiedBy,
+        DestinationETag = summary.Destination?.ETag,
+        DestinationVersionId = summary.Destination?.VersionId,
+        // A directory transfer that only reused existing folders and skipped every file wrote nothing.
+        DestinationCommitted = summary.Files > 0 || summary.CreatedDirectories > 0,
+        ConditionEnforcement = summary.ConditionEnforcement,
+        StagingLeftBehind = summary.StagingLeftBehind,
+        BackupLeftBehind = summary.BackupLeftBehind,
+        SourceDeleted = move ? false : null
+    };
+
+    /// <summary>Builds the report for a coordinator failure from what it recorded before stopping.</summary>
+    private static StorageTransferReport FailedTransferReport(StorageTransferReport report, Error error, TransferState state, bool move)
+    {
+        // An error raised after the destination committed (for example a destination that does not hold what
+        // was committed) is never a clean failure.
+        var committed = state.DestinationCommitted || StorageErrorInfo.DestinationCommitted(error);
+        var mixed = committed || error.Code == StorageErrors.PartialFailureCode || state.RollbackIncomplete || state.BackupLeftBehind is not null ||
+            (state.StagingLeftBehind is not null && !state.StagingResumable);
+        StorageResumeToken? token = null;
+        if (state.StagingResumable && state.StagingLeftBehind is { } staging && !committed)
+        {
+            token = new StorageResumeToken
+            {
+                DestinationPath = report.DestinationPath,
+                StagingPath = staging,
+                BytesStaged = state.BytesStaged,
+                SourcePath = state.Source?.Path,
+                SourceETag = state.Source?.ETag,
+                SourceVersionId = state.Source?.VersionId,
+                SourceLength = state.Source?.Size,
+                SourceLastModified = state.Source?.LastModified
+            };
+        }
+        return report with
+        {
+            Outcome = mixed ? StorageTransferOutcome.NeedsReconciliation
+                : error.Code == StorageErrors.CancelledCode ? StorageTransferOutcome.Cancelled
+                : StorageTransferOutcome.Failed,
+            Error = error,
+            SourceType = state.Source?.ItemType,
+            DestinationCommitted = committed,
+            SourceDeleted = move ? false : null,
+            StagingLeftBehind = state.StagingLeftBehind,
+            BackupRestored = state.BackupRestored,
+            BackupLeftBehind = state.BackupLeftBehind,
+            ConditionEnforcement = state.ConditionEnforcement,
+            ResumeToken = token
+        };
+    }
+
+    /// <summary>
+    /// Deletes a moved source file only while it is still the version that was copied: atomically where the
+    /// source supports conditional deletes, otherwise by comparing its identity immediately before.
+    /// </summary>
+    private static async Task<Result> DeleteIfUnchangedAsync(
+        IStorageBackend source,
+        string path,
+        StorageItem? copied,
+        bool ignoreMissing,
+        CancellationToken cancellationToken)
+    {
+        StorageMutationCondition? condition = null;
+        if (copied is not null)
+        {
+            if (source.Capabilities.Supports(StorageFeature.ConditionalDelete) && (copied.ETag is not null || copied.VersionId is not null))
+            {
+                condition = new StorageMutationCondition { ExpectedETag = copied.ETag, ExpectedVersionId = copied.VersionId };
+            }
+            else
+            {
+                var current = await source.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+                if (current.IsFailure)
+                    return ignoreMissing && current.Error!.Code == StorageErrors.NotFoundCode ? Result.Success() : Result.Failure(current.Error!);
+                if (current.Value!.ItemType != copied.ItemType || current.Value.Size != copied.Size || current.Value.LastModified != copied.LastModified ||
+                    (copied.VersionId is not null && copied.VersionId != current.Value.VersionId) ||
+                    (copied.ETag is not null && !StagedWriter.SameETag(copied.ETag, current.Value.ETag)))
+                    return Result.Failure(StorageErrors.Conflict($"The source '{path}' changed after it was copied, so it was not deleted."));
+            }
+        }
+        return await source.DeleteAsync(
+            path,
+            new StorageDeleteOptions { IgnoreMissing = ignoreMissing, Condition = condition },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Completes a directory move: deletes each transferred source file only while it is still the version
+    /// listed for the copy, then removes folders left empty, deepest first, never recursively. Files skipped on
+    /// purpose stay, and so does anything that changed or appeared during the copy — which the result reports,
+    /// together with whether the source directory is gone.
+    /// </summary>
+    private static async Task<(bool SourceDeleted, Error? Error)> DeleteMovedDirectoryAsync(
         IStorageBackend source,
         string sourceRoot,
         StorageTransferSummary summary,
+        TransferState state,
         CancellationToken cancellationToken)
     {
-        foreach (var path in summary.TransferredSources ?? [])
+        var kept = new HashSet<string>(StringComparer.Ordinal);
+        string? firstError = null;
+        foreach (var item in summary.TransferredItems ?? [])
         {
-            var deleted = await source.DeleteAsync(path, new StorageDeleteOptions { IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
+            var deleted = await DeleteIfUnchangedAsync(source, item.Path, item, ignoreMissing: true, cancellationToken).ConfigureAwait(false);
             if (deleted.IsFailure)
-                return Result.Failure(StorageErrors.PartialFailure(
-                    "The destination completed, but a transferred source file could not be deleted.",
-                    $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+            {
+                kept.Add(item.Path);
+                firstError ??= deleted.Error!.Code;
+            }
+            else
+            {
+                state.SourceItemsDeleted++;
+            }
         }
 
-        var directories = new List<string> { sourceRoot };
-        await foreach (var item in source.EnumerateItemsAsync(sourceRoot, new StorageListOptions { Recursive = true }, cancellationToken).ConfigureAwait(false))
+        var skipped = new HashSet<string>(summary.SkippedSources ?? [], StringComparer.Ordinal);
+        var directories = new List<string>();
+        var appeared = 0;
+        await foreach (var entry in source.EnumerateItemsAsync(sourceRoot, new StorageListOptions { Recursive = true }, cancellationToken).ConfigureAwait(false))
         {
-            if (item.IsSuccess && item.Value!.ItemType == StorageItemType.Directory)
-                directories.Add(item.Value.Path);
+            if (entry.IsFailure)
+            {
+                firstError ??= entry.Error!.Code;
+                break;
+            }
+            var path = StoragePath.Normalize(entry.Value!.Path);
+            var normalized = path.IsSuccess ? path.Value! : entry.Value.Path;
+            if (entry.Value.ItemType == StorageItemType.Directory)
+                directories.Add(normalized);
+            else if (!skipped.Contains(normalized) && !kept.Contains(normalized))
+                appeared++;
         }
-        foreach (var directory in directories.OrderByDescending(path => path.Count(c => c == '/')).ThenByDescending(path => path.Length))
+        directories.Add(sourceRoot);
+        foreach (var directory in directories.Distinct(StringComparer.Ordinal).OrderByDescending(path => path.Count(c => c == '/')).ThenByDescending(path => path.Length))
         {
-            // Non-recursive: a directory that still holds skipped items fails with a conflict and stays.
+            // Non-recursive: a folder that still holds something fails with a conflict and stays.
             _ = await source.DeleteAsync(directory, new StorageDeleteOptions { IgnoreMissing = true }, cancellationToken).ConfigureAwait(false);
         }
-        return Result.Success();
+        var rootLeft = await source.ExistsAsync(sourceRoot, cancellationToken).ConfigureAwait(false);
+        var sourceDeleted = rootLeft.IsSuccess && !rootLeft.Value;
+        if (kept.Count == 0 && appeared == 0 && firstError is null)
+            return (sourceDeleted, null);
+        return (sourceDeleted, StorageErrors.PartialFailure(
+            $"The destination completed, but {kept.Count + appeared} source item(s) changed or appeared during the move and were kept at the source.",
+            $"sourceChanged={kept.Count};sourceAdded={appeared};sourceDeleteError={firstError};{StorageErrorInfo.DestinationStateKey}=complete"));
     }
 
     private static Result<string> NormalizeTransferPath(string path, string role)
@@ -1244,19 +1768,83 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         CancellationToken cancellationToken = default) =>
         Sync.StorageSync.SyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
 
+    /// <summary>Plans a sync between two connections without changing anything; approve the plan by its digest.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory.</param>
+    /// <param name="options">Direction, conflicts, baseline, filters, and safety limits.</param>
+    /// <param name="cancellationToken">Token used to cancel the listings.</param>
+    /// <returns>The plan.</returns>
+    public Task<Result<Sync.StorageSyncPlan>> PlanSyncAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageSyncOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.PlanSyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, options, cancellationToken);
+
+    /// <summary>Applies an approved sync plan between two connections.</summary>
+    /// <param name="sourceConnectionId">Source connection.</param>
+    /// <param name="sourcePath">Source directory; must be the plan's.</param>
+    /// <param name="destinationConnectionId">Destination connection.</param>
+    /// <param name="destinationPath">Destination directory; must be the plan's.</param>
+    /// <param name="plan">The plan.</param>
+    /// <param name="approvedDigest">The digest that was approved.</param>
+    /// <param name="options">The options the plan was made with.</param>
+    /// <param name="cancellationToken">Stops the run; the report keeps what was done.</param>
+    /// <returns>Each step's outcome.</returns>
+    public Task<Result<Sync.StorageSyncReport>> ApplySyncAsync(
+        string sourceConnectionId,
+        string sourcePath,
+        string destinationConnectionId,
+        string destinationPath,
+        Sync.StorageSyncPlan plan,
+        string approvedDigest,
+        Sync.StorageSyncOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        Sync.StorageSync.ApplySyncAsync(GetStorage(sourceConnectionId), sourcePath, GetStorage(destinationConnectionId), destinationPath, plan, approvedDigest, options, cancellationToken);
+
     /// <summary>
-    /// Creates a background transfer queue over this library's connections, with concurrency limits,
-    /// priorities, pause and resume, cancellation, and automatic retries. Dispose it to stop its jobs.
+    /// Opens a background transfer queue. Its jobs live in <see cref="Queue.StorageTransferQueueOptions.Store"/>
+    /// (in memory by default); a durable store brings back the jobs of an earlier run, with those left
+    /// running either queued again (when their destination was never touched) or marked interrupted.
+    /// Stopping the library disposes the queue first, so its running jobs stop the same way.
     /// </summary>
-    /// <param name="options">Queue limits; defaults to two transfers at once, two per connection.</param>
-    /// <returns>A new, empty queue.</returns>
-    public Queue.StorageTransferQueue CreateTransferQueue(Queue.StorageTransferQueueOptions? options = null)
+    /// <param name="options">Limits, retries, and the job store.</param>
+    /// <param name="cancellationToken">Token used to cancel loading the store.</param>
+    /// <returns>The queue, or why the options are invalid.</returns>
+    public async Task<Result<Queue.StorageTransferQueue>> OpenTransferQueueAsync(
+        Queue.StorageTransferQueueOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
-        options ??= new Queue.StorageTransferQueueOptions();
-        var validation = options.Validate();
-        if (validation.IsFailure)
-            throw new ArgumentException(validation.Error!.Message, nameof(options));
-        return new Queue.StorageTransferQueue(this, options);
+        EnsureOperational();
+        var opened = await Queue.StorageTransferQueue.OpenAsync(this, options ?? new Queue.StorageTransferQueueOptions(), cancellationToken).ConfigureAwait(false);
+        if (opened.IsSuccess && !TrackQueue(opened.Value!))
+        {
+            // The library began stopping while the queue opened, after it had stopped the queues it knew of.
+            await opened.Value!.DisposeAsync().ConfigureAwait(false);
+            return Result<Queue.StorageTransferQueue>.Failure(StorageErrors.Unavailable("The storage library stopped while the transfer queue was opening."));
+        }
+        return opened;
+    }
+
+    /// <summary>Keeps a queue to stop with the library; false when the library is already stopping.</summary>
+    private bool TrackQueue(Queue.StorageTransferQueue queue)
+    {
+        lock (_stateGate)
+        {
+            if (_state is LifecycleState.Stopping or LifecycleState.Stopped or LifecycleState.Disposed) return false;
+            lock (_queues) _queues.Add(queue);
+            return true;
+        }
+    }
+
+    /// <summary>Forgets a queue that was disposed.</summary>
+    internal void UntrackQueue(Queue.StorageTransferQueue queue)
+    {
+        lock (_queues) _queues.Remove(queue);
     }
 
     /// <summary>Returns an immutable snapshot containing sanitized connection information.</summary>
@@ -1347,7 +1935,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
         var validation = localConnection.Validate();
         if (!validation.IsValid)
-            return Result.Failure(StorageErrors.ProviderError(
+            return Result.Failure(StorageErrors.InvalidContent(
                 $"Local storage connection '{id}' is invalid: {string.Join("; ", validation.Errors)}"));
 
         BackendEntry? replacement = null;
@@ -1383,7 +1971,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 candidate.Connections[id] = Clone(localConnection);
                 try
                 {
-                    await runtime.Context.Configuration.SaveAsync(candidate).ConfigureAwait(false);
+                    await SaveConfigAsync(runtime.Context, candidate).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception error)
@@ -1442,7 +2030,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
         var errors = connection.GetValidationErrors().ToArray();
         if (errors.Length > 0)
-            return Result.Failure(StorageErrors.ProviderError(
+            return Result.Failure(StorageErrors.InvalidContent(
                 $"{descriptor.Value.Provider} storage connection '{id}' is invalid: {string.Join("; ", errors)}"));
 
         var effectiveConnection = CloneProviderConnection(connection);
@@ -1720,7 +2308,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                     candidate.Connections.Remove(persistedKey);
                 try
                 {
-                    await runtime.Context.Configuration.SaveAsync(candidate).ConfigureAwait(false);
+                    await SaveConfigAsync(runtime.Context, candidate).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception error)
@@ -1923,6 +2511,23 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
     internal StorageConnectionObserver ConnectionObserver => _connectionObserver;
 
+    /// <summary>Gets whether the library keeps its configuration in memory only.</summary>
+    public bool RuntimeOnly => _runtimeOnly;
+
+    /// <summary>Reads a configuration section, from memory in runtime-only mode.</summary>
+    private T ReadConfig<T>(LibraryContext context) where T : ConfigModelBase, new() =>
+        _runtimeOnly
+            ? (T)_memoryConfig.GetOrAdd(typeof(T), _ => typeof(T) == typeof(StorageConfig) && _runtimeSettings is not null ? _runtimeSettings : new T())
+            : context.Configuration.Get<T>();
+
+    /// <summary>Saves a configuration section, to memory in runtime-only mode.</summary>
+    private Task SaveConfigAsync<T>(LibraryContext context, T value) where T : ConfigModelBase, new()
+    {
+        if (!_runtimeOnly) return context.Configuration.SaveAsync(value);
+        _memoryConfig[typeof(T)] = value;
+        return Task.CompletedTask;
+    }
+
     internal StorageEventPublisher CaptureEventPublisher()
     {
         LibraryContext context;
@@ -2119,69 +2724,66 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return null;
     }
 
-    private static ProviderStorageConfigBase GetProviderConfig(LibraryContext context, Type connectionType)
+    private ProviderStorageConfigBase GetProviderConfig(LibraryContext context, Type connectionType)
     {
-        var configuration = context.Configuration;
-        if (connectionType == typeof(S3ConnectionConfig)) return configuration.Get<S3StorageConfig>();
-        if (connectionType == typeof(FtpConnectionConfig)) return configuration.Get<FtpStorageConfig>();
-        if (connectionType == typeof(SftpConnectionConfig)) return configuration.Get<SftpStorageConfig>();
-        if (connectionType == typeof(WebDavConnectionConfig)) return configuration.Get<WebDavStorageConfig>();
-        if (connectionType == typeof(AzureBlobConnectionConfig)) return configuration.Get<AzureStorageConfig>();
-        if (connectionType == typeof(GoogleCloudConnectionConfig)) return configuration.Get<GoogleCloudStorageConfig>();
-        if (connectionType == typeof(SwiftConnectionConfig)) return configuration.Get<SwiftStorageConfig>();
+        if (connectionType == typeof(S3ConnectionConfig)) return ReadConfig<S3StorageConfig>(context);
+        if (connectionType == typeof(FtpConnectionConfig)) return ReadConfig<FtpStorageConfig>(context);
+        if (connectionType == typeof(SftpConnectionConfig)) return ReadConfig<SftpStorageConfig>(context);
+        if (connectionType == typeof(WebDavConnectionConfig)) return ReadConfig<WebDavStorageConfig>(context);
+        if (connectionType == typeof(AzureBlobConnectionConfig)) return ReadConfig<AzureStorageConfig>(context);
+        if (connectionType == typeof(GoogleCloudConnectionConfig)) return ReadConfig<GoogleCloudStorageConfig>(context);
+        if (connectionType == typeof(SwiftConnectionConfig)) return ReadConfig<SwiftStorageConfig>(context);
         throw new NotSupportedException($"Provider connection type '{connectionType.FullName}' is not supported.");
     }
 
-    private static Task SaveProviderConfigAsync(LibraryContext context, ProviderStorageConfigBase config) => config switch
+    private Task SaveProviderConfigAsync(LibraryContext context, ProviderStorageConfigBase config) => config switch
     {
-        S3StorageConfig value => context.Configuration.SaveAsync(value),
-        FtpStorageConfig value => context.Configuration.SaveAsync(value),
-        SftpStorageConfig value => context.Configuration.SaveAsync(value),
-        WebDavStorageConfig value => context.Configuration.SaveAsync(value),
-        AzureStorageConfig value => context.Configuration.SaveAsync(value),
-        GoogleCloudStorageConfig value => context.Configuration.SaveAsync(value),
-        SwiftStorageConfig value => context.Configuration.SaveAsync(value),
+        S3StorageConfig value => SaveConfigAsync(context, value),
+        FtpStorageConfig value => SaveConfigAsync(context, value),
+        SftpStorageConfig value => SaveConfigAsync(context, value),
+        WebDavStorageConfig value => SaveConfigAsync(context, value),
+        AzureStorageConfig value => SaveConfigAsync(context, value),
+        GoogleCloudStorageConfig value => SaveConfigAsync(context, value),
+        SwiftStorageConfig value => SaveConfigAsync(context, value),
         _ => throw new NotSupportedException($"Provider configuration type '{config.GetType().FullName}' is not supported.")
     };
 
-    private static string? FindConfiguredSection(
+    private string? FindConfiguredSection(
         string id,
         LibraryContext context,
         Type? exceptConnectionType = null)
     {
-        var configuration = context.Configuration;
         if (exceptConnectionType != typeof(LocalConnectionConfig) &&
-            TryFindKey(configuration.Get<LocalStorageConfig>().Connections, id, out _))
+            TryFindKey(ReadConfig<LocalStorageConfig>(context).Connections, id, out _))
             return "storage.local";
-        if (exceptConnectionType != typeof(S3ConnectionConfig) && configuration.Get<S3StorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(S3ConnectionConfig) && ReadConfig<S3StorageConfig>(context).ContainsConnection(id))
             return "storage.s3";
-        if (exceptConnectionType != typeof(FtpConnectionConfig) && configuration.Get<FtpStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(FtpConnectionConfig) && ReadConfig<FtpStorageConfig>(context).ContainsConnection(id))
             return "storage.ftp";
-        if (exceptConnectionType != typeof(SftpConnectionConfig) && configuration.Get<SftpStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(SftpConnectionConfig) && ReadConfig<SftpStorageConfig>(context).ContainsConnection(id))
             return "storage.sftp";
-        if (exceptConnectionType != typeof(WebDavConnectionConfig) && configuration.Get<WebDavStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(WebDavConnectionConfig) && ReadConfig<WebDavStorageConfig>(context).ContainsConnection(id))
             return "storage.webdav";
-        if (exceptConnectionType != typeof(AzureBlobConnectionConfig) && configuration.Get<AzureStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(AzureBlobConnectionConfig) && ReadConfig<AzureStorageConfig>(context).ContainsConnection(id))
             return "storage.azure";
-        if (exceptConnectionType != typeof(GoogleCloudConnectionConfig) && configuration.Get<GoogleCloudStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(GoogleCloudConnectionConfig) && ReadConfig<GoogleCloudStorageConfig>(context).ContainsConnection(id))
             return "storage.gcs";
-        if (exceptConnectionType != typeof(SwiftConnectionConfig) && configuration.Get<SwiftStorageConfig>().ContainsConnection(id))
+        if (exceptConnectionType != typeof(SwiftConnectionConfig) && ReadConfig<SwiftStorageConfig>(context).ContainsConnection(id))
             return "storage.swift";
         return null;
     }
 
-    private static ProviderConfigMatch? FindProviderConfigContaining(string id, LibraryContext context)
+    private ProviderConfigMatch? FindProviderConfigContaining(string id, LibraryContext context)
     {
-        var configuration = context.Configuration;
         ProviderStorageConfigBase[] configs =
         [
-            configuration.Get<S3StorageConfig>(),
-            configuration.Get<FtpStorageConfig>(),
-            configuration.Get<SftpStorageConfig>(),
-            configuration.Get<WebDavStorageConfig>(),
-            configuration.Get<AzureStorageConfig>(),
-            configuration.Get<GoogleCloudStorageConfig>(),
-            configuration.Get<SwiftStorageConfig>()
+            ReadConfig<S3StorageConfig>(context),
+            ReadConfig<FtpStorageConfig>(context),
+            ReadConfig<SftpStorageConfig>(context),
+            ReadConfig<WebDavStorageConfig>(context),
+            ReadConfig<AzureStorageConfig>(context),
+            ReadConfig<GoogleCloudStorageConfig>(context),
+            ReadConfig<SwiftStorageConfig>(context)
         ];
         foreach (var config in configs)
         {
@@ -2260,8 +2862,20 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
     }
 
     /// <summary>Attaches a connection's speed limits, plus the library-wide totals, to its backend.</summary>
-    private static IStorageBackend WithLimits(IStorageBackend backend, StorageConnectionConfigBase configuration, TransferLimits libraryLimits) =>
-        WithLimits(backend, configuration.TransferLimits, libraryLimits);
+    private static IStorageBackend WithLimits(IStorageBackend backend, StorageConnectionConfigBase configuration, TransferLimits libraryLimits)
+    {
+        // Pooled connections also record their session limit, so a relay that needs two sessions on one
+        // connection fails at once instead of waiting for a session that never frees.
+        var session = configuration switch
+        {
+            FtpConnectionConfig ftp => ftp.Session,
+            SftpConnectionConfig sftp => sftp.Session,
+            _ => null
+        };
+        if (session is not null)
+            StorageTransferPipeline.SetSessionLimit(backend, session.MaxSessions);
+        return WithLimits(backend, configuration.TransferLimits, libraryLimits);
+    }
 
     private static IStorageBackend WithLimits(IStorageBackend backend, LocalConnectionConfig configuration, TransferLimits libraryLimits) =>
         WithLimits(backend, configuration.TransferLimits, libraryLimits);
@@ -2279,21 +2893,30 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
             throw new ArgumentException("A storage connection ID is required.", nameof(connectionId));
     }
 
-    private static string? FindConfiguredNonLocalSection(string id, LibraryContext context)
+    private string? FindConfiguredNonLocalSection(string id, LibraryContext context)
     {
-        var configuration = context.Configuration;
-        if (Contains(configuration.Get<S3StorageConfig>(), id)) return "storage.s3";
-        if (Contains(configuration.Get<FtpStorageConfig>(), id)) return "storage.ftp";
-        if (Contains(configuration.Get<SftpStorageConfig>(), id)) return "storage.sftp";
-        if (Contains(configuration.Get<WebDavStorageConfig>(), id)) return "storage.webdav";
-        if (Contains(configuration.Get<AzureStorageConfig>(), id)) return "storage.azure";
-        if (Contains(configuration.Get<GoogleCloudStorageConfig>(), id)) return "storage.gcs";
-        if (Contains(configuration.Get<SwiftStorageConfig>(), id)) return "storage.swift";
+        if (Contains(ReadConfig<S3StorageConfig>(context), id)) return "storage.s3";
+        if (Contains(ReadConfig<FtpStorageConfig>(context), id)) return "storage.ftp";
+        if (Contains(ReadConfig<SftpStorageConfig>(context), id)) return "storage.sftp";
+        if (Contains(ReadConfig<WebDavStorageConfig>(context), id)) return "storage.webdav";
+        if (Contains(ReadConfig<AzureStorageConfig>(context), id)) return "storage.azure";
+        if (Contains(ReadConfig<GoogleCloudStorageConfig>(context), id)) return "storage.gcs";
+        if (Contains(ReadConfig<SwiftStorageConfig>(context), id)) return "storage.swift";
         return null;
 
         static bool Contains(ProviderStorageConfigBase providerConfig, string connectionId) =>
             providerConfig.ContainsConnection(connectionId);
     }
+
+    private static StorageConfig CloneStorageConfig(StorageConfig source) => new()
+    {
+        Enabled = source.Enabled,
+        DefaultConnection = source.DefaultConnection,
+        HealthCheckTimeoutSeconds = source.HealthCheckTimeoutSeconds,
+        MaxBufferedDownloadBytes = source.MaxBufferedDownloadBytes,
+        MaxTotalUploadBytesPerSecond = source.MaxTotalUploadBytesPerSecond,
+        MaxTotalDownloadBytesPerSecond = source.MaxTotalDownloadBytesPerSecond
+    };
 
     private static LocalStorageConfig CloneLocalConfig(LocalStorageConfig source)
     {

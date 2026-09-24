@@ -14,7 +14,13 @@ using CodeLogic.Core.Results;
 namespace CL.Storage.Providers.Swift;
 
 /// <summary>Root-scoped storage over the OpenStack Swift HTTP API.</summary>
-public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataService, IStorageChecksumService
+/// <remarks>
+/// Swift enforces <c>If-None-Match: *</c> on an upload, but ignores <c>If-Match</c> on uploads and deletes, and
+/// applies conditional headers on a <c>COPY</c> to the source it reads. So create-only uploads are atomic, while
+/// conditional replaces and deletes and create-only copies are checked immediately before the request that
+/// commits; a copy is pinned to the source version it read.
+/// </remarks>
+public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataService, IStorageChecksumService, IStorageConditionEnforcementSource
 {
     private static readonly StorageCapabilities SwiftCapabilities = new(
         StorageFeature.VirtualDirectories |
@@ -28,9 +34,9 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         StorageFeature.Checksums |
         StorageFeature.MetadataRead |
         StorageFeature.MetadataWrite |
+        // Only If-None-Match on an upload is enforced; If-Match on PUT and DELETE is ignored by the server, so
+        // replaces and deletes with a condition are checked by the caller (the library stages and checks them).
         StorageFeature.ConditionalCreate |
-        StorageFeature.ConditionalUpdate |
-        StorageFeature.ConditionalDelete |
         StorageFeature.AtomicReplace |
         StorageFeature.ServerPagination,
         new StorageLimits { MaxPageSize = 10_000 });
@@ -149,6 +155,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         options ??= new StorageListOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StoragePage>.Failure(validation.Error!);
+        if (ProviderPaging.RecursiveTokenOnFlatListing(options) is { } mixed) return Result<StoragePage>.Failure(mixed);
         var normalized = Normalize(path);
         if (normalized.IsFailure) return Result<StoragePage>.Failure(normalized.Error!);
         if (normalized.Value!.Length > 0)
@@ -161,16 +168,21 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         }
         try
         {
+            var (nativeToken, previous) = options.Recursive
+                ? ImplicitDirectories.Unwrap(options.ContinuationToken)
+                : (options.ContinuationToken, null);
             var page = await ListProviderPageAsync(
                 DirectoryPrefix(normalized.Value!),
                 options.Recursive ? null : "/",
                 options.PageSize,
-                options.ContinuationToken,
+                nativeToken,
                 cancellationToken).ConfigureAwait(false);
             if (page.IsFailure) return Result<StoragePage>.Failure(page.Error!);
+            var keys = new Dictionary<string, string>(StringComparer.Ordinal);
             var items = page.Value!.Items.Select(item =>
             {
                 var providerPath = item.Subdirectory ?? item.Name!;
+                keys[FromKey(providerPath).TrimEnd('/')] = FromKey(providerPath);
                 var relative = FromKey(providerPath).TrimEnd('/');
                 return relative.Length == 0
                     ? null
@@ -187,7 +199,21 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                             ETag = item.Hash
                         };
             }).Where(item => item is not null).Cast<StorageItem>().ToArray();
-            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options), page.Value.NextMarker));
+            if (options.Recursive)
+            {
+                var withFolders = new List<StorageItem>();
+                foreach (var item in items)
+                {
+                    ImplicitDirectories.AddParents(withFolders, item.Path, normalized.Value!, previous, DirectoryItem);
+                    // The key itself, so a folder marker ("a/b/") that ends a page still covers "a/b" on the next.
+                    previous = keys.GetValueOrDefault(item.Path, item.Path);
+                    withFolders.Add(item);
+                }
+                items = [.. withFolders.GroupBy(item => item.Path, StringComparer.Ordinal).Select(group => group.First())
+                    .OrderBy(item => item.Path, StringComparer.Ordinal)];
+            }
+            var next = options.Recursive ? ImplicitDirectories.Wrap(page.Value.NextMarker, previous) : page.Value.NextMarker;
+            return Result<StoragePage>.Success(new StoragePage(StorageListFilter.Apply(items, options, normalized.Value!), next));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result<StoragePage>.Failure(Map(error, "List Swift objects")); }
@@ -226,14 +252,22 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         options ??= new StorageUploadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
-        if (options.Condition?.ExpectedVersionId is not null)
-            return Result<StorageItem>.Failure(StorageErrors.Unsupported(
-                "This Swift endpoint does not expose a portable version upload condition."));
         var normalized = NormalizeRequired(path);
         if (normalized.IsFailure) return Result<StorageItem>.Failure(normalized.Error!);
         var sourceStart = source.CanSeek ? source.Position : (long?)null;
         try
         {
+            if (options.Overwrite && options.Condition is { IsEmpty: false } condition)
+            {
+                // Swift ignores If-Match on PUT: the condition is checked here, just before the upload.
+                var current = await GetInfoAsync(normalized.Value!, cancellationToken).ConfigureAwait(false);
+                if (current.IsFailure)
+                    return Result<StorageItem>.Failure(current.Error!.Code == StorageErrors.NotFoundCode
+                        ? StorageErrors.Conflict("The Swift object no longer exists for the requested upload condition.")
+                        : current.Error!);
+                var check = CheckCondition(current.Value!, condition, "upload");
+                if (check.IsFailure) return Result<StorageItem>.Failure(check.Error!);
+            }
             using var response = await SendAsync(() =>
             {
                 if (sourceStart.HasValue) source.Position = sourceStart.Value;
@@ -242,8 +276,6 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                 if (!string.IsNullOrWhiteSpace(options.ContentType))
                     request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(options.ContentType);
                 if (!options.Overwrite) request.Headers.TryAddWithoutValidation("If-None-Match", "*");
-                else if (options.Condition?.ExpectedETag is not null)
-                    request.Headers.TryAddWithoutValidation("If-Match", QuoteETag(options.Condition.ExpectedETag));
                 foreach (var (name, value) in options.Metadata)
                     request.Headers.TryAddWithoutValidation("X-Object-Meta-" + name, value);
                 return request;
@@ -266,16 +298,13 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private async Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
         options ??= new StorageDownloadOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return Result<Stream>.Failure(validation.Error!);
-        if (options.VersionId is not null)
-            return Result<Stream>.Failure(StorageErrors.Unsupported(
-                "This Swift adapter does not support version-specific downloads."));
         var normalized = NormalizeRequired(path);
         if (normalized.IsFailure) return Result<Stream>.Failure(normalized.Error!);
         HttpResponseMessage? response = null;
@@ -283,7 +312,8 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         {
             response = await SendAsync(() =>
             {
-                var request = new HttpRequestMessage(HttpMethod.Get, ObjectUri(ToKey(normalized.Value!)));
+                // A container with object versioning (X-Versions-Enabled) serves an older version by its id.
+                var request = new HttpRequestMessage(HttpMethod.Get, ObjectUri(ToKey(normalized.Value!), options.VersionId));
                 if (options.Offset > 0 || options.Length.HasValue)
                 {
                     var end = options.Length.HasValue ? options.Offset + options.Length.Value - 1 : (long?)null;
@@ -363,19 +393,10 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             }
             else
             {
-                if (options.Condition?.ExpectedVersionId is not null)
-                    return Result.Failure(StorageErrors.Unsupported(
-                        "This Swift endpoint does not expose a portable version delete condition."));
-                if (options.Condition?.ExpectedETag is { } expectedETag &&
-                    !string.Equals(expectedETag.Trim('"'), info.Value.ETag?.Trim('"'), StringComparison.Ordinal))
-                {
-                    return Result.Failure(StorageErrors.Conflict(
-                        "The Swift object ETag no longer matches the requested delete condition."));
-                }
-                return await DeleteObjectAsync(
-                    ToKey(normalized.Value!),
-                    cancellationToken,
-                    ifMatch: options.Condition?.ExpectedETag).ConfigureAwait(false);
+                // Swift ignores If-Match on DELETE: the condition is checked just before.
+                var check = CheckCondition(info.Value, options.Condition, "delete");
+                if (check.IsFailure) return check;
+                return await DeleteObjectAsync(ToKey(normalized.Value!), cancellationToken).ConfigureAwait(false);
             }
             return Result.Success();
         }
@@ -384,6 +405,12 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// An object is copied on the server with <c>COPY</c>, pinned to the version it read (<c>If-Match</c>, which
+    /// Swift applies to the source, and <c>?version-id=</c> for <see cref="StorageTransferOptions.SourceVersionId"/>).
+    /// A create-only copy is checked just before: Swift has no destination condition on <c>COPY</c>, so a
+    /// <see cref="StorageTransferOptions.DestinationCondition"/> is unsupported.
+    /// </remarks>
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
@@ -397,7 +424,7 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
         if (relationship.IsFailure) return relationship;
         try
         {
-            var info = await GetInfoAsync(source.Value!, cancellationToken).ConfigureAwait(false);
+            var info = await SourceInfoAsync(source.Value!, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
             if (info.IsFailure) return Result.Failure(info.Error!);
             if (info.Value!.ItemType == StorageItemType.Directory)
             {
@@ -412,23 +439,132 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
                     cancellationToken).ConfigureAwait(false);
                 return relayed.IsSuccess ? Result.Success() : Result.Failure(relayed.Error!);
             }
-            return await CopyObjectAsync(ToKey(source.Value!), ToKey(destination.Value!), options.Overwrite, cancellationToken).ConfigureAwait(false);
+            return await CopyFileAsync(source.Value!, destination.Value!, info.Value, options, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception error) { return Result.Failure(Map(error, "Copy Swift object")); }
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// An object is copied as <see cref="CopyAsync"/> does, then deleted only while it is still the version that was
+    /// copied, compared just before the delete (Swift ignores <c>If-Match</c> on <c>DELETE</c>). Once the copy
+    /// committed, a failure to delete the source returns <c>storage.partial_failure</c> with
+    /// <c>destinationState=complete</c> and <c>leftBehind</c> naming the source, and cancellation no longer applies.
+    /// A directory is copied through the relay and each copied object deleted under the identity it was listed with.
+    /// </remarks>
     public async Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
-        var copied = await CopyAsync(sourcePath, destinationPath, options, cancellationToken).ConfigureAwait(false);
-        if (copied.IsFailure) return copied;
-        var deleted = await DeleteAsync(sourcePath, new StorageDeleteOptions { Recursive = true }, cancellationToken).ConfigureAwait(false);
-        return deleted.IsSuccess
-            ? Result.Success()
-            : Result.Failure(StorageErrors.PartialFailure(
-                "The Swift destination completed, but the source could not be deleted.",
-                $"sourceDeleteError={deleted.Error!.Code};destinationState=complete"));
+        options ??= new StorageTransferOptions();
+        var validation = options.Validate();
+        if (validation.IsFailure) return validation;
+        var source = NormalizeRequired(sourcePath);
+        if (source.IsFailure) return Result.Failure(source.Error!);
+        var destination = NormalizeRequired(destinationPath);
+        if (destination.IsFailure) return Result.Failure(destination.Error!);
+        var relationship = StorageTransferPath.ValidateDistinct(source.Value!, destination.Value!);
+        if (relationship.IsFailure) return relationship;
+        StorageItem copied;
+        try
+        {
+            var info = await SourceInfoAsync(source.Value!, options.SourceVersionId, cancellationToken).ConfigureAwait(false);
+            if (info.IsFailure) return Result.Failure(info.Error!);
+            if (info.Value!.ItemType == StorageItemType.Directory)
+            {
+                relationship = StorageTransferPath.ValidateDirectoryDestination(source.Value!, destination.Value!);
+                if (relationship.IsFailure) return relationship;
+                return await ObjectStoreMoves.MoveDirectoryAsync(this, source.Value!, destination.Value!, options, cancellationToken).ConfigureAwait(false);
+            }
+            var result = await CopyFileAsync(source.Value!, destination.Value!, info.Value, options, cancellationToken).ConfigureAwait(false);
+            if (result.IsFailure) return result;
+            copied = info.Value;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result.Failure(Map(error, "Move Swift object")); }
+
+        // Committed: the source goes only while it is the version that was copied, and a cancel no longer applies.
+        try
+        {
+            var current = await GetInfoAsync(source.Value!, CancellationToken.None).ConfigureAwait(false);
+            if (current.IsFailure)
+                return current.Error!.Code == StorageErrors.NotFoundCode
+                    ? Result.Success()
+                    : Result.Failure(ObjectStoreMoves.SourceKept("Swift", source.Value!, current.Error!));
+            if (!StagedWriter.SameETag(copied.ETag, current.Value!.ETag) ||
+                (options.SourceVersionId is not null && !string.Equals(copied.VersionId, current.Value.VersionId, StringComparison.Ordinal)))
+                return Result.Failure(ObjectStoreMoves.SourceKept("Swift", source.Value!,
+                    StorageErrors.Conflict("The Swift source changed after it was copied, so it was not deleted.")));
+            var deleted = await DeleteObjectAsync(ToKey(source.Value!), CancellationToken.None, ignoreMissing: true).ConfigureAwait(false);
+            return deleted.IsSuccess ? deleted : Result.Failure(ObjectStoreMoves.SourceKept("Swift", source.Value!, deleted.Error!));
+        }
+        catch (Exception error)
+        {
+            return Result.Failure(ObjectStoreMoves.SourceKept("Swift", source.Value!, Map(error, "Delete moved Swift object")));
+        }
+    }
+
+    /// <inheritdoc />
+    ValueTask<StorageConditionEnforcement> IStorageConditionEnforcementSource.GetEnforcementAsync(StorageConditionKind kind, bool serverSideCopy, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(kind == StorageConditionKind.CreateOnly && !serverSideCopy
+            ? StorageConditionEnforcement.Atomic
+            : StorageConditionEnforcement.CheckedBeforeCommit);
+
+    /// <summary>A copy or move source: the object (at <paramref name="versionId"/> when set), or a directory.</summary>
+    private async Task<Result<StorageItem>> SourceInfoAsync(string path, string? versionId, CancellationToken cancellationToken)
+    {
+        if (versionId is null)
+            return await GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(
+            () => new HttpRequestMessage(HttpMethod.Head, ObjectUri(ToKey(path), versionId)),
+            cancellationToken).ConfigureAwait(false);
+        return response.IsSuccessStatusCode
+            ? Result<StorageItem>.Success(ToItem(path, response))
+            : Result<StorageItem>.Failure(FromStatus(response, "Get Swift object version"));
+    }
+
+    /// <summary>Copies one object on the server, pinned to the version <paramref name="source"/> describes.</summary>
+    private async Task<Result> CopyFileAsync(string sourcePath, string destinationPath, StorageItem source, StorageTransferOptions options, CancellationToken cancellationToken)
+    {
+        if (options.DestinationCondition is { IsEmpty: false })
+            return Result.Failure(StorageErrors.Unsupported(
+                "Swift has no destination condition on COPY, so a server-side copy cannot keep the destination condition."));
+        if (options.ExpectedSourceETag is { } expected && !StagedWriter.SameETag(expected, source.ETag))
+            return Result.Failure(StorageErrors.Conflict(
+                $"The Swift source '{sourcePath}' changed since it was read.",
+                $"expectedETag={expected.Trim('"')};actualETag={source.ETag}"));
+        var destinationKey = ToKey(destinationPath);
+        if (!options.Overwrite)
+        {
+            // Swift applies If-None-Match on COPY to the source, so the destination can only be checked first.
+            using var head = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Head, ObjectUri(destinationKey)),
+                cancellationToken).ConfigureAwait(false);
+            if (head.IsSuccessStatusCode) return Result.Failure(StorageErrors.Conflict("The Swift destination already exists."));
+            if (head.StatusCode != HttpStatusCode.NotFound) return Result.Failure(FromStatus(head, "Check Swift copy destination"));
+        }
+        using var response = await SendAsync(() =>
+        {
+            var request = new HttpRequestMessage(new HttpMethod("COPY"), ObjectUri(ToKey(sourcePath), options.SourceVersionId));
+            request.Headers.TryAddWithoutValidation("Destination", "/" + Uri.EscapeDataString(_configuration.Container) + "/" + EncodeObjectPath(destinationKey));
+            // Applied to the source: the copy fails with 412 if the source is no longer the version read.
+            if (source.ETag is not null) request.Headers.TryAddWithoutValidation("If-Match", QuoteETag(source.ETag));
+            return request;
+        }, cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode) return Result.Success();
+        return Result.Failure(response.StatusCode == HttpStatusCode.PreconditionFailed
+            ? StorageErrors.Conflict($"The Swift source '{sourcePath}' changed since it was read.", "httpStatus=412")
+            : FromStatus(response, "Copy Swift object"));
+    }
+
+    /// <summary>Compares an object with a condition the server would not enforce itself.</summary>
+    private static Result CheckCondition(StorageItem current, StorageMutationCondition? condition, string operation)
+    {
+        if (condition is null or { IsEmpty: true }) return Result.Success();
+        if (condition.ExpectedETag is { } etag && !StagedWriter.SameETag(etag, current.ETag))
+            return Result.Failure(StorageErrors.Conflict($"The Swift object ETag no longer matches the requested {operation} condition."));
+        if (condition.ExpectedVersionId is { } version && !string.Equals(version, current.VersionId, StringComparison.Ordinal))
+            return Result.Failure(StorageErrors.Conflict($"The Swift object version no longer matches the requested {operation} condition."));
+        return Result.Success();
     }
 
     /// <inheritdoc />
@@ -482,6 +618,10 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
             if (info.Value!.ItemType != StorageItemType.File)
                 return Result<StorageItem>.Failure(StorageErrors.Conflict(
                     "Swift metadata can only be updated on an object."));
+            // The If-Match sent below is not enforced by every Swift deployment: the ETag is compared here as well.
+            if (options.ExpectedETag is { } expectedETag && !StagedWriter.SameETag(expectedETag, info.Value.ETag))
+                return Result<StorageItem>.Failure(StorageErrors.Conflict(
+                    "The Swift object ETag no longer matches the metadata update condition."));
 
             using var response = await SendAsync(() =>
             {
@@ -757,47 +897,19 @@ public sealed class SwiftStorageBackend : IStorageBackend, IStorageMetadataServi
     private async Task<Result> DeleteObjectAsync(
         string key,
         CancellationToken cancellationToken,
-        bool ignoreMissing = false,
-        string? ifMatch = null)
+        bool ignoreMissing = false)
     {
         using var response = await SendAsync(
-            () =>
-            {
-                var request = new HttpRequestMessage(HttpMethod.Delete, ObjectUri(key));
-                if (ifMatch is not null)
-                    request.Headers.TryAddWithoutValidation("If-Match", QuoteETag(ifMatch));
-                return request;
-            },
+            () => new HttpRequestMessage(HttpMethod.Delete, ObjectUri(key)),
             cancellationToken).ConfigureAwait(false);
         if (response.IsSuccessStatusCode || ignoreMissing && response.StatusCode == HttpStatusCode.NotFound)
             return Result.Success();
         return Result.Failure(FromStatus(response, "Delete Swift object"));
     }
 
-    private async Task<Result> CopyObjectAsync(string sourceKey, string destinationKey, bool overwrite, CancellationToken cancellationToken)
-    {
-        if (!overwrite)
-        {
-            using var head = await SendAsync(
-                () => new HttpRequestMessage(HttpMethod.Head, ObjectUri(destinationKey)),
-                cancellationToken).ConfigureAwait(false);
-            if (head.IsSuccessStatusCode) return Result.Failure(StorageErrors.Conflict("The Swift destination already exists."));
-            if (head.StatusCode != HttpStatusCode.NotFound) return Result.Failure(FromStatus(head, "Check Swift copy destination"));
-        }
-        using var response = await SendAsync(() =>
-        {
-            var request = new HttpRequestMessage(new HttpMethod("COPY"), ObjectUri(sourceKey));
-            request.Headers.TryAddWithoutValidation("Destination", "/" + Uri.EscapeDataString(_configuration.Container) + "/" + EncodeObjectPath(destinationKey));
-            if (!overwrite) request.Headers.TryAddWithoutValidation("If-None-Match", "*");
-            return request;
-        }, cancellationToken).ConfigureAwait(false);
-        return response.IsSuccessStatusCode
-            ? Result.Success()
-            : Result.Failure(FromStatus(response, "Copy Swift object"));
-    }
-
     private Uri ContainerUri() => new($"{_storageUrl}/{Uri.EscapeDataString(_configuration.Container)}", UriKind.Absolute);
-    private Uri ObjectUri(string key) => new($"{ContainerUri()}/{EncodeObjectPath(key)}", UriKind.Absolute);
+    private Uri ObjectUri(string key, string? versionId = null) =>
+        new($"{ContainerUri()}/{EncodeObjectPath(key)}{(versionId is null ? string.Empty : "?version-id=" + Uri.EscapeDataString(versionId))}", UriKind.Absolute);
     private static string EncodeObjectPath(string key) => string.Join("/", key.Split('/').Select(Uri.EscapeDataString));
     private static Uri KeystoneTokenUri(string authenticationUrl)
     {

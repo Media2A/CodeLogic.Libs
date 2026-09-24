@@ -7,12 +7,12 @@ namespace CL.Storage.Configuration;
 public enum SwiftAuthenticationMode
 {
     /// <summary>Authenticates through Keystone v3 using a user and project.</summary>
-    KeystoneV3Password,
+    KeystoneV3Password = 0,
     /// <summary>Uses a pre-issued token and storage URL.</summary>
-    StaticToken,
+    StaticToken = 1,
     /// <summary>Authenticates with Swift TempAuth v1 (<c>X-Auth-User</c> / <c>X-Auth-Key</c>).</summary>
     /// <remarks><see cref="SwiftConnectionConfig.Username"/> is usually <c>account:user</c> and <see cref="SwiftConnectionConfig.Password"/> the key.</remarks>
-    TempAuthV1
+    TempAuthV1 = 2
 }
 
 /// <summary>Defines named OpenStack Swift connections.</summary>

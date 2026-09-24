@@ -52,7 +52,10 @@ internal static class StorageConflictResolver
         }
         var current = existing.Value!;
         if (current.ItemType == StorageItemType.Directory)
-            return Result<ConflictDecision>.Failure(StorageErrors.Conflict($"The destination '{path}' is a directory."));
+            return policy == StorageConflictPolicy.Rename
+                // A folder in the way is just another taken name.
+                ? await RenameAsync(destination, path, cancellationToken).ConfigureAwait(false)
+                : Result<ConflictDecision>.Failure(StorageErrors.Conflict($"The destination '{path}' is a directory."));
 
         return policy switch
         {
@@ -83,8 +86,6 @@ internal static class StorageConflictResolver
         if (validation.IsFailure) return Result<StorageItem>.Failure(validation.Error!);
         var normalized = StoragePath.Normalize(path);
         if (normalized.IsFailure) return Result<StorageItem>.Failure(normalized.Error!);
-        if (options.ConflictPolicy == StorageConflictPolicy.Resume)
-            return await ResumeAsync(destination, normalized.Value!, source, options, cancellationToken).ConfigureAwait(false);
         var decision = await ResolveAsync(
             destination,
             normalized.Value!,
@@ -102,41 +103,15 @@ internal static class StorageConflictResolver
             cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Continues an upload: appends only the bytes the destination is missing. The destination prefix is
-    /// trusted to match the source, as in FTP REST/APPE resume; verify with a checksum when that matters.
-    /// </summary>
-    private static async Task<Result<StorageItem>> ResumeAsync(
-        IStorageService destination,
-        string path,
-        Stream source,
-        StorageUploadOptions options,
-        CancellationToken cancellationToken)
+    /// <summary>Why a policy skipped a file.</summary>
+    internal static StorageSkipReason SkipReasonFor(StorageConflictPolicy policy) => policy switch
     {
-        var fresh = options with { ConflictPolicy = null, Overwrite = true };
-        var existing = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false);
-        if (existing.IsFailure)
-        {
-            return existing.Error!.Code == StorageErrors.NotFoundCode
-                ? await destination.UploadAsync(path, source, fresh, cancellationToken).ConfigureAwait(false)
-                : Result<StorageItem>.Failure(existing.Error);
-        }
-        if (existing.Value!.ItemType != StorageItemType.File)
-            return Result<StorageItem>.Failure(StorageErrors.Conflict($"The destination '{path}' is not a file."));
-        if (!source.CanSeek)
-            return Result<StorageItem>.Failure(StorageErrors.Unsupported("Resuming an upload needs a seekable source stream."));
-        if (destination is not IStorageAppendService append || !destination.Capabilities.Supports(StorageFeature.Append))
-            return Result<StorageItem>.Failure(StorageErrors.Unsupported("This storage connection cannot append, so uploads cannot be resumed."));
-
-        var remaining = source.Length - source.Position;
-        var present = existing.Value.Size ?? 0;
-        if (present == remaining)
-            return Result<StorageItem>.Success(existing.Value);
-        if (present > remaining)
-            return await destination.UploadAsync(path, source, fresh, cancellationToken).ConfigureAwait(false);
-        source.Seek(present, SeekOrigin.Current);
-        return await append.AppendAsync(path, source, cancellationToken).ConfigureAwait(false);
-    }
+        StorageConflictPolicy.OverwriteIfNewer => StorageSkipReason.SourceNotNewer,
+        StorageConflictPolicy.OverwriteIfSizeDiffers => StorageSkipReason.SameSize,
+        StorageConflictPolicy.OverwriteIfNewerOrSizeDiffers => StorageSkipReason.Unchanged,
+        StorageConflictPolicy.Resume => StorageSkipReason.AlreadyComplete,
+        _ => StorageSkipReason.DestinationExists
+    };
 
     /// <summary>Source is newer when it is later by more than the tolerance; unknown times cannot prove it older.</summary>
     internal static bool IsNewer(DateTimeOffset? source, DateTimeOffset? destination) =>
@@ -146,16 +121,26 @@ internal static class StorageConflictResolver
     internal static bool SizeDiffers(long? source, long? destination) =>
         source is not { } s || destination is not { } d || s != d;
 
-    /// <summary>Returns <c>name (1).ext</c>, <c>name (2).ext</c>, … for the first free name.</summary>
+    /// <summary>
+    /// Returns <c>name (1).ext</c>, <c>name (2).ext</c>, … for the first free name. A name that is already
+    /// numbered counts on (<c>name (1).txt</c> gives <c>name (2).txt</c>, not <c>name (1) (1).txt</c>), and a
+    /// trailing dot is not an extension (<c>file.</c> gives <c>file. (1)</c>, never the Windows-invalid <c>file (1).</c>).
+    /// </summary>
     internal static string Candidate(string path, int attempt)
     {
         var slash = path.LastIndexOf('/');
         var directory = slash < 0 ? string.Empty : path[..(slash + 1)];
         var name = path[(slash + 1)..];
         var dot = name.LastIndexOf('.');
-        var (stem, extension) = dot > 0 ? (name[..dot], name[dot..]) : (name, string.Empty);
+        var (stem, extension) = dot > 0 && dot < name.Length - 1 ? (name[..dot], name[dot..]) : (name, string.Empty);
+        var numbered = NumberedStem.Match(stem);
+        if (numbered.Success && int.TryParse(numbered.Groups[2].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var start) && start < int.MaxValue - MaxRenameAttempts)
+            return $"{directory}{numbered.Groups[1].Value} ({start + attempt}){extension}";
         return $"{directory}{stem} ({attempt}){extension}";
     }
+
+    private static readonly System.Text.RegularExpressions.Regex NumberedStem =
+        new(@"^(.+) \((\d{1,9})\)$", System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     private static Result<ConflictDecision> Skip(string path, StorageItem current) =>
         Result<ConflictDecision>.Success(new ConflictDecision(true, path, false, current));

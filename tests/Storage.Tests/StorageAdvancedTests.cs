@@ -279,12 +279,13 @@ public sealed class StorageAdvancedTests
         }.Validate();
         Assert.True(incompatible.IsFailure);
 
+        // Local checks a condition right before replacing the file; a missing file is not the expected version.
         var conditional = await local.UploadBytesAsync("conditional.bin", [1], new StorageUploadOptions
         {
             Condition = new StorageMutationCondition { ExpectedETag = "etag" }
         });
         Assert.True(conditional.IsFailure);
-        Assert.Equal(StorageErrors.UnsupportedCode, conditional.Error!.Code);
+        Assert.Equal(StorageErrors.ConflictCode, conditional.Error!.Code);
     }
 
     [Fact]

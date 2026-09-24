@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
@@ -18,7 +19,9 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
         var value = (WebDavConnectionConfig)configuration;
         var endpoint = new Uri(value.Endpoint, UriKind.Absolute);
         var identity = new ServerIdentityRecorder();
-        var http = CreateHttpClient(value, endpoint, identity);
+        // Owned by the backend, which disposes it with its HTTP stack.
+        var certificate = ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword);
+        var http = CreateHttpClient(value, endpoint, identity, certificate);
         var client = new Client(http)
         {
             Server = endpoint.GetLeftPart(UriPartial.Authority) + "/",
@@ -38,7 +41,9 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             http,
             new Uri(endpoint.GetLeftPart(UriPartial.Authority)))
         {
-            Identity = identity
+            Identity = identity,
+            ListingScope = ProviderSettingsKey.For(value),
+            Owned = certificate
         };
     }
 
@@ -46,7 +51,7 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
     /// Builds the HTTP stack directly so TLS pinning, client certificates, proxies, connection limits,
     /// and Digest/NTLM/Negotiate all apply; the WebDAV client's own constructors expose none of them.
     /// </summary>
-    internal static HttpClient CreateHttpClient(WebDavConnectionConfig value, Uri endpoint, ServerIdentityRecorder? identity = null)
+    internal static HttpClient CreateHttpClient(WebDavConnectionConfig value, Uri endpoint, ServerIdentityRecorder? identity = null, X509Certificate2? certificate = null)
     {
         var handler = new SocketsHttpHandler
         {
@@ -74,12 +79,39 @@ internal sealed class WebDavStorageBackendFactory : IStorageBackendFactory
             identity?.RecordCertificate(certificate, accepted);
             return accepted;
         };
-        if (!string.IsNullOrWhiteSpace(value.ClientCertificatePath))
+        if (certificate is not null)
+            handler.SslOptions.ClientCertificates = [certificate];
+        if (identity is not null)
         {
-            handler.SslOptions.ClientCertificates =
-            [
-                X509CertificateLoader.LoadPkcs12FromFile(value.ClientCertificatePath, value.ClientCertificatePassword)
-            ];
+            // Called at the start of every handshake and again when the server asks for a certificate; only the
+            // server asking counts, and it is attributed to the connection it asked on (see TlsConnectionWatch).
+            handler.SslOptions.LocalCertificateSelectionCallback = (sender, _, _, remoteCertificate, acceptableIssuers) =>
+            {
+                if (remoteCertificate is not null || acceptableIssuers is { Length: > 0 })
+                {
+                    identity.RecordClientCertificateRequest();
+                    TlsConnectionWatch.OnCertificateSelection(sender, remoteCertificate, acceptableIssuers);
+                }
+                return certificate!;
+            };
+            if (endpoint.Scheme == Uri.UriSchemeHttps)
+            {
+                // Each connection's transport is watched, so a certificate refusal is told from an ordinary drop.
+                handler.ConnectCallback = async (context, cancellationToken) =>
+                {
+                    var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                    try
+                    {
+                        await socket.ConnectAsync(context.DnsEndPoint, cancellationToken).ConfigureAwait(false);
+                        return new TlsConnectionWatch(new NetworkStream(socket, ownsSocket: true), identity);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                };
+            }
         }
 
         switch (value.AuthenticationMode)

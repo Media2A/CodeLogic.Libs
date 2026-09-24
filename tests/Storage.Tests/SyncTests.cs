@@ -89,12 +89,15 @@ public sealed class SyncTests
 
         var report = (await a.SyncAsync("", b, "", new StorageSyncOptions { Direction = StorageSyncDirection.Mirror, DeleteExtraneous = true })).Value!;
 
-        Assert.Equal(2, report.Deleted); // the directory once, not each file in it
+        // Each file is checked and deleted on its own, then the emptied folders (deepest first).
+        Assert.Equal(4, report.Deleted);
+        Assert.Equal(["stale-dir/deep/x.txt", "stale-dir/deep", "stale-dir", "stale.txt"],
+            report.Results.Where(result => result.Action.Kind == StorageSyncActionKind.DeleteFromDestination).Select(result => result.Action.RelativePath));
         Assert.True((await a.CompareAsync("", b, "")).Value!.Identical);
     }
 
     [Fact]
-    public async Task Two_way_sync_copies_newer_files_in_both_directions()
+    public async Task Two_way_sync_with_newer_wins_copies_newer_files_in_both_directions()
     {
         using var directory = new TestDirectory();
         var (a, b) = Pair(directory);
@@ -103,7 +106,7 @@ public sealed class SyncTests
         await Write(a, "shared.txt", "old", Old);
         await Write(b, "shared.txt", "newest", New);
 
-        var report = (await a.SyncAsync("", b, "", new StorageSyncOptions { Direction = StorageSyncDirection.TwoWay })).Value!;
+        var report = (await a.SyncAsync("", b, "", new StorageSyncOptions { Direction = StorageSyncDirection.TwoWay, ConflictPolicy = StorageSyncConflictPolicy.NewerWins })).Value!;
 
         Assert.Equal(3, report.Copied);
         Assert.Equal("from b", await Read(a, "b-only.txt"));
