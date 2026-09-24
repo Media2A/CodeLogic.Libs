@@ -411,6 +411,9 @@ internal static class StagedWriter
         return new PromoteOutcome(moved, enforcement, Touched: !refused, []);
     }
 
+    /// <summary>How many times <see cref="ConfirmPromotedAsync"/> reads a committed destination back on transient errors.</summary>
+    private const int ReadBackAttempts = 3;
+
     /// <summary>Every <see cref="StorageErrorInfo.LeftBehindKey"/> entry in an error's details.</summary>
     internal static IReadOnlyList<string> LeftBehind(Error? error)
     {
@@ -457,14 +460,23 @@ internal static class StagedWriter
     /// Confirms a promoted destination: it has the staged length and, where the server keeps a SHA-256, the
     /// digest that was verified. A rename does not change content, so nothing is read back. A mismatch is a
     /// <c>storage.conflict</c> carrying <c>destinationState=complete</c>: the destination was committed and
-    /// must be reported, not rolled back (it may be another writer's newer content).
+    /// must be reported, not rolled back (it may be another writer's newer content). A read-back that fails is
+    /// retried a few times while the error is transient; if it still fails, the error carries
+    /// <c>destinationState=complete</c> too, since the content was committed before it.
     /// </summary>
     public static async Task<Result<StorageItem>> ConfirmPromotedAsync(IStorageService destination, string path, StagedContent content, CancellationToken cancellationToken)
     {
         Result<StorageItem> info;
-        try { info = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false); }
-        catch (Exception error) when (error is not OperationCanceledException) { return Result<StorageItem>.Failure(StorageErrors.FromException(error, "Confirm transfer destination")); }
-        if (info.IsFailure) return info;
+        for (var attempt = 1; ; attempt++)
+        {
+            try { info = await destination.GetInfoAsync(path, cancellationToken).ConfigureAwait(false); }
+            catch (Exception error) when (error is not OperationCanceledException) { info = Result<StorageItem>.Failure(StorageErrors.FromException(error, "Confirm transfer destination")); }
+            if (info.IsSuccess || attempt >= ReadBackAttempts || !StorageErrorInfo.IsTransient(info.Error)) break;
+            await Task.Delay(TimeSpan.FromMilliseconds(100 * attempt), cancellationToken).ConfigureAwait(false);
+        }
+        if (info.IsFailure)
+            return Result<StorageItem>.Failure(StorageErrorInfo.DestinationCommitted(info.Error) ? info.Error!
+                : AppendDetails(info.Error!, $"{StorageErrorInfo.DestinationStateKey}=complete"));
         var total = content.Bytes + content.BytesResumed;
         if (info.Value!.Size is { } size && size != total)
             return Result<StorageItem>.Failure(StorageErrors.Conflict(

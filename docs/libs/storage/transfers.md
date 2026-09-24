@@ -284,10 +284,9 @@ When `CommitAsync` fails, the destination is as it was, unless the error carries
 `destinationState=complete` (`StorageErrorInfo.DestinationCommitted`): then the content was committed, but
 it does not read back as written (another writer may have replaced it) or the provider left an internal
 object behind. Every internal object still there (a staging object that could not be removed, the
-provider's own backup) is named by a `leftBehind` entry in the error's details. One gap: when the promote
-succeeded but the destination could not be read back afterwards, the read's own error is returned without
-`destinationState=complete`, so a failed commit whose error is not `storage.conflict` may still have
-committed; check the destination before retrying.
+provider's own backup) is named by a `leftBehind` entry in the error's details. When the promote succeeded
+but the destination could not be read back afterwards (a transient read is retried a few times first), the
+read's error is returned with `destinationState=complete` too.
 
 ## When the destination already exists
 

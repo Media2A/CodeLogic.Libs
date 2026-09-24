@@ -345,6 +345,10 @@ are listed under *Added*, even where they changed while this release was being b
   tolerance could be deleted or overwritten by a sync; a folder left with old staging stayed `Stale` for
   ever; queue controls could wait for ever, a failed remove could leave a job unstarted, and a newer-schema
   record could be run by an older worker.
+- A staged upload or `StorageWriteStream.CommitAsync` whose content was committed, but whose read-back
+  afterwards failed, returned the read's error without `destinationState=complete`, so it looked like a
+  plain failure. The read-back is retried on transient errors, and a failure after it now carries
+  `destinationState=complete`.
 
 ## 2026-09-22
 
