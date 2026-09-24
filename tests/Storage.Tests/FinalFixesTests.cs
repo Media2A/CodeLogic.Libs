@@ -3,6 +3,7 @@ using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
 using CL.Storage.Providers;
+using CL.Storage.Providers.S3;
 using CL.Storage.Registry;
 using CodeLogic.Core.Results;
 using Xunit;
@@ -153,5 +154,28 @@ public sealed class FinalFixesTests
         Assert.False(report.Succeeded);
         Assert.Equal(["validate", "connect"], report.Steps.Select(step => step.Name));
         Assert.False(SharedResources.Holds(key));
+    }
+
+    // ---------------------------------------------------------------- F3
+
+    [Fact] // needs-review F3
+    public async Task The_condition_query_for_an_upload_answers_what_a_conditional_upload_on_MinIO_really_does()
+    {
+        // MinIO: conditions are enforced on PutObject and ignored on CopyObject.
+        var minio = ProviderFakeS3.Create(enforceCopyConditions: false, enforceDeleteCondition: false);
+        var existing = minio.Put("f.bin", [1]);
+        await using var backend = new S3StorageBackend("minio", minio.Client, "bucket");
+
+        var answered = await backend.GetConditionEnforcementAsync(StorageConditionKind.MatchVersion);
+        var uploaded = await backend.UploadAsync("f.bin", new MemoryStream([2]), new StorageUploadOptions
+        {
+            Condition = new StorageMutationCondition { ExpectedETag = existing.ETag }
+        });
+
+        Assert.True(uploaded.IsSuccess, uploaded.Error?.ToString());
+        // The upload was staged and promoted with a copy, so its condition was checked just before the commit.
+        var staged = minio.Copies.Any(copy => copy.DestinationKey == "f.bin");
+        Assert.Equal(staged ? StorageConditionEnforcement.CheckedBeforeCommit : StorageConditionEnforcement.Atomic, answered);
+        Assert.True(staged);
     }
 }

@@ -1501,7 +1501,10 @@ public sealed class S3StorageBackend :
     /// it has not run yet): <see cref="StorageConditionEnforcement.Atomic"/> only for a condition the server was seen to
     /// enforce on the request that commits (<c>PutObject</c>/<c>CompleteMultipartUpload</c> for uploads,
     /// <c>CopyObject</c> for server-side copies, <c>DeleteObject</c> for deletes). MinIO, for one, ignores both
-    /// conditions on <c>CopyObject</c> and <c>If-Match</c> on <c>DeleteObject</c>.
+    /// conditions on <c>CopyObject</c> and <c>If-Match</c> on <c>DeleteObject</c>. An upload with a version condition is
+    /// staged and promoted with <c>CopyObject</c> unless the server enforces <c>If-Match</c> on both requests (the
+    /// <see cref="StorageFeature.ConditionalUpdate"/> flag), so it is <see cref="StorageConditionEnforcement.Atomic"/>
+    /// only then.
     /// </remarks>
     async ValueTask<StorageConditionEnforcement> IStorageConditionEnforcementSource.GetEnforcementAsync(StorageConditionKind kind, bool serverSideCopy, CancellationToken cancellationToken)
     {
@@ -1511,9 +1514,11 @@ public sealed class S3StorageBackend :
             StorageConditionKind.MatchVersion => serverSideCopy ? S3ProbedCondition.CopyMatch : S3ProbedCondition.PutMatch,
             _ => S3ProbedCondition.DeleteMatch
         };
-        return await ConditionStateAsync(probed, cancellationToken).ConfigureAwait(false) == S3ConditionState.Enforced
-            ? StorageConditionEnforcement.Atomic
-            : StorageConditionEnforcement.CheckedBeforeCommit;
+        var enforced = await ConditionStateAsync(probed, cancellationToken).ConfigureAwait(false) == S3ConditionState.Enforced;
+        // As StorageTransferPipeline.NeedsConditionStaging decides: the promote's CopyObject must enforce it too.
+        if (enforced && kind == StorageConditionKind.MatchVersion && !serverSideCopy)
+            enforced = await ConditionStateAsync(S3ProbedCondition.CopyMatch, cancellationToken).ConfigureAwait(false) == S3ConditionState.Enforced;
+        return enforced ? StorageConditionEnforcement.Atomic : StorageConditionEnforcement.CheckedBeforeCommit;
     }
 
     /// <summary>How long after a probe that could not finish the next one may run; doubled for each further failure, up to 32 times.</summary>

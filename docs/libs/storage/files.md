@@ -115,9 +115,9 @@ Treat signed URLs as credentials and never log them.
   is probed). Everywhere else, MinIO included once the probe has run, the content is staged and the
   condition checked immediately before the staged file replaces the destination. An upload returns the
   stored item, not how its condition was enforced; ask the connection with
-  `GetConditionEnforcementAsync` (see [Guaranteed transfers](transfers.md#guaranteed-transfers)), or check
-  `StorageFeature.ConditionalUpdate`, which is what decides the staging (on MinIO,
-  `GetConditionEnforcementAsync(MatchVersion)` answers `Atomic` for uploads although they are staged).
+  `GetConditionEnforcementAsync(MatchVersion)` (see [Guaranteed transfers](transfers.md#guaranteed-transfers);
+  on MinIO it answers `CheckedBeforeCommit`), or check `StorageFeature.ConditionalUpdate`, which is what
+  decides the staging.
 - **Create-only uploads** (`Overwrite = false`, not otherwise staged) are atomic on Local, WebDAV, S3
   servers that enforce `If-None-Match` on `PutObject` (AWS and MinIO), Azure Blob, Google Cloud, and Swift.
   FTP and SFTP have no atomic create-if-absent and do not declare `StorageFeature.ConditionalCreate`; a

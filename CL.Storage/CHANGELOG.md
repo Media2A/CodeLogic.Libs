@@ -354,6 +354,9 @@ are listed under *Added*, even where they changed while this release was being b
   SFTP connection with the same settings; it now opens its own sessions and closes them when it ends.
 - Invalid settings passed to `AddOrUpdateConnectionAsync` are `storage.invalid_content` (were
   `storage.provider_error`), as `TestConnectionAsync` reports them.
+- On MinIO, `GetConditionEnforcementAsync(MatchVersion)` answered `Atomic` for uploads, which are staged
+  there and checked just before the commit; it now answers `CheckedBeforeCommit` unless the server
+  enforces `If-Match` on both `PutObject` and `CopyObject`.
 
 ## 2026-09-22
 
