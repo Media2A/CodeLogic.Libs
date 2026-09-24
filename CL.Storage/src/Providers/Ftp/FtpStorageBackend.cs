@@ -21,7 +21,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
         StorageFeature.DirectoryMove |
         StorageFeature.RelayedCopy |
         StorageFeature.ServerSideMove |
-        // A rename on the server (RNFR/RNTO, SFTP rename, WebDAV MOVE) moves a whole tree in one step,
+        // A rename on the server (RNFR/RNTO) moves a whole tree in one step,
         // so folder moves no longer fall back to copy-then-delete through the client.
         StorageFeature.AtomicMove |
         StorageFeature.RangeReads |

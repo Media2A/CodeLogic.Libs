@@ -374,6 +374,8 @@ are listed under *Added*, even where they changed while this release was being b
   promote kept only one from committing. The marker is now read back after a short pause.
 - Stopping one `StorageLibrary` closed the idle, lingering session pools of every other library in the
   process; it now closes only pools no other library has used.
+- Comments in the FTP and SFTP backends no longer say a WebDAV `MOVE` is atomic (WebDAV does not declare
+  `AtomicMove`).
 
 ## 2026-09-22
 
