@@ -364,6 +364,9 @@ are listed under *Added*, even where they changed while this release was being b
 - Removing a running queue job deleted its record even when the attempt ended `NeedsReconciliation`
   (a move whose copy committed), so nobody was told both source and destination exist. That job is now
   kept, and `RemoveAsync` returns `storage.conflict`.
+- A queue job whose claim kept failing in the job store was retried for ever; failed claims now count
+  towards the store-failure limit (doubling delay, failed after 8 in a row). A job re-queued after a store
+  failure announced its retry with `storage.cancelled`; it is now `storage.unavailable`.
 
 ## 2026-09-22
 

@@ -1,6 +1,7 @@
 using CL.Storage.Abstractions;
 using CL.Storage.Configuration;
 using CL.Storage.Errors;
+using CL.Storage.Events;
 using CL.Storage.Models;
 using CL.Storage.Providers;
 using CL.Storage.Providers.Local;
@@ -315,5 +316,86 @@ public sealed class FinalFixesTests
         Assert.Equal(StorageTransferState.NeedsReconciliation, queue.Get(job.Id)?.State);
         Assert.Equal(StorageTransferState.NeedsReconciliation, (await store.GetAsync(job.Id, default))?.State);
         Assert.True((await destination.ExistsAsync("a.bin")).Value);
+    }
+
+    // ---------------------------------------------------------------- F6
+
+    /// <summary>An in-memory job store whose claims and saves can be made to throw.</summary>
+    private sealed class FailingStore : IStorageTransferJobStore
+    {
+        public InMemoryStorageTransferJobStore Inner { get; } = new();
+        public Func<bool> ClaimThrows { get; set; } = () => false;
+        public Func<StorageTransferJobRecord, bool> SaveThrows { get; set; } = _ => false;
+        public int Claims;
+
+        public Task<IReadOnlyList<StorageTransferJobRecord>> LoadAsync(CancellationToken cancellationToken) => Inner.LoadAsync(cancellationToken);
+        public Task<StorageTransferJobRecord?> AddAsync(StorageTransferJobRecord record, CancellationToken cancellationToken) => Inner.AddAsync(record, cancellationToken);
+        public Task<StorageTransferJobRecord?> GetAsync(string jobId, CancellationToken cancellationToken) => Inner.GetAsync(jobId, cancellationToken);
+        public Task<StorageTransferLease?> TryClaimAsync(string jobId, string workerId, long expectedRevision, TimeSpan duration, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Claims);
+            if (ClaimThrows()) throw new IOException("The job store is down.");
+            return Inner.TryClaimAsync(jobId, workerId, expectedRevision, duration, cancellationToken);
+        }
+        public Task<StorageTransferLease?> RenewAsync(StorageTransferLease lease, TimeSpan duration, CancellationToken cancellationToken) => Inner.RenewAsync(lease, duration, cancellationToken);
+        public Task<StorageTransferJobRecord?> SaveAsync(StorageTransferJobRecord record, StorageTransferLease? lease, bool releaseLease, CancellationToken cancellationToken)
+        {
+            if (SaveThrows(record)) throw new IOException("The job store is down.");
+            return Inner.SaveAsync(record, lease, releaseLease, cancellationToken);
+        }
+        public Task<bool> ReleaseAsync(StorageTransferLease lease, CancellationToken cancellationToken) => Inner.ReleaseAsync(lease, cancellationToken);
+        public Task<bool> RemoveAsync(string jobId, long expectedRevision, StorageTransferLease? lease, CancellationToken cancellationToken) =>
+            Inner.RemoveAsync(jobId, expectedRevision, lease, cancellationToken);
+    }
+
+    [Fact] // needs-review F6
+    public async Task A_job_whose_claim_always_throws_fails_after_the_store_failure_limit()
+    {
+        var (library, directory, destination) = await QueueLibraryAsync();
+        using var _l = library; using var _d = directory;
+        await destination.UploadBytesAsync("a.bin", [1]);
+        var store = new FailingStore { ClaimThrows = () => true };
+        var opened = await library.OpenTransferQueueAsync(new StorageTransferQueueOptions { Store = store, RetryBaseDelay = TimeSpan.Zero, RetryMaxDelay = TimeSpan.Zero });
+        await using var queue = opened.Value!;
+
+        var job = (await queue.EnqueueCopyAsync("Destination", "a.bin", "Destination", "b.bin")).Value!;
+        var deadline = DateTime.UtcNow + Wait;
+        while (queue.Get(job.Id)?.State != StorageTransferState.Failed && DateTime.UtcNow < deadline)
+            await Task.Delay(50);
+
+        Assert.Equal(StorageTransferState.Failed, queue.Get(job.Id)?.State);
+        Assert.Equal(StorageErrors.UnavailableCode, queue.Get(job.Id)?.Error?.Code);
+        Assert.Equal(8, Volatile.Read(ref store.Claims));
+    }
+
+    [Fact] // needs-review F6
+    public async Task A_job_requeued_after_a_store_failure_announces_its_retry_as_unavailable()
+    {
+        var events = new RecordingEventBus();
+        var directory = new TestDirectory();
+        using var _d = directory;
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path, events);
+        using var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var destination = new LocalStorageBackend("Destination", new LocalConnectionConfig { RootPath = directory.CreateDirectory("dst") });
+        Assert.True(library.RegisterBackend("Destination", destination).IsSuccess);
+        await destination.UploadBytesAsync("a.bin", [1]);
+        // The first phase the attempt records fails in the store, every time the queue tries to save it.
+        var failed = 0;
+        var store = new FailingStore
+        {
+            SaveThrows = record => record.State == StorageTransferState.Running && record.Checkpoint.Phase != StorageTransferPhase.NotStarted &&
+                Interlocked.Increment(ref failed) <= 6
+        };
+        var opened = await library.OpenTransferQueueAsync(new StorageTransferQueueOptions { Store = store, RetryBaseDelay = TimeSpan.Zero, RetryMaxDelay = TimeSpan.Zero });
+        await using var queue = opened.Value!;
+
+        var job = (await queue.EnqueueCopyAsync("Destination", "a.bin", "Destination", "b.bin")).Value!;
+        await queue.WaitForIdleAsync().WaitAsync(Wait);
+
+        Assert.True(failed > 6);
+        Assert.Equal(StorageTransferState.Completed, queue.Get(job.Id)?.State);
+        var retrying = Assert.Single(events.Published.OfType<StorageTransferRetryingEvent>());
+        Assert.Equal(StorageErrors.UnavailableCode, retrying.ErrorCode);
     }
 }

@@ -1280,8 +1280,9 @@ public sealed class StorageTransferQueue : IAsyncDisposable
         }
         catch (Exception)
         {
-            // The store failed: wait before trying this job again instead of spinning on it.
-            await StepAsideAsync(entry, claimed, storeFailed: true).ConfigureAwait(false);
+            // The store failed: wait before trying this job again instead of spinning on it, longer each time,
+            // and fail it after MaxStoreFailures in a row like any other store failure.
+            await StepAsideAsync(entry, claimed, storeFailed: true, saveFailed: true).ConfigureAwait(false);
             return;
         }
         if (lease is null)
@@ -1408,7 +1409,10 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                 var fallback = request == ControlRequest.Remove ? ControlRequest.Cancel : request;
                 var (next, isTransient, gaveUp) = Decide(entry, result, report, phase, holder, fallback);
                 transient = isTransient;
-                if (gaveUp) outcomeError = next.Failure!.ToError();
+                // Stopped by the job store (given up, or queued again): announced with the store's error, not
+                // the cancellation that stopped the transfer.
+                if (gaveUp || (holder.StoreFailed && next.State == StorageTransferState.Queued && next.Failure is not null))
+                    outcomeError = next.Failure!.ToError();
                 if (request == ControlRequest.Remove && next.State == StorageTransferState.NeedsReconciliation)
                 {
                     // Removing it would hide that a person must decide (a move whose copy committed: both source
@@ -1534,8 +1538,8 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// <summary>
     /// Gives up a job this worker could not claim or start, taking the store's record. After a store failure,
     /// or a claim refused although the record did not change, the job waits (locally) before it is tried again,
-    /// so the store is not hammered. A job whose saves keep failing (<paramref name="saveFailed"/>) waits longer
-    /// each time, and fails after <see cref="MaxStoreFailures"/> in a row.
+    /// so the store is not hammered. A job whose claims or saves keep failing (<paramref name="saveFailed"/>) waits
+    /// longer each time, and fails after <see cref="MaxStoreFailures"/> in a row.
     /// </summary>
     private async Task StepAsideAsync(Entry entry, StorageTransferJobRecord claimed, bool storeFailed = false, bool refused = false, bool saveFailed = false)
     {

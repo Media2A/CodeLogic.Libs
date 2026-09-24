@@ -515,13 +515,13 @@ newer schema fails to read). Caller-chosen ids make enqueueing idempotent, as `S
   lease while it runs. The store owns the lease fields.
 - A save with a stale lease is refused, so a worker that lost its lease never records an outcome.
 - As a result, two processes never run the same job.
-- A failing store does not wedge the queue: a failed claim is tried again after `RetryBaseDelay` (at least
-  1 s; claim failures do not count towards the limit below), renewals and
-  saves are retried while the lease holds, and a job whose outcome could not be recorded is recovered
-  later. A store failure never uses up a job's `AutomaticRetries`, but it does not go on for ever either:
-  an attempt stopped by the store is tried again after a delay that doubles from `RetryBaseDelay` (at
-  least 100 ms, at most `RetryMaxDelay`), and after 8 such attempts in a row the job fails with
-  `storage.unavailable` (only in this queue's view when the store cannot record even that).
+- A failing store does not wedge the queue: renewals and saves are retried while the lease holds, and a
+  job whose outcome could not be recorded is recovered later. A store failure never uses up a job's
+  `AutomaticRetries`, but it does not go on for ever either: a claim that fails, or an attempt the store
+  stopped, is tried again after a delay that doubles from `RetryBaseDelay` (at least 100 ms, at most
+  `RetryMaxDelay`; a re-queued attempt is announced with `storage.unavailable`), and after 8 such
+  failures in a row the job fails with `storage.unavailable` (only in this queue's view when the store
+  cannot record even that).
 - Removing, clearing, and pruning are conditional on the record's revision and lease too, so they never
   delete a job another process is running or has just retried.
 
