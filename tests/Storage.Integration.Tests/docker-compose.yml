@@ -38,7 +38,9 @@ services:
 
   # Cloud object-store emulators: no cloud account required.
   minio:
-    image: quay.io/minio/minio
+    # MinIO no longer publishes public images (quay.io and Docker Hub refuse pulls); pgsty/minio is a
+    # community build of the same server, pinned so CI does not float.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     command: server /data
     ports:
       - "9010:9000"
