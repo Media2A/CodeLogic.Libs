@@ -408,9 +408,9 @@ public sealed class NeedsReviewRound4TransferTests
             Move = (from, to, options, token) => to.StartsWith("out/", StringComparison.Ordinal) && Interlocked.Increment(ref promotes) == 2
                 ? Task.FromResult(Result.Failure(StorageErrors.Unavailable("The server is briefly unavailable.")))
                 : local.MoveAsync(from, to, options, token),
-            // The read right after the first commit fails, so what was committed is not known.
+            // The read right after the first commit fails (and so do its retries), so what was committed is not known.
             GetInfo = (path, token) => path.StartsWith("out/", StringComparison.Ordinal) && !path.Contains(".cl-storage-", StringComparison.Ordinal) &&
-                confirmReads.AddOrUpdate(path, 1, (_, n) => n + 1) == 1 && promotes == 1
+                confirmReads.AddOrUpdate(path, 1, (_, n) => n + 1) <= 3 && promotes == 1
                 ? Task.FromResult(Result<StorageItem>.Failure(StorageErrors.Unavailable("The server is briefly unavailable.")))
                 : local.GetInfoAsync(path, token)
         };
