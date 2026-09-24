@@ -369,6 +369,9 @@ are listed under *Added*, even where they changed while this release was being b
   failure announced its retry with `storage.cancelled`; it is now `storage.unavailable`.
 - `ApplySyncAsync` ignored `StorageSyncOptions.DryRun` and applied the plan; with `DryRun` it now reports
   every step `NotRun` (or `Withheld`), writes nothing, and does not save the baseline.
+- On FTP and SFTP, two writers racing for one resumable part file could both read back their own lock
+  marker (create-only is checked before the write there) and both append to it; the re-check before the
+  promote kept only one from committing. The marker is now read back after a short pause.
 
 ## 2026-09-22
 

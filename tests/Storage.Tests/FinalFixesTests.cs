@@ -424,4 +424,44 @@ public sealed class FinalFixesTests
         Assert.False((await right.ExistsAsync("a.txt")).Value);
         Assert.Null(await store.LoadAsync("s", default));
     }
+
+    // ---------------------------------------------------------------- F8
+
+    [Fact] // needs-review F8
+    public async Task Two_writers_racing_for_a_part_file_where_create_only_is_checked_before_the_write_do_not_both_get_it()
+    {
+        using var directory = new TestDirectory();
+        directory.CreateDirectory("d");
+        var checkedBoth = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checks = 0;
+        var writers = 0;
+        // Like FTP and SFTP: a create-only upload checks that the name is free, then writes, and the second of two
+        // racing writers overwrites the first one's marker a moment later.
+        InterceptBackend Server(LocalStorageBackend local) => new(local)
+        {
+            CapabilitiesMap = capabilities => new StorageCapabilities(capabilities.Features & ~StorageFeature.ConditionalCreate),
+            Upload = async (path, source, options, token) =>
+            {
+                if (!path.EndsWith(".lock", StringComparison.Ordinal) || options?.Overwrite != false)
+                    return await local.UploadAsync(path, source, options, token);
+                if ((await local.ExistsAsync(path, token)).Value)
+                    return Result<StorageItem>.Failure(StorageErrors.Conflict("exists"));
+                if (Interlocked.Increment(ref checks) == 2) checkedBoth.TrySetResult();
+                await checkedBoth.Task.WaitAsync(Wait, token);
+                if (Interlocked.Increment(ref writers) == 2) await Task.Delay(200, token);
+                return await local.UploadAsync(path, source, options with { Overwrite = true }, token);
+            }
+        };
+        // Two processes: the second reaches the same part file through another root, so the in-process table
+        // does not turn it away before it reaches the marker.
+        var one = Server(Local(Path.Combine(directory.Path, "d")));
+        var other = Server(Local(directory.Path));
+
+        var results = await Task.WhenAll(
+            Task.Run(() => PartLease.AcquireAsync(one, ".cl-storage-part-x", createParents: true, CancellationToken.None)),
+            Task.Run(() => PartLease.AcquireAsync(other, "d/.cl-storage-part-x", createParents: true, CancellationToken.None)));
+
+        Assert.All(results, result => Assert.True(result.IsSuccess, result.Error?.ToString()));
+        Assert.Single(results, result => result.Value is not null);
+    }
 }

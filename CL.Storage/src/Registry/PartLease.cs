@@ -18,6 +18,9 @@ internal sealed class PartLease
     /// <summary>How old a marker from another machine must be before its owner is presumed gone.</summary>
     internal static readonly TimeSpan StaleAfter = TimeSpan.FromHours(24);
 
+    /// <summary>How long a marker written where create-only is not atomic settles before it is read back.</summary>
+    internal static readonly TimeSpan ReadBackDelay = TimeSpan.FromSeconds(1);
+
     private const string MarkerHeader = "cl-storage-part-lock/1";
 
     /// <summary>Part files being written in this process, so two writers never append into one.</summary>
@@ -71,7 +74,12 @@ internal sealed class PartLease
                     cancellationToken).ConfigureAwait(false);
                 if (created.IsSuccess)
                 {
-                    // Read back: where create-only is only checked before the write, a racing writer's marker wins.
+                    // Read back: where create-only is only checked before the write (FTP, SFTP), a racing writer
+                    // that checked before this write lands its marker just after it, and the last marker wins. The
+                    // read waits a moment so that marker is there to see. The re-check before the promote is not
+                    // enough on its own: by then both writers may have appended to the part file.
+                    if (!destination.Capabilities.Supports(StorageFeature.ConditionalCreate))
+                        await Task.Delay(ReadBackDelay, cancellationToken).ConfigureAwait(false);
                     var owned = await lease.StillOwnedAsync(cancellationToken).ConfigureAwait(false);
                     if (owned.IsFailure)
                         return Result<PartLease?>.Failure(owned.Error!);
