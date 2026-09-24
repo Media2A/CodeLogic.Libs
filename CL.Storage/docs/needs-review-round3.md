@@ -1,9 +1,12 @@
 # needs-review round 3: what was done
 
 Branch `feat/storage-needs`, on top of `aaf4afd`. Every finding in sections A, B, and D of StorageHub's
-`needs-review.md` is below. Each fixed finding has a test tagged `// needs-review <id>` that fails on the
-code before the fix and passes after (checked by running the new tests against the base source; tests that
-use new API could not compile there and fail for that reason). Section F is a proposal only:
+`needs-review.md` is below. Each fixed finding has at least one test tagged `// needs-review <id>` that
+fails on the code before the fix and passes after (checked by running the new tests against the base
+source; tests that use new API could not compile there and fail for that reason). Some cited tests are
+partners that pass on the old code as well (round 4 found `Sides_keeping_different_checksums_download_only_one_side`
+(B60), `A_connection_failure_while_hashing_still_fails_the_comparison` (B57), `Every_public_enum_has_distinct_values`
+(A14), and two `Rename_candidates` cases); each has a partner in its row that fails there. Section F is a proposal only:
 [storagehub-needs-proposal.md](storagehub-needs-proposal.md).
 
 ## Done criteria
@@ -36,7 +39,7 @@ use new API could not compile there and fail for that reason). Section F is a pr
 | A1 | fixed | 12c0f17 | NeedsReviewTransferTests.A_complete_directory_move_deletes_the_source_file_by_file; NeedsReviewTransferTests.A_directory_move_keeps_files_added_or_changed_on_the_source_during_the_copy<br>*per-file conditional source delete, emptied folders non-recursively; NeedsReconciliation with sourceChanged/sourceAdded* |
 | A2 | fixed | 12c0f17 (library), 2ee7489, 96f6cd3, f895d80 (S3, Azure/GCS, Swift), 522fa83 (sync rename) | NeedsReviewProviderLiveTests.A_GCS_copy_pinned_to_an_old_ETag_is_refused_and_a_move_keeps_nothing_behind; NeedsReviewProviderLiveTests.A_Swift_copy_is_pinned_to_the_source_read_and_a_create_only_copy_works; NeedsReviewProviderLiveTests.An_Azure_copy_pinned_to_an_old_ETag_is_refused_and_a_move_keeps_nothing_behind; NeedsReviewProviderLiveTests.An_S3_copy_pinned_to_an_old_ETag_is_refused_and_a_move_deletes_only_what_it_copied; NeedsReviewProviderS3Tests.A_directory_move_keeps_a_file_changed_after_it_was_listed; NeedsReviewProviderS3Tests.A_file_move_deletes_only_the_copied_object_with_If_Match; NeedsReviewProviderS3Tests.A_move_keeps_a_source_rewritten_after_the_copy_and_reports_the_destination_committed; NeedsReviewProviderS3Tests.Copy_honours_the_expected_source_ETag_and_version; NeedsReviewProviderTests.A_local_copy_or_move_honours_the_expected_source_ETag_and_refuses_versions; NeedsReviewSyncLiveTests.Keep_both_on_s3_keeps_both_versions; NeedsReviewSyncTests.A_conflict_rename_is_pinned_to_the_version_planned; NeedsReviewSyncTests.A_version_written_after_the_rename_check_is_not_moved_aside; NeedsReviewSyncTests.Where_a_move_cannot_be_pinned_the_rename_is_a_pinned_copy_and_a_conditional_delete; NeedsReviewTransferTests.A_native_move_that_copies_and_deletes_is_pinned_to_the_version_read_and_relays_when_it_cannot_be<br>*pinned native copy/move; relay on Unsupported. On MinIO and Swift the pinned source delete is checked just before (servers ignore If-Match on DELETE): documented* |
 | A3 | fixed | 12c0f17 (merge through relay), a04215a, 75a8725, 4a7f2d7 (SFTP/FTP/WebDAV refuse) | NeedsReviewProviderLiveTests.A_WebDAV_move_or_copy_onto_an_existing_collection_is_refused; NeedsReviewProviderLiveTests.An_FTP_move_onto_an_existing_directory_is_refused; NeedsReviewProviderLiveTests.An_SFTP_move_onto_an_existing_directory_is_refused; NeedsReviewProviderLiveTests.R3_8_an_SFTP_folder_moved_onto_an_existing_folder_keeps_what_the_folder_held; NeedsReviewProviderWebDavTests.A_move_or_copy_onto_an_existing_collection_is_refused_without_a_request; NeedsReviewTransferTests.A_directory_moved_onto_an_existing_directory_merges_instead_of_replacing_it<br>*acceptance R3-8* |
-| A4 | fixed | 3d0825a, 12c0f17, cc846bc (queue replay) | NeedsReviewQueueTests.A_stored_resume_token_is_not_replayed_for_a_job_that_must_not_overwrite; NeedsReviewTransferTests.A_resume_token_does_not_turn_on_overwrite |
+| A4 | fixed | 3d0825a, 12c0f17, cc846bc (queue replay) | NeedsReviewQueueTests.A_stored_resume_token_is_not_replayed_for_a_job_that_must_not_overwrite; NeedsReviewTransferTests.A_resume_token_does_not_turn_on_overwrite<br>*the coordinator's own guard has no test of its own: `StorageTransferOptions.Validate` refuses first* |
 | A5 | fixed | 3b8bf58, 12c0f17 | NeedsReviewTransferTests.A_destination_that_does_not_hold_the_committed_length_always_fails_even_without_verify; NeedsReviewTransferTests.Two_transfers_of_one_source_to_one_destination_do_not_write_into_one_part_file<br>*one writer per part file; size/digest mismatch after promote always fails (NeedsReconciliation, no rollback)* |
 | A6 | fixed | 3b8bf58 | NeedsReviewTransferTests.A_part_file_whose_size_cannot_be_read_is_kept_and_not_appended_after |
 | A7 | fixed | 3b8bf58 | NeedsReviewTransferTests.A_fully_staged_resume_does_not_open_the_source_at_its_end |
@@ -64,7 +67,7 @@ use new API could not compile there and fail for that reason). Section F is a pr
 | A29 | documented | 2e72849 | NeedsReviewSyncTests.A_sync_cancelled_while_applying_returns_success_with_cancelled_and_one_cancelled_while_planning_throws<br>*behaviour kept (success with Cancelled=true) and pinned by a test; CHANGELOG, MIGRATION, README, errors-events.md, index.md, transfers.md corrected* |
 | B1 | fixed | 3d0825a, 3b8bf58, 12c0f17 | NeedsReviewTransferApiTests.A_skipped_link_says_why_it_was_skipped; NeedsReviewTransferTests.Moving_a_single_link_that_is_skipped_leaves_it_in_place |
 | B2 | fixed | 3d0825a, 3b8bf58, 12c0f17 | NeedsReviewTransferTests.A_resume_into_a_folder_the_transfer_created_fails_cleanly_with_a_token |
-| B3 | fixed | 3d0825a, 3b8bf58, 12c0f17 | —<br>*a foreign file named by a token is ignored and never deleted; staging deletes non-recursive* |
+| B3 | fixed | 3d0825a, 3b8bf58, 12c0f17 | ReviewTransferTests.A_tampered_resume_token_is_not_followed<br>*a foreign file named by a token is ignored and never deleted; staging deletes non-recursive* |
 | B4 | fixed | 3d0825a, 3b8bf58, 12c0f17 | NeedsReviewTransferTests.A_source_without_identity_never_gets_a_token_for_a_private_staging_object |
 | B5 | fixed | 3d0825a, 3b8bf58, 12c0f17 | NeedsReviewTransferTests.ExpectedSha256_without_Verify_still_checks_the_destination_after_the_commit |
 | B6 | fixed | 3d0825a, 3b8bf58, 12c0f17 | NeedsReviewTransferTests.A_throwing_provider_leaves_no_staging_or_backup_and_is_reported |

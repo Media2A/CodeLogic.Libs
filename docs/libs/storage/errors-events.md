@@ -28,8 +28,8 @@ Every provider maps its own failures to the same codes:
 | `storage.connection_lost` | the connection dropped mid-operation | FTP 421/426, reset sockets |
 | `storage.server_busy` | rate limited or out of sessions | HTTP 429/503, FTP 421, session pool full |
 | `storage.quota_exceeded` | out of space or quota | FTP 452/552, HTTP 507, disk full |
-| `storage.timeout` | the operation timed out | read/connect timeouts |
-| `storage.unavailable` | the service is unavailable | provider outages |
+| `storage.timeout` | the operation timed out | read/connect timeouts; a queue pause, cancel, or remove that stopped waiting after `ControlTimeout` (the request still applies) |
+| `storage.unavailable` | the service is unavailable | provider outages; a disposed transfer queue; a job whose store failed 8 times in a row |
 | `storage.partial_failure` | a multi-step operation stopped halfway | restore or move-source deletion failed, a WebDAV `207 Multi-Status` |
 | `storage.cancelled` | the caller cancelled, reported where a report says what was left | a cancelled `CopyAsync`/`MoveAsync` (`Outcome = Cancelled`) |
 | `storage.provider_error` | anything not classified above | carries the exception type (never its message) |
@@ -53,7 +53,9 @@ if (StorageErrorInfo.TryGetDetail(result.Error, StorageErrorInfo.FtpReplyKey, ou
 A failure raised after the destination was already written carries `destinationState=complete`
 (`StorageErrorInfo.DestinationCommitted(error)`), with a `leftBehind=<path>` entry for each object the
 provider could not remove, such as its own backup; treat the destination as committed and clean up, never
-retry blindly. A WebDAV `207` carries `destinationState=partial`.
+retry blindly. This applies to staged uploads and `StorageWriteStream.CommitAsync` too: a
+`storage.partial_failure` with `destinationState=complete` means the content was written and the
+`leftBehind` entries name what is still there. A WebDAV `207` carries `destinationState=partial`.
 
 A rejected SSH host key carries `presentedFingerprint` in `Details`. To rebuild an error stored as its
 code, message, and details (for example from a job store), use `StorageErrors.Create`. Provider response bodies,
@@ -78,10 +80,15 @@ since Windows localizes the messages) and OpenSSL alerts on Linux. Only failures
 TLS failures; a stream that breaks later is `storage.connection_lost`, which is transient.
 
 A TLS 1.3 server refuses a client certificate only after the handshake, which the platform reports as a
-dropped connection. It becomes `client_certificate_rejected` only when that same connection was asked for
-a certificate (the server sent acceptable issuers or its certificate request) and failed right after our
-reply. A dropped connection on a server that merely asks for a certificate (optional client
-certificates) stays `connection_lost`, with `tlsReason=client_certificate_rejected` as a hint. FTP and
+dropped connection. It becomes `client_certificate_rejected` only when a connection that was asked for a
+certificate (the server sent acceptable issuers or its certificate request) failed after our reply with
+evidence of a refusal (an alert's worth of bytes, or a request sent on it that got no answer), and only
+for the attempt that sent its request on that connection. A spare connection the pool opened and later
+closed without using, or a refusal on a connection another transfer used, never turns this attempt's drop
+into a refusal. A dropped connection on a server that merely asks for a certificate (optional client
+certificates) stays `connection_lost`, with `tlsReason=client_certificate_rejected` as a hint. Behind an
+HTTP proxy tunnel the TLS stream does not sit on the watched connection, so a refusal is never detected
+there: it stays `connection_lost`, with at most that hint. FTP and
 WebDAV add the presented certificate; S3, Azure, Google Cloud, and Swift report the reason only.
 
 ```csharp

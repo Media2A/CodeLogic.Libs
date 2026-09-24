@@ -35,10 +35,13 @@ dotnet add package CodeLogic.Storage
 
 ```csharp
 using CL.Storage;
+using CodeLogic;
 
+var init = await CodeLogic.CodeLogic.InitializeAsync();
+if (init.ShouldExit) return;
 await Libraries.LoadAsync<StorageLibrary>();
-await CodeLogic.ConfigureAsync();
-await CodeLogic.StartAsync();
+await CodeLogic.CodeLogic.ConfigureAsync();   // the class CodeLogic.CodeLogic, not the namespace
+await CodeLogic.CodeLogic.StartAsync();
 
 var storage = Libraries.Get<StorageLibrary>();
 IStorageService files = storage.DefaultStorage;
@@ -136,7 +139,9 @@ limit or `StorageDownloadOptions.MaxBufferedBytes`.
 
 Listings hide the library's own staging and backup items (`.cl-storage-*`, `.clstorage-*`); set
 `IncludeInternal` to see them. `IncludeHidden = false` drops hidden items (dot-files, and items marked
-hidden) together with what hidden folders hold, and `NamePattern` filters names with `*` and `?`
+hidden) together with what hidden folders hold (on object stores, whose listings come in pages, every
+folder name between the listed folder and an item is tested, so `.git/b` stays hidden on a page that no
+longer holds `.git` itself), and `NamePattern` filters names with `*` and `?`
 wildcards (case-insensitive). Recursive listings on S3, Azure Blob, Google Cloud, and Swift include
 folders that exist only as key prefixes; they are sorted page by page, and an inferred folder can appear
 again on a later page, so build a tree by path.
@@ -166,8 +171,10 @@ Optional features return `storage.unsupported` on connections that lack them. Fl
 
 A flag says what the provider can do; on S3-compatible servers, whether a conditional request is really
 enforced also depends on the server (see `ConditionalRequests` in
-[Connections](connections.md#cloud-emulators-and-compatible-services)). A transfer reports how its
-condition was enforced in `ConditionEnforcement`.
+[Connections](connections.md#cloud-emulators-and-compatible-services)); under `ConditionalRequests = Auto`
+the conditional flags are provisional until the connection's probe has run. A transfer reports how its
+condition was enforced in `ConditionEnforcement`, and `GetConditionEnforcementAsync` asks a connection
+directly (see [Guaranteed transfers](transfers.md#guaranteed-transfers)).
 
 ## Migration
 

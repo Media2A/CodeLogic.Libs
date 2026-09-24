@@ -78,9 +78,12 @@ See the [overview](index.md) for the configuration sections and the mount model.
   `ClientCertificatePassword` decrypts either. The certificate is loaded once per connection and disposed
   with it. On Linux the private key is held in memory only. macOS does not support in-memory keys, so .NET
   imports the key into a temporary keychain that it deletes when the certificate is disposed with the
-  connection. On Windows SChannel needs a key container: the key goes into a non-persisted container (the
-  machine key store when the user profile is not loaded) that is deleted when the connection is disposed;
-  a process that crashes can leave that container file behind. A PKCS#12 file without its private key is
+  connection. On Windows SChannel needs a key container: the key goes into a non-persisted container that
+  is deleted when the connection is disposed; a process that crashes can leave that container file behind.
+  Only when the user key store is unavailable (the account's profile is not loaded, as for some service
+  accounts) is the machine key store used instead; its containers are machine-wide, so the machine's
+  administrators can read the key while the connection holds it. A wrong password or a damaged file is
+  reported as it is and never falls back. A PKCS#12 file without its private key is
   refused when the connection is registered.
 - **Active mode** behind NAT: `ActivePortMin`/`ActivePortMax` and `ActiveExternalIp`.
 - **Encodings** such as `windows-1252`, `iso-8859-1`, `ibm437`, and `shift_jis` are supported for file
@@ -103,20 +106,51 @@ folder is refused (`storage.conflict`) rather than replacing it; a `207 Multi-St
 members failed, is `storage.partial_failure` (`destinationState=partial`). WebDAV does not declare
 `AtomicMove`, so the library relays folder moves there.
 
+- An upload is staged and moved into place; the destination is read just before that `MOVE`. An existing
+  collection is never replaced (`storage.conflict`), and `Overwrite: T` is sent only when a file was
+  found there. WebDAV offers no condition on a `MOVE` that the adapter can send, so a file replaced by a
+  collection in the short window between that read and the `MOVE` is not detected (a compliant server
+  would then delete the collection); the same window applies to a move or copy onto an existing file.
+- A non-recursive folder delete never sends a bare `DELETE`, which always removes everything inside: the
+  collection is locked (`LOCK`, depth 0), listed, and deleted under the lock only when empty. A server
+  without WebDAV locks (class 2) answers `storage.unsupported` and the folder is left; a folder holding
+  anything, hidden names included, is `storage.conflict`. This affects everything that removes emptied
+  folders on WebDAV: directory moves, sync folder deletes, and the rollback of created folders.
+
+FTP removes a folder non-recursively with a raw `RMD`, which the server itself refuses while the folder
+holds anything (hidden names included); a recursive FTP delete includes hidden files.
+
 ## Cloud emulators and compatible services
 
 - **S3-compatible** (MinIO, Ceph, …): set `ServiceUrl` and usually `ForcePathStyle`. Servers differ in
   which conditional headers they enforce, so `ConditionalRequests` says how far to trust them:
-  - `Auto` (default): conditional uploads (`PutObject`, `CompleteMultipartUpload`) are trusted; whether
-    `CopyObject` honours `If-None-Match`/`If-Match` and `DeleteObject` honours `If-Match` is probed once
-    per connection with two `.cl-storage-probe-*` objects, removed afterwards. AWS S3 enforces all of
-    them; MinIO enforces conditional uploads but ignores the copy and delete conditions, so there a
-    create-only copy is checked just before it runs and reported `CheckedBeforeCommit`.
+  - `Auto` (default): the first time a conditional write, copy, or delete needs to know, the connection
+    probes whether the server enforces `If-None-Match` and `If-Match` on `PutObject` (and so on
+    `CompleteMultipartUpload`) and on `CopyObject`, and `If-Match` on `DeleteObject`. A condition found
+    enforced is sent with the committing request (`Atomic`); one found ignored or rejected (400/501) is not
+    sent at all, and is checked just before instead (`CheckedBeforeCommit`). AWS S3 enforces all of them;
+    MinIO enforces them on `PutObject` and ignores them on `CopyObject` and `DeleteObject`. Until the probe
+    has run, the connection's `ConditionalCreate`/`ConditionalUpdate`/`ConditionalDelete` flags are
+    provisional; afterwards they name only what is enforced on every committing request (on MinIO none of
+    the three). `GetConditionEnforcementAsync` asks, running the probe when needed (see
+    [Guaranteed transfers](transfers.md#guaranteed-transfers)). A probe that cannot finish (a network
+    error, missing permissions) assumes nothing is enforced and is tried again after a back-off that
+    doubles from 1 minute up to 32 minutes.
+    The probe's requests are ordinary writes: four `PUT`s, two `COPY`s, and three `DELETE`s of two
+    one-byte `.cl-storage-probe-*` objects under the prefix, removed afterwards. It needs `PutObject` and
+    `DeleteObject` permission there; on a versioned bucket it leaves noncurrent versions and delete
+    markers, on an Object Lock bucket versions that cannot be deleted until their retention ends, and it
+    triggers event notifications, replication, and access logging like any write. Choose `Enforced` or
+    `NotEnforced` to avoid it.
   - `Enforced`: trust every condition without probing.
   - `NotEnforced`: send no conditional headers; the library checks conditions itself just before each
     write, and the connection stops declaring `ConditionalCreate`/`ConditionalUpdate`/`ConditionalDelete`.
     Use it for a server that rejects or ignores conditional uploads.
-- **Azure Blob**: a connection string works with Azurite (`UseDevelopmentStorage=true`).
+  A server-side copy above 5 GiB is a multipart copy with parts of at least 128 MiB (larger when needed
+  to stay within 10,000 parts), independent of the upload part size.
+- **Azure Blob**: a connection string works with Azurite (`UseDevelopmentStorage=true`). A move copies
+  the blob's current content only and deletes the source with its snapshots (as `DeleteAsync` does);
+  versions kept by blob versioning stay. To keep snapshots, copy and delete the source yourself.
 - **Google Cloud Storage**: `ServiceUrl` plus `AuthenticationMode = Anonymous` targets an emulator such as fake-gcs-server.
 - **Swift**: Keystone, or `AuthenticationMode = TempAuthV1` for SAIO-style servers (`AuthenticationUrl` ending in `/auth/v1.0`).
 
