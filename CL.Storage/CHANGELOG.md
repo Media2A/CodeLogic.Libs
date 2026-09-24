@@ -150,7 +150,9 @@ are listed under *Added*, even where they changed while this release was being b
   ids only (keep them stable); the baseline to `SyncId` only. The options digest changed during this
   release, so plans made by earlier preview builds are refused: plan again.
 - What a sync deletes, overwrites, or renames aside must be exactly the planned version: no time tolerance
-  at apply. On FTP servers without `MLSD`, which list times to the minute, such steps can end `Stale`.
+  at apply. A time known only to a unit keeps that precision: new `StorageItem.ModifiedPrecision` (and
+  `StorageSyncIdentity.ModifiedPrecision`), set by FTP for a `LIST` line (minutes, or days for older files),
+  so a file listed to the minute matches the same file read to the second, at apply and when comparing.
 - `LinkHandling.Follow` lists a followed link to a folder with its target's contents (up to 8 links deep;
   a link leading back into a folder being listed is left out), filters a link as what it leads to, reads
   copies through the link (`StorageSyncAction.ReadPath`), and never deletes or replaces anything through

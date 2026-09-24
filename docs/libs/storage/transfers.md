@@ -629,10 +629,11 @@ differ are conflicts.
   other than "not found" fails the step (or retries it), rather than treating the item as gone.
 - What a step deletes, overwrites, or renames aside must be exactly the version planned: that check uses
   no time tolerance (`TimeTolerance` applies only to recognising a source's version), so a same-size edit
-  within the tolerance is never deleted or overwritten. On FTP servers without `MLSD`/`MLST`, whose `LIST`
-  gives times to the minute while a lookup of one file (`MDTM`) gives them to the second, a planned delete
-  or overwrite can therefore end `Stale` although nothing changed; such a server's files are then left as
-  they are.
+  within the tolerance is never deleted or overwritten. On FTP servers without `MLSD`/`MLST`, `LIST` gives
+  times to the minute (or only a date for files older than about six months) while a lookup of one file
+  (`MDTM`) gives seconds. Such a time carries its precision in `StorageItem.ModifiedPrecision`, and stands for
+  the interval it was truncated from: the same file then matches at apply, and a copy whose time was kept does
+  not look changed on the next compare. An edit within that same minute (or day) cannot be told apart there.
 - Planning never throws for a provider whose listing throws or a filter pattern that runs too long: the
   plan (or `CompareAsync`) fails with the provider's error, or `storage.invalid_content` for the pattern.
   Only the caller's cancellation is thrown.

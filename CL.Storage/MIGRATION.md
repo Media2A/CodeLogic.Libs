@@ -291,7 +291,8 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
   `ApplyWithConflicts` and `Compare.HashConcurrency` may now differ between planning and applying; plans
   stored by preview builds of this release are refused (plan again).
 - **Exact versions at apply.** Deletes and overwrites no longer accept a same-size file within
-  `TimeTolerance`; on FTP servers without `MLSD` expect such steps to be reported `Stale`.
+  `TimeTolerance`. A time an FTP listing gives only to the minute carries `StorageItem.ModifiedPrecision`
+  and still matches the same file; a custom backend with coarse listing times should set it too.
 - **Links.** With `LinkHandling = Follow`, followed folders now list their target's contents, and
   nothing is deleted or replaced through a link; copies carry `ReadPath`.
 

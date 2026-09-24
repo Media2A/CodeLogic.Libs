@@ -786,7 +786,8 @@ var report = await storage.ApplySyncAsync("sftp", "site", "s3", "backup/site", p
 - It also refuses a plan whose baseline moved on because another run saved in between.
 - Each step first re-checks its items. A step whose item changed since planning is reported `Stale`
   and not taken. Deletes, overwrites, and conflict renames require exactly the planned version (no time
-  tolerance), so on FTP servers without `MLSD` (times listed to the minute) they can end `Stale`.
+  tolerance). A time a listing gives only to the minute (FTP without `MLSD`) carries that precision
+  (`StorageItem.ModifiedPrecision`), so it still matches the same file read to the second.
 - Planning fails, rather than throws, for a provider whose listing throws or a filter pattern that runs too
   long.
 - `DryRun` returns the plan without changing anything.
