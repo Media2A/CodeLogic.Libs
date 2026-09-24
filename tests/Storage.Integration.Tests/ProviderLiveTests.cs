@@ -223,7 +223,7 @@ public sealed class WebDavLiveTests
     public async Task Folder_rename_moves_the_whole_tree_natively()
     {
         await using var storage = LiveServers.Create(LiveServers.WebDav());
-        await StorageContract.DirectoryMoveAsync(storage);
+        await StorageContract.DirectoryMoveAsync(storage, atomic: false);
     }
 
     [WebDavFact]

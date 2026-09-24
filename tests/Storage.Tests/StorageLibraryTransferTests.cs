@@ -480,7 +480,12 @@ public sealed class StorageLibraryTransferTests
 
         cancellation.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => transfer);
+        // Reported, not thrown, so the caller learns that nothing was committed and nothing was left behind.
+        var report = await transfer;
+        Assert.Equal(StorageTransferOutcome.Cancelled, report.Outcome);
+        Assert.Equal(StorageErrors.CancelledCode, report.Error?.Code);
+        Assert.False(report.DestinationCommitted);
+        Assert.Null(report.StagingLeftBehind);
         var deleted = Assert.Single(deletedPaths);
         Assert.StartsWith(".cl-storage-transfer-", deleted, StringComparison.Ordinal);
         Assert.EndsWith(".tmp", deleted, StringComparison.Ordinal);

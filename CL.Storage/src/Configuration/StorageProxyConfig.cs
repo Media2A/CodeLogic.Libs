@@ -6,13 +6,13 @@ namespace CL.Storage.Configuration;
 public enum StorageProxyType
 {
     /// <summary>Connects directly.</summary>
-    None,
+    None = 0,
     /// <summary>Tunnels through an HTTP proxy using <c>CONNECT</c>.</summary>
-    Http,
+    Http = 1,
     /// <summary>Tunnels through a SOCKS4 proxy.</summary>
-    Socks4,
+    Socks4 = 2,
     /// <summary>Tunnels through a SOCKS5 proxy.</summary>
-    Socks5
+    Socks5 = 3
 }
 
 /// <summary>Routes a connection through an HTTP or SOCKS proxy.</summary>

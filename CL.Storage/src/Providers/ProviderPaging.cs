@@ -29,6 +29,15 @@ namespace CL.Storage.Providers;
 /// </remarks>
 internal static class ProviderPaging
 {
+    /// <summary>
+    /// Refuses a token from a recursive object-store listing (which carries the last key, <c>cl1:</c>) on a
+    /// non-recursive one, instead of sending it to the server as if it were the server's own.
+    /// </summary>
+    public static Error? RecursiveTokenOnFlatListing(StorageListOptions options) =>
+        !options.Recursive && options.ContinuationToken is { } token && token.StartsWith("cl1:", StringComparison.Ordinal)
+            ? StorageErrors.InvalidPath("The continuation token belongs to a recursive listing.")
+            : null;
+
     private const string TokenVersion = "cl1";
 
     /// <summary>Builds one page of a listing, walking the source only when no snapshot is cached.</summary>

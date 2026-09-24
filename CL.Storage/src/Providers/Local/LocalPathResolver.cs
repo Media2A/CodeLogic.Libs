@@ -21,6 +21,26 @@ internal sealed class LocalPathResolver
 
     public string Root { get; }
 
+    /// <summary>
+    /// Whether a path is a link: a symbolic link or a junction (a reparse point with a link target). Other reparse
+    /// points (OneDrive and other cloud-file placeholders, deduplicated files, app execution aliases) are ordinary
+    /// files and folders. A reparse point whose data cannot be read is treated as a link.
+    /// </summary>
+    internal static bool IsLink(string fullPath, FileAttributes attributes)
+    {
+        if ((attributes & FileAttributes.ReparsePoint) == 0)
+            return false;
+        try
+        {
+            FileSystemInfo info = (attributes & FileAttributes.Directory) != 0 ? new DirectoryInfo(fullPath) : new FileInfo(fullPath);
+            return info.LinkTarget is not null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
     public Result<ResolvedLocalPath> Resolve(string path) => Resolve(path, allowFinalLink: false);
 
     /// <summary>
@@ -60,7 +80,7 @@ internal sealed class LocalPathResolver
                     break;
                 }
 
-                if ((attributes & FileAttributes.ReparsePoint) == 0)
+                if (!IsLink(current, attributes))
                     continue;
                 if (!_followLinks)
                     return Result<ResolvedLocalPath>.Failure(StorageErrors.InvalidPath("Links and reparse points are disabled for this connection."));

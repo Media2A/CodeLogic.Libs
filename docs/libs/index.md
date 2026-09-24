@@ -47,7 +47,7 @@ your application or from other libraries after `StartAsync()`.
   <a class="lib-card" href="storage/index.md">
     <div class="lib-name">CL.Storage</div>
     <div class="lib-pkg">CodeLogic.Storage</div>
-    <p class="lib-desc">Safe mounted local, S3, FTP/SFTP, WebDAV, Azure, GCS, and Swift storage.</p>
+    <p class="lib-desc">Safe mounted local, S3, FTP/SFTP, WebDAV, Azure, GCS, and Swift storage, with verified and resumable transfers, a durable queue, three-way sync, and change watching.</p>
   </a>
 </div>
 

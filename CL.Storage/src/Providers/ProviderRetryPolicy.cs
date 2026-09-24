@@ -24,6 +24,42 @@ internal interface IStorageConnectionObserver
     void Retrying(string connectionId, StorageProvider provider, string operation, int attempt, TimeSpan delay, Error error);
 }
 
+/// <summary>
+/// One attempt of a provider operation. It is the ambient attempt (an <see cref="AsyncLocal{T}"/>) for everything the
+/// attempt awaits, so a transport watch can attribute what happens on a connection to the attempt that used it rather
+/// than to the whole backend.
+/// </summary>
+internal sealed class ProviderAttempt
+{
+    private static readonly AsyncLocal<ProviderAttempt?> Ambient = new();
+    private int _clientCertificateRefused;
+
+    private ProviderAttempt(DateTimeOffset started) => Started = started;
+
+    /// <summary>Gets when the attempt started.</summary>
+    public DateTimeOffset Started { get; }
+
+    /// <summary>Gets the attempt the calling code runs in, if any.</summary>
+    public static ProviderAttempt? Current => Ambient.Value;
+
+    /// <summary>Starts an attempt and makes it the ambient one for the calling async method and what it awaits.</summary>
+    public static ProviderAttempt Begin()
+    {
+        var attempt = new ProviderAttempt(DateTimeOffset.UtcNow);
+        Ambient.Value = attempt;
+        return attempt;
+    }
+
+    /// <summary>Creates an attempt that is not ambient (for callers that only have a start time).</summary>
+    public static ProviderAttempt At(DateTimeOffset started) => new(started);
+
+    /// <summary>Gets whether a connection this attempt sent a request on was refused for its client certificate.</summary>
+    public bool ClientCertificateRefused => Volatile.Read(ref _clientCertificateRefused) != 0;
+
+    /// <summary>Records that a connection this attempt used was refused for its client certificate.</summary>
+    public void RecordClientCertificateRefusal() => Volatile.Write(ref _clientCertificateRefused, 1);
+}
+
 /// <summary>Repeats provider operations that fail transiently, with exponential backoff and jitter.</summary>
 /// <remarks>
 /// The backoff mirrors the database libraries: base × 2^attempt, ±50% jitter, clamped to the configured
@@ -65,19 +101,35 @@ internal sealed class ProviderRetryPolicy
     public static ProviderRetryPolicy None(string connectionId, StorageProvider provider) =>
         new(new StorageRetryConfig { RetryCount = 0 }, connectionId, provider);
 
+    /// <summary>
+    /// Gets or sets a hook that adds context to every failed attempt, such as the certificate a TLS failure
+    /// refused; it receives the error and the attempt (when it started, and what its own connections recorded).
+    /// </summary>
+    public Func<Error, ProviderAttempt, Error>? Enrich { get; set; }
+
     public Task<Result> ExecuteAsync(
         string operation,
         RetryKind kind,
         Func<int, CancellationToken, Task<Result>> attempt,
         CancellationToken cancellationToken) =>
-        ExecuteCoreAsync(operation, kind, attempt, static result => result.Error, cancellationToken);
+        ExecuteCoreAsync(operation, kind, async (number, token) =>
+        {
+            var current = ProviderAttempt.Begin();
+            var result = await attempt(number, token).ConfigureAwait(false);
+            return result.IsFailure && Enrich is { } enrich ? Result.Failure(enrich(result.Error!, current)) : result;
+        }, static result => result.Error, cancellationToken);
 
     public Task<Result<T>> ExecuteAsync<T>(
         string operation,
         RetryKind kind,
         Func<int, CancellationToken, Task<Result<T>>> attempt,
         CancellationToken cancellationToken) =>
-        ExecuteCoreAsync(operation, kind, attempt, static result => result.Error, cancellationToken);
+        ExecuteCoreAsync(operation, kind, async (number, token) =>
+        {
+            var current = ProviderAttempt.Begin();
+            var result = await attempt(number, token).ConfigureAwait(false);
+            return result.IsFailure && Enrich is { } enrich ? Result<T>.Failure(enrich(result.Error!, current)) : result;
+        }, static result => result.Error, cancellationToken);
 
     /// <summary>Runs an upload, replaying the source from its starting position on retry.</summary>
     /// <remarks>A non-seekable source cannot be replayed, so its upload is attempted exactly once.</remarks>
@@ -88,7 +140,7 @@ internal sealed class ProviderRetryPolicy
         CancellationToken cancellationToken)
     {
         if (!source.CanSeek)
-            return upload(cancellationToken);
+            return UploadOnceAsync(upload, cancellationToken);
         var start = source.Position;
         return ExecuteAsync(
             operation,
@@ -99,6 +151,14 @@ internal sealed class ProviderRetryPolicy
                 return upload(token);
             },
             cancellationToken);
+    }
+
+    /// <summary>A single attempt, whose failure is still explained by <see cref="Enrich"/> like a retried one's.</summary>
+    private async Task<Result<T>> UploadOnceAsync<T>(Func<CancellationToken, Task<Result<T>>> upload, CancellationToken cancellationToken)
+    {
+        var current = ProviderAttempt.Begin();
+        var result = await upload(cancellationToken).ConfigureAwait(false);
+        return result.IsFailure && Enrich is { } enrich ? Result<T>.Failure(enrich(result.Error!, current)) : result;
     }
 
     /// <summary>Computes the delay before retry number <paramref name="attempt"/> (zero-based).</summary>

@@ -7,13 +7,13 @@ namespace CL.Storage.Configuration;
 public enum AzureBlobAuthenticationMode
 {
     /// <summary>Uses an Azure Storage connection string.</summary>
-    ConnectionString,
+    ConnectionString = 0,
     /// <summary>Uses the Azure Identity default credential chain.</summary>
-    DefaultCredential,
+    DefaultCredential = 1,
     /// <summary>Uses an account name and shared key.</summary>
-    SharedKey,
+    SharedKey = 2,
     /// <summary>Uses a shared access signature token.</summary>
-    SasToken
+    SasToken = 3
 }
 
 /// <summary>Defines named Azure Blob Storage connections.</summary>

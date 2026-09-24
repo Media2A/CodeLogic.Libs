@@ -14,7 +14,7 @@ using Renci.SshNet.Sftp;
 namespace CL.Storage.Providers.Sftp;
 
 /// <summary>Root-scoped storage over SSH File Transfer Protocol.</summary>
-public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageCommandService, IStorageSpaceService, IStorageDiagnosticsSource
+public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeService, IStorageAppendService, IStorageCommandService, IStorageSpaceService, IStorageDiagnosticsSource, IStorageRestoringReplace
 {
     private static readonly StorageCapabilities SftpCapabilities = new(
         StorageFeature.PhysicalDirectories |
@@ -23,7 +23,7 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         StorageFeature.DirectoryMove |
         StorageFeature.RelayedCopy |
         StorageFeature.ServerSideMove |
-        // A rename on the server (RNFR/RNTO, SFTP rename, WebDAV MOVE) moves a whole tree in one step,
+        // A rename on the server (SFTP rename) moves a whole tree in one step,
         // so folder moves no longer fall back to copy-then-delete through the client.
         StorageFeature.AtomicMove |
         StorageFeature.RangeReads |
@@ -36,6 +36,8 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         StorageFeature.CreateLinks);
 
     private readonly ProviderClientPool<SftpClient> _clients;
+    private readonly IPoolHandle<SftpClient> _pool;
+    private readonly Action? _sessionOpened;
     private readonly RemotePathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
     private readonly ProviderRetryPolicy _retry;
@@ -67,27 +69,49 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         StorageSessionConfig? session,
         StorageRetryConfig? retry,
         IStorageConnectionObserver? observer)
+        : this(connectionId, new OwnedPool<SftpClient>(CreatePool(clientFactory, session)), root, maxBufferedDownloadBytes, retry, observer)
+    {
+        ArgumentNullException.ThrowIfNull(clientFactory);
+    }
+
+    internal SftpStorageBackend(
+        string connectionId,
+        IPoolHandle<SftpClient> pool,
+        string? root,
+        long maxBufferedDownloadBytes,
+        StorageRetryConfig? retry,
+        IStorageConnectionObserver? observer)
     {
         if (string.IsNullOrWhiteSpace(connectionId)) throw new ArgumentException("Connection ID is required.", nameof(connectionId));
-        ArgumentNullException.ThrowIfNull(clientFactory);
         if (maxBufferedDownloadBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBufferedDownloadBytes));
         ConnectionId = connectionId;
         _observer = observer;
-        _clients = new ProviderClientPool<SftpClient>(
-            clientFactory,
-            SftpHostKeyTracker.ConnectAsync,
-            static client => client.IsConnected,
-            DestroyClientAsync,
-            ProviderPoolOptions.From(session),
-            ProbeAsync);
+        _pool = pool;
+        _clients = pool.Pool;
         if (observer is not null)
-            _clients.SessionOpened += () => observer.SessionOpened(connectionId, StorageProvider.Sftp);
+        {
+            // Reported per rent, not through the pool's event: a shared pool serves other registrations too.
+            _sessionOpened = () => observer.SessionOpened(connectionId, StorageProvider.Sftp);
+        }
         _retry = new ProviderRetryPolicy(retry, connectionId, StorageProvider.Sftp, observer);
         _paths = new RemotePathResolver(root);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
     }
 
     internal ProviderPoolStats PoolStats => _clients.Stats;
+
+    /// <summary>Creates the session pool for a client factory; shared pools are created once per settings.</summary>
+    internal static ProviderClientPool<SftpClient> CreatePool(Func<SftpClient> clientFactory, StorageSessionConfig? session) =>
+        new(
+            clientFactory,
+            SftpHostKeyTracker.ConnectAsync,
+            static client => client.IsConnected,
+            DestroyClientAsync,
+            ProviderPoolOptions.From(session),
+            ProbeAsync);
+
+    /// <summary>Identifies the listing snapshots continuation tokens refer to; settings-based so tokens outlive a registration.</summary>
+    internal string? ListingScope { get; init; }
 
     /// <summary>Records the host key each session is offered; set by the factory.</summary>
     internal ServerIdentityRecorder? Identity { get; init; }
@@ -210,7 +234,7 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
             // The walk runs only when no snapshot is cached for this listing pass, so pages after
             // the first cost neither an SSH handshake nor a directory traversal.
             return await ProviderPaging.CreateAsync(
-                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                ProviderPaging.Scope(ListingScope ?? ConnectionId, target.StoragePath, options.Recursive),
                 options,
                 async token =>
                 {
@@ -283,21 +307,45 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         var resolved = _paths.Resolve(path, requireNonRoot: true);
         if (resolved.IsFailure) return Result<StorageItem>.Failure(resolved.Error!);
         SftpClient? client = null;
-        string? stagingPath = null;
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
-            var parent = RemotePathResolver.Parent(resolved.Value!.RemotePath);
-            if (options.CreateParents)
+            return await UploadWithClientAsync(client, resolved.Value!, source, options.Overwrite, options.CreateParents, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Upload SFTP file")); }
+        finally
+        {
+            if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Uploads through a staging file in the destination folder and renames it into place, on a session the caller
+    /// holds (so a copy reads its source and writes the destination on one session).
+    /// </summary>
+    private async Task<Result<StorageItem>> UploadWithClientAsync(
+        SftpClient client,
+        ResolvedRemotePath resolved,
+        Stream source,
+        bool overwrite,
+        bool createParents,
+        CancellationToken cancellationToken)
+    {
+        string? stagingPath = null;
+        try
+        {
+            var parent = RemotePathResolver.Parent(resolved.RemotePath);
+            if (createParents)
                 await EnsureDirectoryAsync(client, parent, cancellationToken).ConfigureAwait(false);
             else if (!await client.ExistsAsync(parent, cancellationToken).ConfigureAwait(false))
                 return Result<StorageItem>.Failure(StorageErrors.NotFound("The SFTP destination parent directory was not found."));
-            if (await client.ExistsAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false))
+            if (await client.ExistsAsync(resolved.RemotePath, cancellationToken).ConfigureAwait(false))
             {
-                var existing = await client.GetAttributesAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
+                var existing = await client.GetAttributesAsync(resolved.RemotePath, cancellationToken).ConfigureAwait(false);
                 if (existing.IsDirectory)
                     return Result<StorageItem>.Failure(StorageErrors.Conflict("The SFTP upload destination is a directory."));
-                if (!options.Overwrite)
+                if (!overwrite)
                     return Result<StorageItem>.Failure(StorageErrors.Conflict("The SFTP destination already exists."));
             }
             var staging = await AllocateTemporaryPathAsync(client, parent, "upload", cancellationToken).ConfigureAwait(false);
@@ -308,22 +356,23 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
             var committed = await CommitPathAsync(
                 client,
                 stagingPath,
-                resolved.Value.RemotePath,
-                options.Overwrite,
+                resolved.RemotePath,
+                overwrite,
                 cancellationToken).ConfigureAwait(false);
             if (committed.IsFailure)
+            {
+                // Committed, but the replaced file's backup stayed: the upload succeeded.
+                if (StorageErrorInfo.DestinationCommitted(committed.Error)) stagingPath = null;
                 return Result<StorageItem>.Failure(committed.Error!);
+            }
             stagingPath = null;
-            var attributes = await client.GetAttributesAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
-            return Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, attributes));
+            var attributes = await client.GetAttributesAsync(resolved.RemotePath, cancellationToken).ConfigureAwait(false);
+            return Result<StorageItem>.Success(ToItem(resolved.StoragePath, attributes));
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception error) { return Result<StorageItem>.Failure(Fail(client, error, "Upload SFTP file")); }
         finally
         {
-            if (client is not null && stagingPath is not null)
+            if (stagingPath is not null)
                 await TryDeletePathAsync(client, stagingPath).ConfigureAwait(false);
-            if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false);
         }
     }
 
@@ -337,7 +386,7 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken) =>
         _retry.ExecuteAsync("Download SFTP file", RetryKind.Idempotent, (_, token) => DownloadCoreAsync(path, options, token), cancellationToken);
@@ -432,11 +481,17 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Relayed through the client on one session, which reads the source and writes the destination, so a
+    /// connection limited to one session can still copy. SFTP has no ETags or versions: source pinning and
+    /// destination conditions are unsupported.
+    /// </remarks>
     public async Task<Result> CopyAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new StorageTransferOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return validation;
+        if (Unpinnable(options) is { } unsupported) return unsupported;
         var source = _paths.Resolve(sourcePath, requireNonRoot: true);
         if (source.IsFailure) return Result.Failure(source.Error!);
         var destination = _paths.Resolve(destinationPath, requireNonRoot: true);
@@ -445,26 +500,35 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
             source.Value!.StoragePath,
             destination.Value!.StoragePath);
         if (relationship.IsFailure) return relationship;
-        var info = await GetInfoAsync(source.Value.StoragePath, cancellationToken).ConfigureAwait(false);
-        if (info.IsFailure) return Result.Failure(info.Error!);
-        if (info.Value!.ItemType == StorageItemType.Directory)
+        SftpClient? client = null;
+        try
         {
-            relationship = StorageTransferPath.ValidateDirectoryDestination(
-                source.Value.StoragePath,
-                destination.Value.StoragePath);
-            if (relationship.IsFailure) return relationship;
-            return Result.Failure(StorageErrors.Unsupported("SFTP directory copy is not supported."));
+            client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            if (!await client.ExistsAsync(source.Value.RemotePath, cancellationToken).ConfigureAwait(false))
+                return Result.Failure(StorageErrors.NotFound($"SFTP item '{source.Value.StoragePath}' was not found."));
+            var attributes = await client.GetAttributesAsync(source.Value.RemotePath, cancellationToken).ConfigureAwait(false);
+            if (attributes.IsDirectory)
+            {
+                relationship = StorageTransferPath.ValidateDirectoryDestination(
+                    source.Value.StoragePath,
+                    destination.Value.StoragePath);
+                if (relationship.IsFailure) return relationship;
+                return Result.Failure(StorageErrors.Unsupported("SFTP directory copy is not supported."));
+            }
+            await using var stream = await client.OpenAsync(source.Value.RemotePath, FileMode.Open, FileAccess.Read, cancellationToken).ConfigureAwait(false);
+            var upload = await UploadWithClientAsync(client, destination.Value, stream, options.Overwrite, options.CreateParents, cancellationToken).ConfigureAwait(false);
+            return upload.IsSuccess ? Result.Success() : Result.Failure(upload.Error!);
         }
-        var download = await DownloadAsync(source.Value.StoragePath, cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (download.IsFailure) return Result.Failure(download.Error!);
-        await using var stream = download.Value!;
-        var upload = await UploadAsync(destination.Value.StoragePath, stream, new StorageUploadOptions
-        {
-            Overwrite = options.Overwrite,
-            CreateParents = options.CreateParents
-        }, cancellationToken).ConfigureAwait(false);
-        return upload.IsSuccess ? Result.Success() : Result.Failure(upload.Error!);
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception error) { return Result.Failure(Fail(client, error, "Copy SFTP file")); }
+        finally { if (client is not null) await ReleaseClientAsync(client).ConfigureAwait(false); }
     }
+
+    /// <summary>SFTP items have no ETag or version, so a copy or move cannot be pinned to one or conditioned on one.</summary>
+    private static Result? Unpinnable(StorageTransferOptions options) =>
+        options.ExpectedSourceETag is not null || options.SourceVersionId is not null || options.DestinationCondition is { IsEmpty: false }
+            ? Result.Failure(StorageErrors.Unsupported("SFTP cannot pin a copy or move to a source version or keep a destination condition."))
+            : (Result?)null;
 
     /// <inheritdoc />
     public Task<Result> MoveAsync(string sourcePath, string destinationPath, StorageTransferOptions? options = null, CancellationToken cancellationToken = default) =>
@@ -475,6 +539,7 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         options ??= new StorageTransferOptions();
         var validation = options.Validate();
         if (validation.IsFailure) return validation;
+        if (Unpinnable(options) is { } unsupported) return unsupported;
         var source = _paths.Resolve(sourcePath, requireNonRoot: true);
         if (source.IsFailure) return Result.Failure(source.Error!);
         var destination = _paths.Resolve(destinationPath, requireNonRoot: true);
@@ -626,8 +691,12 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         try
         {
             client = await OpenClientAsync(cancellationToken).ConfigureAwait(false);
+            // The server's append flag (SSH_FXF_APPEND, which also creates a missing file): every write lands at the
+            // end the server sees, so concurrent appenders do not overwrite each other as a client-side seek would.
             await using (var target = await client.OpenAsync(resolved.Value!.RemotePath, FileMode.Append, FileAccess.Write, cancellationToken).ConfigureAwait(false))
+            {
                 await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+            }
             var attributes = await client.GetAttributesAsync(resolved.Value.RemotePath, cancellationToken).ConfigureAwait(false);
             return Result<StorageItem>.Success(ToItem(resolved.Value.StoragePath, attributes));
         }
@@ -723,10 +792,13 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         }, cancellationToken);
 
     /// <inheritdoc />
-    public ValueTask DisposeAsync() => _clients.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        return _pool.ReleaseAsync();
+    }
 
     private Task<SftpClient> OpenClientAsync(CancellationToken cancellationToken) =>
-        _clients.RentAsync(cancellationToken);
+        _clients.RentAsync(cancellationToken, _sessionOpened);
 
     /// <summary>Returns a client to the pool so the next operation reuses its SSH session.</summary>
     private ValueTask ReleaseClientAsync(SftpClient client) => _clients.ReturnAsync(client);
@@ -771,7 +843,13 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         return items;
     }
 
-    private static async Task<Result> CommitPathAsync(
+    /// <summary>
+    /// Renames <paramref name="sourcePath"/> onto <paramref name="destinationPath"/>. An existing file destination
+    /// (with <paramref name="overwrite"/>) is first renamed to a backup, restored if the rename fails, and removed
+    /// after it succeeds; an existing directory is never replaced. A backup that cannot be removed after the
+    /// commit is reported with <c>destinationState=complete</c> and <c>leftBehind</c>.
+    /// </summary>
+    private async Task<Result> CommitPathAsync(
         SftpClient client,
         string sourcePath,
         string destinationPath,
@@ -787,6 +865,10 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
             return Result.Failure(StorageErrors.Conflict("The SFTP destination already exists."));
 
         var destinationAttributes = await client.GetAttributesAsync(destinationPath, cancellationToken).ConfigureAwait(false);
+        // Replacing a directory would delete everything in it (the backup is removed recursively): refuse, as a
+        // local move does; the caller can merge through a copy instead.
+        if (destinationAttributes.IsDirectory)
+            return Result.Failure(StorageErrors.Conflict("The SFTP destination is an existing directory, which is not replaced."));
         var backup = await AllocateTemporaryPathAsync(
             client,
             RemotePathResolver.Parent(destinationPath),
@@ -804,26 +886,23 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             if (await IsCommitCompleteAsync(client, sourcePath, destinationPath).ConfigureAwait(false))
-            {
-                _ = await DeleteBackupAsync(client, backupPath, destinationAttributes.IsDirectory).ConfigureAwait(false);
-                return Result.Success();
-            }
+                return await DeleteBackupAsync(client, backupPath).ConfigureAwait(false);
             _ = await TryRestoreBackupAsync(client, backupPath, destinationPath).ConfigureAwait(false);
             throw;
         }
         catch (Exception error)
         {
             if (await IsCommitCompleteAsync(client, sourcePath, destinationPath).ConfigureAwait(false))
-                return await DeleteBackupAsync(client, backupPath, destinationAttributes.IsDirectory).ConfigureAwait(false);
+                return await DeleteBackupAsync(client, backupPath).ConfigureAwait(false);
             var restored = await TryRestoreBackupAsync(client, backupPath, destinationPath).ConfigureAwait(false);
             return restored
                 ? Result.Failure(Map(error, "Commit SFTP replacement"))
                 : Result.Failure(StorageErrors.PartialFailure(
                     "The SFTP replacement failed and its previous destination could not be restored.",
-                    "destinationState=backup"));
+                    $"{StorageErrorInfo.DestinationStateKey}=backup;{StorageErrorInfo.LeftBehindKey}={_paths.FromRemotePath(backupPath) ?? backupPath}"));
         }
 
-        return await DeleteBackupAsync(client, backupPath, destinationAttributes.IsDirectory).ConfigureAwait(false);
+        return await DeleteBackupAsync(client, backupPath).ConfigureAwait(false);
     }
 
     private static async Task<Result<string>> AllocateTemporaryPathAsync(
@@ -878,26 +957,23 @@ public sealed class SftpStorageBackend : IStorageBackend, IStorageAttributeServi
         }
     }
 
-    private static async Task<Result> DeleteBackupAsync(
-        SftpClient client,
-        string backupPath,
-        bool directory)
+    /// <summary>Runs before the backup of a replaced file is removed, so a test can make the removal fail.</summary>
+    internal Func<SftpClient, string, Task>? BeforeBackupDelete { get; init; }
+
+    /// <summary>Removes the backup of a replaced file once the replacement committed.</summary>
+    private async Task<Result> DeleteBackupAsync(SftpClient client, string backupPath)
     {
         try
         {
-            await DeleteRemoteAsync(
-                client,
-                backupPath,
-                directory,
-                recursive: true,
-                CancellationToken.None).ConfigureAwait(false);
+            if (BeforeBackupDelete is { } hook) await hook(client, backupPath).ConfigureAwait(false);
+            await client.DeleteFileAsync(backupPath, CancellationToken.None).ConfigureAwait(false);
             return Result.Success();
         }
         catch
         {
             return Result.Failure(StorageErrors.PartialFailure(
                 "The SFTP destination committed, but its temporary backup could not be removed.",
-                "destinationState=complete;backupState=present"));
+                $"{StorageErrorInfo.DestinationStateKey}=complete;backupState=present;{StorageErrorInfo.LeftBehindKey}={_paths.FromRemotePath(backupPath) ?? backupPath}"));
         }
     }
 

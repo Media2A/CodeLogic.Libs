@@ -7,58 +7,58 @@ namespace CL.Storage.Configuration;
 public enum StorageFtpEncryptionMode
 {
     /// <summary>Uses unencrypted FTP.</summary>
-    None,
+    None = 0,
     /// <summary>Upgrades an FTP connection with explicit TLS.</summary>
-    Explicit,
+    Explicit = 1,
     /// <summary>Starts the connection using implicit TLS.</summary>
-    Implicit
+    Implicit = 2
 }
 
 /// <summary>Specifies how FTP data connections are established.</summary>
 public enum StorageFtpDataConnectionMode
 {
     /// <summary>Automatically chooses a passive strategy.</summary>
-    AutoPassive,
+    AutoPassive = 0,
     /// <summary>Uses extended passive mode.</summary>
-    Epsv,
+    Epsv = 1,
     /// <summary>Uses passive mode.</summary>
-    Pasv,
+    Pasv = 2,
     /// <summary>Automatically chooses an active strategy.</summary>
-    AutoActive,
+    AutoActive = 3,
     /// <summary>Uses extended active mode.</summary>
-    Eprt,
+    Eprt = 4,
     /// <summary>Uses active port mode.</summary>
-    Port
+    Port = 5
 }
 
 /// <summary>Specifies the FTP transfer type.</summary>
 public enum StorageFtpTransferType
 {
     /// <summary>Transfers bytes unchanged (TYPE I). Correct for every file type.</summary>
-    Binary,
+    Binary = 0,
     /// <summary>Converts line endings between client and server (TYPE A). Only for text files.</summary>
-    Ascii
+    Ascii = 1
 }
 
 /// <summary>Specifies how FTP directory listings are parsed.</summary>
 public enum StorageFtpListingParser
 {
     /// <summary>Detects the format from the server.</summary>
-    Auto,
+    Auto = 0,
     /// <summary>Machine-readable MLSD listings.</summary>
-    Machine,
+    Machine = 1,
     /// <summary>Unix <c>ls -l</c> style listings.</summary>
-    Unix,
+    Unix = 2,
     /// <summary>Alternative Unix listing parser for unusual servers.</summary>
-    UnixAlternative,
+    UnixAlternative = 3,
     /// <summary>Windows/IIS style listings.</summary>
-    Windows,
+    Windows = 4,
     /// <summary>OpenVMS listings.</summary>
-    Vms,
+    Vms = 5,
     /// <summary>IBM z/OS listings.</summary>
-    IbmZos,
+    IbmZos = 6,
     /// <summary>HP NonStop/Tandem listings.</summary>
-    NonStop
+    NonStop = 7
 }
 
 /// <summary>Defines named FTP and FTPS connections.</summary>
@@ -156,6 +156,14 @@ public sealed class FtpConnectionConfig : StorageConnectionConfigBase
     [ConfigField(Label = "Client certificate password", Secret = true, InputType = ConfigInputType.Password, Group = "TLS", Order = 31)]
     public string? ClientCertificatePassword { get; set; }
 
+    /// <summary>
+    /// Gets or sets the client certificate (PFX/PKCS#12) as bytes — base64 in JSON — for credentials kept in
+    /// a secret store rather than on disk. Mutually exclusive with <c>ClientCertificatePath</c>; decrypted
+    /// with <c>ClientCertificatePassword</c>.
+    /// </summary>
+    [ConfigField(Label = "Client certificate content", Secret = true, Group = "TLS", Order = 32)]
+    public byte[]? ClientCertificateContent { get; set; }
+
     /// <summary>Gets or sets the operation timeout in seconds.</summary>
     public int TimeoutSeconds { get; set; } = 30;
 
@@ -197,6 +205,8 @@ public sealed class FtpConnectionConfig : StorageConnectionConfigBase
             yield return "Root is invalid";
         if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && !Path.IsPathFullyQualified(ClientCertificatePath))
             yield return "ClientCertificatePath must be an absolute path";
+        if (!string.IsNullOrWhiteSpace(ClientCertificatePath) && ClientCertificateContent is { Length: > 0 })
+            yield return "Set ClientCertificatePath or ClientCertificateContent, not both";
         if (EncryptionMode == StorageFtpEncryptionMode.None && (TrustedCertificateSha256?.Count > 0 || TrustedPublicKeySha256?.Count > 0))
             yield return "Certificate and public-key pins require an encrypted FTP connection";
         foreach (var fingerprint in (TrustedCertificateSha256 ?? []).Concat(TrustedPublicKeySha256 ?? []))

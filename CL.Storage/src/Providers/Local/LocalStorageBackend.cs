@@ -38,6 +38,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
 
     private readonly LocalPathResolver _paths;
     private readonly long _maxBufferedDownloadBytes;
+    private readonly StorageCapabilities _capabilities;
 
     /// <summary>Initializes a sandboxed local-filesystem backend.</summary>
     /// <param name="connectionId">Unique connection ID exposed by the storage registry.</param>
@@ -57,16 +58,74 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         ConnectionId = connectionId;
         _paths = new LocalPathResolver(configuration.RootPath, configuration.FollowLinks);
         _maxBufferedDownloadBytes = maxBufferedDownloadBytes;
+        _capabilities = DetectCaseInsensitive(_paths.Root)
+            ? new StorageCapabilities(LocalCapabilities.Features | StorageFeature.CaseInsensitivePaths, LocalCapabilities.Limits)
+            : LocalCapabilities;
     }
 
     /// <inheritdoc />
     public string ConnectionId { get; }
+
+    /// <summary>Identifies the listing snapshots continuation tokens refer to; settings-based so tokens outlive a registration.</summary>
+    internal string? ListingScope { get; init; }
     /// <inheritdoc />
     public StorageProvider Provider => StorageProvider.Local;
     /// <inheritdoc />
     public string Root => _paths.Root;
     /// <inheritdoc />
-    public StorageCapabilities Capabilities => LocalCapabilities;
+    /// <remarks>
+    /// <see cref="StorageFeature.CaseInsensitivePaths"/> is decided by the root's file system, probed when the
+    /// connection is created (see <see cref="DetectCaseInsensitive"/>).
+    /// </remarks>
+    public StorageCapabilities Capabilities => _capabilities;
+
+    /// <summary>
+    /// Whether names under <paramref name="root"/> compare without regard to case. It depends on the file system and
+    /// the mount, not the operating system (APFS and ext4 volumes can be either, a Windows folder can be made
+    /// case-sensitive, a Linux mount of NTFS or SMB is not), so it is probed: an entry of the root, named with the
+    /// case of its ASCII letters swapped (see <see cref="SwapCase"/>), either resolves or not. A root with no such
+    /// entry, or one that cannot be read,
+    /// gets the operating system's default (Windows and macOS insensitive, others sensitive). Subfolders are assumed
+    /// to behave like the root.
+    /// </summary>
+    internal static bool DetectCaseInsensitive(string root)
+    {
+        try
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(root).Take(64))
+            {
+                var name = Path.GetFileName(entry);
+                var swapped = SwapCase(name);
+                if (string.Equals(swapped, name, StringComparison.Ordinal))
+                    continue;
+                if (!Path.Exists(Path.Combine(root, swapped)))
+                    return false;
+                // On a case-sensitive file system the swapped name may be another entry: it resolves, but not to this one.
+                var literal = Directory.EnumerateFileSystemEntries(root, swapped, new EnumerationOptions { MatchCasing = MatchCasing.CaseSensitive, RecurseSubdirectories = false });
+                if (literal.Any(found => string.Equals(Path.GetFileName(found), swapped, StringComparison.Ordinal)))
+                    continue;
+                return true;
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        return OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
+    }
+
+    /// <summary>
+    /// The name with the case of its ASCII letters swapped. Other letters are left alone: file systems fold case by
+    /// their own tables, which differ from .NET's invariant mapping outside ASCII (NTFS does not map Turkish dotless
+    /// <c>ı</c> to <c>I</c>, nor Georgian as .NET does), so only ASCII tells how the file system compares names. A name
+    /// without ASCII letters comes back unchanged and is skipped by the probe.
+    /// </summary>
+    internal static string SwapCase(string name) =>
+        string.Create(name.Length, name, static (span, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+            {
+                var c = source[i];
+                span[i] = char.IsAsciiLetterUpper(c) ? (char)(c + 32) : char.IsAsciiLetterLower(c) ? (char)(c - 32) : c;
+            }
+        });
 
     /// <inheritdoc />
     public Task<Result<StorageItem>> GetInfoAsync(string path, CancellationToken cancellationToken = default)
@@ -132,7 +191,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
             // Directory enumeration runs once per listing pass instead of once per page.
             var target = resolved.Value!;
             return await ProviderPaging.CreateAsync(
-                ProviderPaging.Scope(ConnectionId, target.StoragePath, options.Recursive),
+                ProviderPaging.Scope(ListingScope ?? ConnectionId, target.StoragePath, options.Recursive),
                 options,
                 token => Task.FromResult(Result<IEnumerable<StorageItem>>.Success(
                     EnumerateItems(target, options.Recursive, token).ToArray().AsEnumerable())),
@@ -253,7 +312,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
 
     /// <inheritdoc />
     public async Task<Result<Stream>> DownloadAsync(string path, StorageDownloadOptions? options = null, CancellationToken cancellationToken = default) =>
-        StorageTransferPipeline.Meter(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options);
+        await StorageTransferPipeline.MeterAsync(this, path, await DownloadUnmeteredAsync(path, options, cancellationToken).ConfigureAwait(false), options, cancellationToken).ConfigureAwait(false);
 
     private Task<Result<Stream>> DownloadUnmeteredAsync(string path, StorageDownloadOptions? options, CancellationToken cancellationToken)
     {
@@ -368,7 +427,7 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         try
         {
             var attributes = File.GetAttributes(resolved.Value.FullPath);
-            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == (FileAttributes.Directory | FileAttributes.ReparsePoint))
+            if ((attributes & FileAttributes.Directory) != 0 && LocalPathResolver.IsLink(resolved.Value.FullPath, attributes))
                 Directory.Delete(resolved.Value.FullPath, recursive: false); // removes the link, not the target tree
             else if ((attributes & FileAttributes.Directory) != 0)
                 Directory.Delete(resolved.Value.FullPath, options.Recursive);
@@ -555,14 +614,11 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
                 var item = CreateItem(storagePath, fullPath, attributes)!;
                 yield return item;
 
-                if (!recursive || (attributes & FileAttributes.Directory) == 0)
+                // A directory link is reported as a link and not descended into: whether to follow it is the
+                // caller's choice (LinkHandling), and its contents under the link's path would otherwise be taken
+                // for a real folder's.
+                if (!recursive || item.ItemType != StorageItemType.Directory)
                     continue;
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
-                {
-                    var resolvedLink = _paths.Resolve(storagePath);
-                    if (resolvedLink.IsFailure)
-                        continue;
-                }
                 if (!visited.Add(GetDirectoryIdentity(fullPath)))
                     continue;
                 pending.Push(new ResolvedLocalPath(storagePath, fullPath));
@@ -585,7 +641,9 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         try { attributes = knownAttributes ?? File.GetAttributes(fullPath); }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException) { return null; }
 
-        var type = (attributes & FileAttributes.ReparsePoint) != 0
+        // Only symbolic links and junctions are links: other reparse points (cloud-file placeholders such as
+        // OneDrive's, deduplicated files, app execution aliases) are ordinary files and folders.
+        var type = LocalPathResolver.IsLink(fullPath, attributes)
             ? StorageItemType.Link
             : (attributes & FileAttributes.Directory) != 0
                 ? StorageItemType.Directory
@@ -603,12 +661,21 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
             Created = new DateTimeOffset(info.CreationTimeUtc),
             LastAccessed = new DateTimeOffset(info.LastAccessTimeUtc),
             ContentType = type == StorageItemType.File ? GetContentType(info.Extension) : null,
-            ETag = null,
+            ETag = type == StorageItemType.File ? SyntheticETag((FileInfo)info) : null,
             UnixMode = OperatingSystem.IsWindows() ? null : (int)info.UnixFileMode,
             LinkTarget = type == StorageItemType.Link ? info.LinkTarget : null,
             IsHidden = (attributes & FileAttributes.Hidden) != 0 || name.StartsWith('.')
         };
     }
+
+    /// <summary>
+    /// A weak validator (<c>W/"…"</c>) built from the last-write time, the creation time (on Unix, the birth time or
+    /// the inode change time), and the length. It is not a content version: file systems with coarse timestamps
+    /// (FAT 2 s, exFAT, HFS+ 1 s, some SMB and NFS mounts) and tools that restore times can give two versions the
+    /// same value, so it must not be the only proof that content is unchanged, nor a resume identity.
+    /// </summary>
+    internal static string SyntheticETag(FileInfo info) =>
+        $"W/\"{info.LastWriteTimeUtc.Ticks:x}-{info.CreationTimeUtc.Ticks:x}-{info.Length:x}\"";
 
     /// <inheritdoc />
     public Task<Result> SetPermissionsAsync(string path, int unixMode, CancellationToken cancellationToken = default)
@@ -782,6 +849,10 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
         var validation = options.Validate();
         if (validation.IsFailure)
             return Result<TransferEndpoints>.Failure(validation.Error!);
+        // Local files have no versions and no enforced destination conditions.
+        if (options.SourceVersionId is not null || options.DestinationCondition is { IsEmpty: false })
+            return Result<TransferEndpoints>.Failure(StorageErrors.Unsupported(
+                "The local provider cannot pin a copy or move to a source version or keep a destination condition."));
         var source = _paths.Resolve(sourcePath);
         if (source.IsFailure)
             return Result<TransferEndpoints>.Failure(source.Error!);
@@ -796,6 +867,19 @@ public sealed class LocalStorageBackend : IStorageBackend, IStorageAttributeServ
             OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         if (relationship.IsFailure)
             return Result<TransferEndpoints>.Failure(relationship.Error!);
+        if (options.ExpectedSourceETag is { } expected)
+        {
+            // Compared immediately before the copy or move: a local file has no server to enforce it. The local ETag is
+            // weak (see SyntheticETag), so this is a weak comparison: a mismatch proves the file changed, a match is the
+            // best a local file can say and does not prove the content is the same.
+            var current = CreateItem(source.Value.StoragePath, source.Value.FullPath);
+            if (current is null)
+                return Result<TransferEndpoints>.Failure(StorageErrors.NotFound($"Storage item '{source.Value.StoragePath}' was not found."));
+            if (!StorageETags.WeakEquals(expected, current.ETag))
+                return Result<TransferEndpoints>.Failure(StorageErrors.Conflict(
+                    $"The source '{source.Value.StoragePath}' changed since it was read.",
+                    $"expectedETag={expected};actualETag={current.ETag}"));
+        }
         return Result<TransferEndpoints>.Success(new TransferEndpoints(source.Value, destination.Value));
     }
 

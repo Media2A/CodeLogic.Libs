@@ -51,6 +51,9 @@ internal sealed class S3StorageBackendFactory : IStorageBackendFactory
             value.DisablePayloadSigning,
             value.DisableDefaultChecksumValidation,
             value.MultipartPartSizeBytes,
-            value.MultipartThresholdBytes);
+            value.MultipartThresholdBytes)
+        {
+            ConditionalRequests = value.ConditionalRequests
+        };
     }
 }

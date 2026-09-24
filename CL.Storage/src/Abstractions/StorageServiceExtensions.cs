@@ -84,6 +84,8 @@ public static class StorageServiceExtensions
             // Newer-only conflict policies compare against the local file's modification time.
             if (options?.ConflictPolicy is not null && options.SourceLastModified is null)
                 options = options with { SourceLastModified = new DateTimeOffset(File.GetLastWriteTimeUtc(fullPath)) };
+            if (options?.ConflictPolicy == StorageConflictPolicy.Resume && options.SourceIdentity is null)
+                options = options with { SourceIdentity = fullPath };
             return await storage.UploadAsync(destinationPath, source, options, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -116,12 +118,8 @@ public static class StorageServiceExtensions
         try
         {
             var destination = Path.GetFullPath(destinationFilePath);
-            if (conflictPolicy == StorageConflictPolicy.Resume && File.Exists(destination) && options is null or { Offset: 0, Length: null })
-            {
-                var resumed = await ResumeDownloadAsync(storage, sourcePath, destination, options, cancellationToken).ConfigureAwait(false);
-                if (resumed is not null) return resumed.Value;
-                conflictPolicy = StorageConflictPolicy.Overwrite;
-            }
+            if (conflictPolicy == StorageConflictPolicy.Resume && options is null or { Offset: 0, Length: null })
+                return await ResumableDownloadAsync(storage, sourcePath, destination, options, createParents, cancellationToken).ConfigureAwait(false);
             if (conflictPolicy is not null)
             {
                 var decision = await DecideLocalConflictAsync(storage, sourcePath, destination, conflictPolicy.Value, options, cancellationToken).ConfigureAwait(false);
@@ -179,32 +177,97 @@ public static class StorageServiceExtensions
         }
     }
 
+    /// <summary>The remote version a resumable download's partial file holds the start of.</summary>
+    private sealed record PartialDownloadIdentity(string Source, long? Size, string? ETag, string? VersionId, DateTimeOffset? LastModified)
+    {
+        /// <summary>
+        /// Whether a partial recorded for this version is a prefix of <paramref name="current"/>: the same source,
+        /// length, and every identity the server reports, of which there must be at least one.
+        /// </summary>
+        public bool Proves(PartialDownloadIdentity current) =>
+            Size is not null && (current.ETag ?? current.VersionId ?? (object?)current.LastModified) is not null &&
+            this == current;
+    }
+
     /// <summary>
-    /// Continues a partial local download by appending the missing range. Returns null when the local
-    /// file is larger than the remote one, so the caller downloads it again from the start.
+    /// Downloads with <see cref="StorageConflictPolicy.Resume"/>: the content goes to a partial file next to the
+    /// destination (<c>name.clstorage-partial</c>), with the remote version it holds recorded beside it
+    /// (<c>name.clstorage-partial.json</c>) before the first byte. An interrupted download keeps both, and the next
+    /// one appends only the missing range, but only while the remote is still that version; anything else, including
+    /// a local file this download did not leave, is downloaded again from the start. The destination is replaced only
+    /// when the content is complete.
     /// </summary>
-    private static async Task<Result<FileInfo>?> ResumeDownloadAsync(
+    private static async Task<Result<FileInfo>> ResumableDownloadAsync(
         IStorageService storage,
         string sourcePath,
         string destination,
         StorageDownloadOptions? options,
+        bool createParents,
         CancellationToken cancellationToken)
     {
+        var parent = Path.GetDirectoryName(destination);
+        if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(Path.GetFileName(destination)))
+            return Result<FileInfo>.Failure(StorageErrors.InvalidPath("The destination must identify a file."));
+        if (createParents)
+            Directory.CreateDirectory(parent);
+        else if (!Directory.Exists(parent))
+            return Result<FileInfo>.Failure(StorageErrors.NotFound("The destination parent directory was not found."));
+
         var remote = await storage.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         if (remote.IsFailure) return Result<FileInfo>.Failure(remote.Error!);
-        var present = new FileInfo(destination).Length;
-        if (remote.Value!.Size is not { } total || present > total) return null;
-        if (present == total) return Result<FileInfo>.Success(new FileInfo(destination));
-
-        var rest = await storage.DownloadAsync(sourcePath, (options ?? new StorageDownloadOptions()) with { Offset = present }, cancellationToken).ConfigureAwait(false);
-        if (rest.IsFailure) return Result<FileInfo>.Failure(rest.Error!);
-        await using (var source = rest.Value!)
-        await using (var target = new FileStream(destination, FileMode.Append, FileAccess.Write, FileShare.None, 65_536, FileOptions.Asynchronous))
+        var identity = IdentityOf(sourcePath, remote.Value!, options);
+        var partial = destination + ".clstorage-partial";
+        var record = partial + ".json";
+        var offset = File.Exists(partial) && ReadPartialIdentity(record) is { } recorded && recorded.Proves(identity) &&
+            new FileInfo(partial).Length is var present && present <= identity.Size
+            ? present
+            : 0;
+        if (offset == 0)
         {
-            await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
-            await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+            File.Delete(partial);
+            await File.WriteAllTextAsync(record, JsonSerializer.Serialize(identity), cancellationToken).ConfigureAwait(false);
         }
+
+        if (identity.Size is not { } total || offset < total)
+        {
+            var download = await storage.DownloadAsync(sourcePath, (options ?? new StorageDownloadOptions()) with { Offset = offset }, cancellationToken).ConfigureAwait(false);
+            if (download.IsFailure) return Result<FileInfo>.Failure(download.Error!);
+            await using (var source = download.Value!)
+            await using (var target = new FileStream(partial, offset == 0 ? FileMode.Create : FileMode.Append, FileAccess.Write, FileShare.None, 65_536, FileOptions.Asynchronous))
+            {
+                await source.CopyToAsync(target, 65_536, cancellationToken).ConfigureAwait(false);
+                await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                target.Flush(flushToDisk: true);
+            }
+        }
+        if (offset > 0)
+        {
+            // The tail must come from the same version as the prefix.
+            var after = await storage.GetInfoAsync(sourcePath, cancellationToken).ConfigureAwait(false);
+            if (after.IsFailure) return Result<FileInfo>.Failure(after.Error!);
+            if (!identity.Proves(IdentityOf(sourcePath, after.Value!, options)))
+            {
+                File.Delete(partial);
+                File.Delete(record);
+                return Result<FileInfo>.Failure(StorageErrors.Conflict("The remote file changed while the download was resumed; download it again."));
+            }
+        }
+        if (identity.Size is { } expected && new FileInfo(partial).Length != expected)
+            return Result<FileInfo>.Failure(StorageErrors.Conflict(
+                $"The downloaded content is {new FileInfo(partial).Length} bytes, not {expected}.",
+                $"expectedLength={expected};actualLength={new FileInfo(partial).Length}"));
+        File.Move(partial, destination, overwrite: true);
+        File.Delete(record);
         return Result<FileInfo>.Success(new FileInfo(destination));
+    }
+
+    private static PartialDownloadIdentity IdentityOf(string sourcePath, StorageItem item, StorageDownloadOptions? options) =>
+        new(sourcePath, item.Size, item.ETag, options?.VersionId ?? item.VersionId, item.LastModified);
+
+    private static PartialDownloadIdentity? ReadPartialIdentity(string record)
+    {
+        try { return JsonSerializer.Deserialize<PartialDownloadIdentity>(File.ReadAllText(record)); }
+        catch (Exception) { return null; }
     }
 
     /// <summary>Applies a conflict policy to a local download destination.</summary>

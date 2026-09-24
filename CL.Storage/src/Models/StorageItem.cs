@@ -19,6 +19,12 @@ public sealed record StorageItem
     public long? Size { get; init; }
     /// <summary>Gets the provider's last-modified timestamp when available.</summary>
     public DateTimeOffset? LastModified { get; init; }
+    /// <summary>
+    /// How coarse <see cref="LastModified"/> is when the provider only knows it to a unit — an FTP listing without
+    /// MLSD gives minutes, or days for older files — or null when it is as exact as the provider reports times.
+    /// The item's real time lies in [<see cref="LastModified"/>, <see cref="LastModified"/> + this).
+    /// </summary>
+    public TimeSpan? ModifiedPrecision { get; init; }
     /// <summary>Gets the provider content type for a file.</summary>
     public string? ContentType { get; init; }
     /// <summary>Gets the provider entity tag without assuming it is a content hash.</summary>
@@ -45,6 +51,11 @@ public sealed record StorageItem
     public DateTimeOffset? LastAccessed { get; init; }
     /// <summary>Gets whether the item is hidden: a dot-file, or marked hidden on Windows.</summary>
     public bool IsHidden { get; init; }
+    /// <summary>
+    /// Gets the content's SHA-256 (lowercase hex) when the operation that returned this item computed it — a
+    /// verified upload or streamed write; listings and info leave it null.
+    /// </summary>
+    public string? Sha256 { get; init; }
 
     /// <summary>Gets an immutable snapshot of provider metadata.</summary>
     public IReadOnlyDictionary<string, string> Metadata

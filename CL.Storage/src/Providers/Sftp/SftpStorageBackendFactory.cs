@@ -8,26 +8,41 @@ using Renci.SshNet.Common;
 
 namespace CL.Storage.Providers.Sftp;
 
-internal sealed class SftpStorageBackendFactory : IStorageBackendFactory
+internal sealed class SftpStorageBackendFactory : IStorageBackendFactory, IIsolatedStorageBackendFactory
 {
     public Type ConfigurationType => typeof(SftpConnectionConfig);
     public StorageProvider Provider => StorageProvider.Sftp;
 
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
+        => Create(connectionId, configuration, maxBufferedDownloadBytes, observer, share: true);
+
+    public IStorageBackend CreateIsolated(string connectionId, object configuration, long maxBufferedDownloadBytes)
+        => Create(connectionId, configuration, maxBufferedDownloadBytes, observer: null, share: false);
+
+    private static SftpStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer, bool share)
     {
-        var value = (SftpConnectionConfig)configuration;
-        var identity = new ServerIdentityRecorder();
+        // Registrations with identical settings share one pool, so re-registering keeps warm sessions. The pool works
+        // from a copy of the settings, so the caller's object changing later cannot make it differ from its key.
+        var (value, key) = ProviderSettingsKey.Snapshot((SftpConnectionConfig)configuration);
+        SharedPool<SftpClient> Build()
+        {
+            var recorder = new ServerIdentityRecorder();
+            return new SharedPool<SftpClient>(SftpStorageBackend.CreatePool(() => CreateClient(value, recorder), value.Session), recorder);
+        }
+        // The observer is the registering library's own, so it identifies the library the pool lingers for.
+        var shared = share ? SharedResources.Acquire(key, Build, pool => pool.Pool.DisposeAsync(), observer) : Build();
+        var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new SftpStorageBackend(
             connectionId,
-            () => CreateClient(value, identity),
+            share ? new SharedPoolHandle<SftpClient>(key, shared, linger) : new OwnedPool<SftpClient>(shared.Pool),
             value.Root,
             maxBufferedDownloadBytes,
-            value.Session,
             value.Retry,
             observer)
         {
             CommandClientFactory = value.AllowRawCommands ? () => CreateCommandClient(value) : null,
-            Identity = identity
+            Identity = shared.Identity,
+            ListingScope = key
         };
     }
 
