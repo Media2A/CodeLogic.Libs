@@ -101,13 +101,19 @@ Treat signed URLs as credentials and never log them.
 
 `StorageMutationCondition` applies ETag/version guards to uploads and deletes:
 
-- **Uploads** are atomic on S3 (conditional uploads, which AWS and MinIO enforce; see
-  `ConditionalRequests`), Azure Blob, and Google Cloud. Everywhere else the content is staged and the
-  condition checked immediately before the staged file replaces the destination.
+- **Uploads** are atomic on S3 servers that enforce conditions on `PutObject` (AWS and MinIO; under
+  `ConditionalRequests = Auto` this is probed, and a condition the server ignores or rejects is not sent
+  but checked just before), Azure Blob, and Google Cloud. Everywhere else the content is staged and the
+  condition checked immediately before the staged file replaces the destination. An upload returns the
+  stored item, not how its condition was enforced; ask the connection with
+  `GetConditionEnforcementAsync` (see [Guaranteed transfers](transfers.md#guaranteed-transfers)).
 - **Deletes** are atomic on Azure Blob, Google Cloud, and S3 servers that enforce `If-Match` on
   `DeleteObject`. Swift, and S3 servers that ignore it (MinIO), check the condition immediately before the
   delete. Local, FTP, SFTP, and WebDAV refuse a conditional delete with `storage.unsupported`.
 - Swift ignores `If-Match` on writes, so it declares only `ConditionalCreate`.
+- Local ETags are weak (`W/"…"`): a different one proves the file changed, but a matching one does not
+  prove it did not (two versions written within the file system's clock resolution can share it).
+- A WebDAV upload never replaces a folder: an existing collection at the destination is `storage.conflict`.
 
 ```csharp
 await files.UploadAsync("settings.json", replacement, new StorageUploadOptions

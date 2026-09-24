@@ -171,12 +171,23 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
   `DestinationCommitted`, `SourceDeleted`, `StagingLeftBehind`, and `BackupLeftBehind`; do not retry blindly.
 - `SourceDeleted` is `true` only when the whole source is gone; a directory move that kept skipped files is
   `Completed` with `SourceDeleted = false`.
-- A committed destination is never rolled back. A backup the library could not remove after a successful
-  transfer used to make it `NeedsReconciliation`; it is now `Completed` with `BackupLeftBehind` set.
+- A single file's committed destination is never rolled back. A backup the library could not remove after
+  a successful transfer used to make it `NeedsReconciliation`; it is now `Completed` with
+  `BackupLeftBehind` set. A directory transfer that fails part-way rolls back only files still holding the
+  version it committed; others are left and the transfer is `NeedsReconciliation`.
+- A cancel that lands after the commit does not make the report `Cancelled`: check `DestinationCommitted`
+  and `Outcome` rather than treating every cancel as "nothing happened".
+- Staged uploads and `StorageWriteStream.CommitAsync` can fail with `storage.partial_failure` and
+  `destinationState=complete` (`StorageErrorInfo.DestinationCommitted`) when the content was written but
+  something was left behind (`leftBehind` entries): treat that as written, not as a failed upload.
 - A directory moved onto an existing directory on the same connection now merges. Code that relied on FTP,
   SFTP, or WebDAV replacing the existing directory must delete it first.
 - `Rename` names differ: `name (1).txt` goes on to `name (2).txt`, and `file.` becomes `file. (1)`.
-- FTP connections with `Session.MaxSessions = 1` cannot relay within the connection; raise it to 2.
+- FTP and SFTP connections with `Session.MaxSessions = 1` cannot relay within the connection (a copy with
+  guarantees, a directory copy, an SFTP file copy through the library); raise it to 2. Renames and moves on
+  the server, `ConflictPolicy = Rename` included, need only one session.
+- Code that reads `ConditionEnforcement` should expect `CheckedBeforeCommit` for same-connection moves on
+  WebDAV and for sources without ETag or version (the source is compared just before the server's move).
 - `UploadDirectoryAsync`/`DownloadDirectoryAsync` return a failed result instead of throwing when a cancelled
   transfer could not roll back.
 
@@ -185,9 +196,22 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
 - `ConflictPolicy.Resume` resumes through a staging object; the destination is replaced only when complete.
   A partial destination left by the old in-place resume is not continued; it is replaced once the staged
   copy completes. On object stores `Resume` now rewrites instead of returning `storage.unsupported`.
-- Resuming an upload needs `SourceIdentity` or `SourceLastModified` (`UploadFileAsync` sets both).
-  `SourceIdentity` must change whenever the content does: a content id or version, or a path together with
-  `SourceLastModified`.
+- Resuming an upload needs `SourceLastModified` (`UploadFileAsync` sets it), or a `SourceIdentity` that
+  changes whenever the content does (a hash, ETag, or version id) marked with
+  `SourceIdentityIsContentVersion = true`. A `SourceIdentity` alone, such as a path, is refused with
+  `storage.invalid_content`:
+
+  ```csharp
+  await files.UploadAsync("big/image.iso", stream, new StorageUploadOptions
+  {
+      ConflictPolicy = StorageConflictPolicy.Resume,
+      SourceIdentity = contentSha256, SourceIdentityIsContentVersion = true   // or: SourceLastModified = sourceTime
+  });
+  ```
+- Copies from a local source (weak ETag) resume staged bytes only with `Verify = true`.
+- Part files are held across processes by a `<part file>.lock` marker beside them; leave such markers
+  alone (a marker whose process is gone is taken over; one from another machine after 24 hours).
+  `CleanupStaleStagingAsync` removes old ones with the rest of the staging.
 - A destination of the same size is no longer "already complete": both sides need the same digest.
 - A stored `ResumeToken` together with `Overwrite = false` or `ConflictPolicy = Fail` fails validation; use
   `ConflictPolicy = Resume`.
@@ -196,7 +220,9 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
 
 - Local items now have an ETag (they had none): a weak `W/"…"` of write time, creation time, and length.
   Code that treated a null ETag as "local" should check `Provider`. The ETag can repeat on coarse file
-  systems or after a tool restores file times; do not use it as proof of unchanged content.
+  systems or after a tool restores file times; do not use it as proof of unchanged content. The library
+  compares it as a weak validator: a mismatch proves a change, a match proves nothing more than size and
+  time.
 - On Windows only symbolic links and junctions are links; OneDrive placeholders and other reparse points
   are files. Recursive local listings no longer descend into links to folders.
 
@@ -209,6 +235,7 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
 | `StorageTransferPriority.High` | an integer, e.g. `priority: 10` (higher starts first) |
 | `Guid` job ids (also on the started/completed/failed events) | `string` ids, optionally chosen by the caller |
 | `queue.Cancel(id)`, `Retry(id)`, `RetryFailed()`, `ClearFinished()` | `CancelAsync`, `RetryAsync`, `RetryFailedAsync`, `ClearAsync()` |
+| `queue.EnqueueDownload(src, path, local, StorageConflictPolicy.Resume)` | `await queue.EnqueueDownloadAsync(src, path, local, conflictPolicy: StorageConflictPolicy.Resume)`; the new fourth parameter is `StorageDownloadOptions? options` |
 | `RetryDelay` | `RetryBaseDelay` and `RetryMaxDelay` (exponential backoff) |
 | `new StorageTransferJob(...)`, `Deconstruct` | not available; read the get-only properties |
 | `job.EnqueuedAt`, `job.FinishedAt` | `job.Record.EnqueuedAt`, `job.Record.FinishedAt` |
@@ -223,6 +250,15 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
   with `RetryAsync`. Handle the new states `Paused`, `Blocked`, `NeedsReconciliation`, and `Interrupted`.
 - Stored `StorageTransferState` numbers keep their meaning: 0–4 are `Queued`, `Running`, `Completed`,
   `Failed`, and `Cancelled`, as in 4.8.93; new states are numbered after them.
+- `PauseJobAsync`, `CancelAsync`, and `RemoveAsync` on a running job return `storage.timeout` after
+  `ControlTimeout` (30 s by default) when the transfer has not stopped; the request still takes effect
+  later. Set `ControlTimeout = TimeSpan.Zero` to return as soon as the request is recorded.
+- A job whose store saves fail 8 times in a row ends `Failed` with `storage.unavailable`; retry it with
+  `RetryAsync` once the store works.
+- Keep the store open until `DisposeAsync` has returned; after that the queue does not use it. Do not
+  call the library's synchronous `Dispose()` on a UI thread: it blocks while the queues stop.
+- Progress and job handlers without an `EventContext` must not wait synchronously on the queue's methods.
+- Give each running queue its own `WorkerId` (the service and a desktop app sharing a store included).
 
 ### Sync
 
@@ -246,7 +282,18 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
 - **Refused now:** `LinkHandling = Recreate`; a plan applied with another `SyncId`, other connections, other
   options, or made by an earlier version (plan again); trees over `MaxItems` (1,000,000).
 - **Case.** `CompareAsync` fails when a case-insensitive side has two names that differ only by case.
-- `StorageSyncActionKind` numbers are unchanged (0–3 as before), with new kinds after them.
+- `StorageSyncActionKind` numbers are unchanged (0–3 as before), with new kinds after them:
+  `DeleteFromSource` (4), `CreateDirectoryAtSource` (5), `RenameAtDestination` (6), and `Conflict` (7).
+  `StorageDiffReason` adds `Undecidable` (32). Handle them in exhaustive switches.
+- **Plans and ids.** A plan records connection ids only and is refused when applied to connections
+  registered under other ids: keep connection ids stable (do not generate a new id on every
+  registration). The baseline is bound to `SyncId` only: use one `SyncId` per pair of folders.
+  `ApplyWithConflicts` and `Compare.HashConcurrency` may now differ between planning and applying; plans
+  stored by preview builds of this release are refused (plan again).
+- **Exact versions at apply.** Deletes and overwrites no longer accept a same-size file within
+  `TimeTolerance`; on FTP servers without `MLSD` expect such steps to be reported `Stale`.
+- **Links.** With `LinkHandling = Follow`, followed folders now list their target's contents, and
+  nothing is deleted or replaced through a link; copies carry `ReadPath`.
 
 ### Listings, watching, and providers
 
@@ -261,7 +308,14 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
 - A TLS stream that breaks after the handshake is `storage.connection_lost` (transient), not
   `storage.tls_failure`.
 - For S3-compatible servers other than AWS and MinIO, check which conditional requests they enforce and set
-  `ConditionalRequests` (`Auto` probes copies and deletes and trusts uploads).
+  `ConditionalRequests`. `Auto` probes uploads, copies, and deletes with real writes of
+  `.cl-storage-probe-*` objects (they need `PutObject`/`DeleteObject` permission, and leave versions and
+  delete markers on versioned buckets); choose `Enforced` or `NotEnforced` to avoid the probe. Under
+  `Auto` the `ConditionalCreate`/`ConditionalUpdate`/`ConditionalDelete` flags are provisional until the
+  probe has run: before relying on one, ask `GetConditionEnforcementAsync`.
+- WebDAV non-recursive folder deletes need a server with WebDAV locks (class 2); others now answer
+  `storage.unsupported` and keep the folder. WebDAV uploads onto an existing folder are refused.
+- Azure moves delete the source's snapshots; copy and delete yourself to keep them.
 
 ### Shared sessions and tokens
 

@@ -34,10 +34,23 @@ are listed under *Added*, even where they changed while this release was being b
   call, an unknown connection id (`storage.not_found`), and a provider that throws.
   `IStorageService.CopyAsync`/`MoveAsync` on a connection still return `Result` and throw
   `OperationCanceledException` on a cancel, as in 4.8.93.
-- Once a destination is committed it is never rolled back. A failure after the commit (for example a
+- A single file's committed destination is never rolled back. A failure after the commit (for example a
   backup that could not be removed) is reported: `Completed` with `BackupLeftBehind` or
   `StagingLeftBehind`, and a provider error carrying `destinationState=complete` is a committed transfer.
-  A destination that does not hold the committed length is `NeedsReconciliation` even without `Verify`.
+  A destination that does not hold the committed length is `NeedsReconciliation` even without `Verify`,
+  and the previous version is then kept and named in `BackupLeftBehind`, never deleted.
+- A directory transfer that fails part-way still rolls back the files it committed, but each only while it
+  is still the version it committed (a conditional delete or restore where the provider enforces one,
+  otherwise a comparison just before). A file changed meanwhile, or whose committed version is unknown, is
+  left in place, and the transfer is `NeedsReconciliation` (`rollbackError=storage.conflict`).
+- A cancel or exception after the commit is no longer reported as `Cancelled`/`Failed`: a copy is
+  `Completed`, a move whose source is gone is `Completed`, and one whose source is still (partly) there is
+  `NeedsReconciliation` with `destinationState=complete` (and `sourceItemsDeleted=N` for a directory move).
+  The copy event is published in every case, with the files actually committed.
+- Staged uploads (`Verify`, `ExpectedLength`, `ExpectedSha256`, `Resume`) and `StorageWriteStream.CommitAsync`
+  can fail with `storage.partial_failure` carrying `destinationState=complete` and `leftBehind=<path>`
+  entries when the content committed but the provider left an internal object behind; treat such a
+  result as written.
 - A directory move deletes its source file by file, each only while it is still the version listed, then
   removes the emptied folders without recursion. Files added or changed on the source during the move stay,
   and the move is `NeedsReconciliation` (`sourceChanged=N;sourceAdded=N`) where it used to delete the whole
@@ -51,16 +64,27 @@ are listed under *Added*, even where they changed while this release was being b
   report the same digest.
 - `StorageConflictPolicy.Resume` resumes a staging object and promotes it when complete, instead of
   appending to the destination in place; without `Append` it rewrites from the start instead of failing
-  with `storage.unsupported`. Uploads need `SourceIdentity` or `SourceLastModified` to resume
-  (`UploadFileAsync` sets both), otherwise `storage.invalid_content`. Copies resume only from sources
-  with an ETag, time, or version.
+  with `storage.unsupported`. Uploads need `SourceLastModified`, or a `SourceIdentity` marked
+  `SourceIdentityIsContentVersion`, to resume (`UploadFileAsync` sets the time); a `SourceIdentity` alone
+  (a path) is refused with `storage.invalid_content`. Copies resume only from sources with an ETag, time,
+  or version, and from a source with only a weak ETag (Local) only with `Verify`.
+- A resumable staging object is held across processes by a create-only lock marker beside it
+  (`<part file>.lock`) until it is promoted; a second transfer stages privately (not resumable). A marker
+  whose owner is gone is taken over (same machine: when its process no longer runs; another machine: after
+  24 hours). A connection that cannot create the marker create-only never resumes.
 - `Rename` names: the first free name is taken, `name (1).txt` goes on to `name (2).txt` (it used to
   become `name (1) (1).txt`), `file.` becomes `file. (1)`, and a folder at a candidate name counts as taken.
 - Validation is stricter: an upload `Condition` together with a conflict policy other than `Overwrite`, and
   empty `SourceVersionId`/`ExpectedSourceETag`, are refused.
 - FTP and SFTP overwrites no longer download and re-upload a backup of the old file (their replace renames
-  it aside). A relay within one FTP connection with `Session.MaxSessions = 1` fails at once with
-  `storage.unsupported` (`requiredSessions=2;maxSessions=1`) instead of timing out.
+  it aside). A relay within one FTP or SFTP connection with `Session.MaxSessions = 1` fails at once with
+  `storage.unsupported` (`requiredSessions=2;maxSessions=1`) instead of timing out; renames and moves on
+  the server (including `ConflictPolicy = Rename`, which picks the free name first) use one session.
+- A same-connection file move that cannot be pinned to the version read (WebDAV, or a source without ETag
+  or version) compares the source immediately before the server's own move and reports
+  `ConditionEnforcement = CheckedBeforeCommit`, instead of relaying the bytes through the client.
+- A native directory move reports `Files`, `Directories`, and `Bytes` (counted at the destination), and a
+  directory transfer reports the weakest `ConditionEnforcement` of its files and what they left behind.
 - `UploadDirectoryAsync`/`DownloadDirectoryAsync`: a cancelled transfer whose rollback failed returns a
   failed result (`storage.partial_failure`) instead of throwing.
 
@@ -83,6 +107,22 @@ are listed under *Added*, even where they changed while this release was being b
 - `StorageTransferState` keeps its 4.8.93 numbers (`Queued` 0, `Running` 1, `Completed` 2, `Failed` 3,
   `Cancelled` 4); `Paused`, `Blocked`, `NeedsReconciliation`, and `Interrupted` follow them. Exhaustive
   switches need the new states. Every public enum now spells out its numbers.
+- `EnqueueDownload` became `EnqueueDownloadAsync(sourceConnectionId, sourcePath, localFilePath, options,
+  conflictPolicy, priority, jobId, cancellationToken)`: a new `StorageDownloadOptions? options` parameter
+  comes before `conflictPolicy`, so a positional conflict policy must be passed by name
+  (`conflictPolicy: StorageConflictPolicy.Resume`).
+- Pausing, cancelling, or removing a running job waits for its attempt to stop for at most
+  `ControlTimeout` (30 s by default) and then fails with `storage.timeout`; the request still takes effect
+  when the attempt stops.
+- A job whose store saves keep failing is retried with a growing delay, and fails with
+  `storage.unavailable` after 8 attempts in a row (it used to be retried for ever).
+- `MoveUpAsync`/`MoveDownAsync` among jobs that share an order make room instead of returning
+  `storage.conflict`. A null job id is a failed result (`storage.invalid_content`) instead of an exception.
+- Once `DisposeAsync` returns, the queue no longer calls its store; an attempt that outlived
+  `ShutdownTimeout` records nothing more and is recovered once its lease lapses.
+- Store contract: revisions continue across removal and re-adding of an id (as fencing tokens do); a JSON
+  store skips rows it cannot read in `LoadAsync`; a store's own revision and lease columns win over the
+  copies inside the record's JSON.
 
 **Sync and compare**
 
@@ -90,7 +130,9 @@ are listed under *Added*, even where they changed while this release was being b
   `OperationCanceledException`: it returns a success whose `report.Cancelled` is `true` (steps not started
   are `NotRun`, and a two-way baseline is still saved). Cancelling while planning still throws.
 - `StorageSyncAction` is a record with named properties and no `Error` (its constructor and `Deconstruct`
-  changed). `StorageSyncReport` is no longer positional (its constructor and `Deconstruct` are gone);
+  changed). `StorageSyncActionKind` keeps 0–3 (`CopyToDestination`, `CopyToSource`, `DeleteFromDestination`,
+  `CreateDirectory`) and adds `DeleteFromSource` (4), `CreateDirectoryAtSource` (5), `RenameAtDestination`
+  (6), and `Conflict` (7); `StorageDiffReason` adds `Undecidable` (32). Exhaustive switches need them. `StorageSyncReport` is no longer positional (its constructor and `Deconstruct` are gone);
   `Actions` and `Unchanged` are get-only and `Actions` lists the planned steps, conflicts included. Outcomes are in `report.Results`, and
   `report.Failed` is a list of `StorageSyncActionResult`.
 - `TwoWay` without a baseline reports differing files as conflicts (`Block` by default) instead of letting
@@ -103,8 +145,20 @@ are listed under *Added*, even where they changed while this release was being b
 - `StorageCompareOptions.LinkHandling = Recreate` is refused.
 - Plans: applying a plan with options for another `SyncId`, for other connections, in an older plan format,
   or with options other than the plan's (only `MaxConcurrency`, `ItemRetries`, `ContinueOnError`,
-  `DryRun`, `Progress`, and `StateStore` may change) is refused; two applies of one `SyncId` in a process
-  run one after the other.
+  `DryRun`, `Progress`, `StateStore`, `ApplyWithConflicts`, and `Compare.HashConcurrency` may change) is
+  refused; two applies of one `SyncId` in a process run one after the other. A plan is bound to connection
+  ids only (keep them stable); the baseline to `SyncId` only. The options digest changed during this
+  release, so plans made by earlier preview builds are refused: plan again.
+- What a sync deletes, overwrites, or renames aside must be exactly the planned version: no time tolerance
+  at apply. On FTP servers without `MLSD`, which list times to the minute, such steps can end `Stale`.
+- `LinkHandling.Follow` lists a followed link to a folder with its target's contents (up to 8 links deep;
+  a link leading back into a folder being listed is left out), filters a link as what it leads to, reads
+  copies through the link (`StorageSyncAction.ReadPath`), and never deletes or replaces anything through
+  a followed link.
+- One-way plans leave alone what the destination left out (a hidden item there, a skipped link): nothing
+  is written onto or through it, and it no longer withholds deletes.
+- Planning returns a failure instead of throwing for a provider whose listing throws or a filter pattern
+  that times out (`storage.invalid_content`).
 - A tree over `MaxItems` (1,000,000 by default) fails the plan.
 - `CompareAsync` fails on names that differ only by case on a case-insensitive side instead of returning
   two entries.
@@ -125,12 +179,29 @@ are listed under *Added*, even where they changed while this release was being b
   descend into links to folders.
 - Swift no longer declares `ConditionalUpdate` or `ConditionalDelete` (the server ignores `If-Match` on
   writes); conditions are checked just before instead. WebDAV no longer declares `AtomicMove`.
+- S3 under `ConditionalRequests = Auto`: the probe also covers `PutObject` (uploads are no longer trusted
+  unprobed), a condition found ignored or rejected is not sent at all, the `ConditionalCreate`/
+  `ConditionalUpdate`/`ConditionalDelete` flags are provisional until the probe has run and then name only
+  what is enforced (MinIO loses all three), and an inconclusive probe backs off from 1 to 32 minutes. The
+  probe's writes leave versions and delete markers on versioned buckets and fire notifications.
+- S3: a `CopyObject` or `CompleteMultipartUpload` is not cancelled once sent; server-side copies above 5 GiB
+  use parts of at least 128 MiB. Azure: a started copy is waited for whatever the caller's token says; a
+  move deletes the source's snapshots.
+- WebDAV: an upload onto an existing folder is refused (`storage.conflict`); a non-recursive folder delete
+  locks the collection and deletes it only while empty, and a server without locks answers
+  `storage.unsupported` (the folder stays). FTP: a non-recursive folder delete is a raw `RMD`; a recursive
+  one removes hidden files too.
+- Local ETags are compared as weak validators: a match never proves an unchanged file (checks fall through
+  to size and time). The case probe looks at ASCII letters only.
+- On Windows the machine key store is used for a client certificate only when the user key store is
+  unavailable; a wrong password is reported as it is.
 - `CopyAsync`/`MoveAsync` on a backend return `storage.unsupported` for pins or destination conditions they
   cannot enforce (FTP, SFTP, WebDAV, Local for `SourceVersionId`) instead of ignoring them.
 - A PKCS#12 client certificate without its private key fails registration.
 - A TLS stream that fails after the handshake is `storage.connection_lost` (transient), no longer
   `storage.tls_failure`; `client_certificate_rejected` needs proof that this connection's certificate was
-  refused.
+  refused, and explains only the attempt that sent its request on that connection (a spare connection
+  closed unused records nothing). Behind an HTTP proxy tunnel it is not detected.
 - FTP and SFTP registrations with identical settings share one session pool, so `MaxSessions` caps them
   together. Listing continuation tokens on Local, FTP, SFTP, and WebDAV are tied to the settings instead of
   the connection id (a listing over 250,000 items is not kept, so its token is walked again).
@@ -144,7 +215,8 @@ are listed under *Added*, even where they changed while this release was being b
   `SourceDeleted`, `StagingLeftBehind`, `BackupRestored`, `BackupLeftBehind`, `ResumeToken`).
 - **Guaranteed single-file transfers**: `DestinationCondition`, `SourceVersionId` (needs `Versioning`),
   `ExpectedSourceETag`, `ExpectedSourceLength`, `Verify`, and `ExpectedSha256` on `StorageTransferOptions`;
-  `ExpectedLength`, `Verify`, `ExpectedSha256`, and `SourceIdentity` on `StorageUploadOptions`. Content is
+  `ExpectedLength`, `Verify`, `ExpectedSha256`, `SourceIdentity`, and `SourceIdentityIsContentVersion` on
+  `StorageUploadOptions`. Content is
   staged, checked, confirmed, and promoted; the destination condition is handed to the provider's move.
 - **Staged resume** with `StorageResumeToken`, which survives restarts; one writer per staging object.
 - **`OpenWriteAsync`**: a push-style write stream with `CommitAsync` and `AbortAsync`;
@@ -177,7 +249,13 @@ are listed under *Added*, even where they changed while this release was being b
   key stays in memory; on macOS .NET keeps it in a temporary keychain; on Windows it goes into a
   non-persisted key container deleted with the connection.
 - `S3ConnectionConfig.ConditionalRequests` (`Auto`, `Enforced`, `NotEnforced`): how far to trust an
-  S3-compatible server's conditional requests; `Auto` probes copies and deletes once per connection.
+  S3-compatible server's conditional requests; `Auto` probes uploads, copies, and deletes once per
+  connection.
+- `StorageConditionKind` (`CreateOnly` 0, `MatchVersion` 1, `DeleteMatchVersion` 2) and the
+  `IStorageService.GetConditionEnforcementAsync(kind, serverSideCopy, cancellationToken)` extension
+  (`CL.Storage.Abstractions`): how a connection enforces a condition, `Atomic` or `CheckedBeforeCommit`.
+- `StorageTransferQueueOptions.ControlTimeout` (zero to one day, 30 s by default).
+- `StorageSyncAction.ReadPath`: where a copy reached through a followed link reads its content.
 - `StorageSessionConfig.LingerSeconds`; `StorageWatchOptions.Incremental`, `FullRescanEvery`, and
   `PollFailed`; `StorageChangeKind.Overflow`.
 - Download progress carries `TotalBytes` even without a `Length`.
@@ -204,6 +282,16 @@ are listed under *Added*, even where they changed while this release was being b
 - Moving a directory onto an existing one on FTP, SFTP, or WebDAV deleted the existing directory.
 - Windows reparse points that are not links (OneDrive placeholders, deduplicated files) were treated as
   links and skipped.
+- Found while this release was reviewed (round 4), relative to earlier preview builds: same-server
+  `Rename` relayed (and failed with one session); a sync into an empty folder spelled differently made a
+  second folder; a refused conditional promote brought back a destination deleted meanwhile; a failed
+  confirm deleted the only previous version; non-recursive folder deletes on FTP and WebDAV could delete
+  contents; resumes across processes could mix data; spare TLS connections turned drops into
+  `client_certificate_rejected`; an upload resume keyed only by a path continued an edited file; a hidden
+  folder's contents showed on later pages of object-store listings; a same-size edit within the time
+  tolerance could be deleted or overwritten by a sync; a folder left with old staging stayed `Stale` for
+  ever; queue controls could wait for ever, a failed remove could leave a job unstarted, and a newer-schema
+  record could be run by an older worker.
 
 ## 2026-09-22
 
