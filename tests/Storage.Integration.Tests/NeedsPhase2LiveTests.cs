@@ -41,6 +41,10 @@ internal sealed class LiveLibrary : IAsyncDisposable
         await live.Library.OnStartAsync(context);
         foreach (var (id, config) in connections)
         {
+            // A cloud emulator's bucket or container is created by whichever test uses it first; make sure
+            // it exists here too, so these tests do not depend on running after one that creates it.
+            if (config is S3ConnectionConfig or AzureBlobConnectionConfig or GoogleCloudConnectionConfig or SwiftConnectionConfig)
+                await (await CloudEmulators.CreateAsync((StorageConnectionConfigBase)config)).DisposeAsync();
             var added = config switch
             {
                 LocalConnectionConfig local => await live.Library.AddOrUpdateConnectionAsync(id, local),
