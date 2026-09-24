@@ -16,9 +16,11 @@ connection cannot do it. Check `Capabilities` first when you need to know in adv
 | `Owner`, `Group` | FTP listings |
 | `OwnerId`, `GroupId` | SFTP |
 | `LinkTarget` | FTP listings, local |
-| `Created`, `LastAccessed` | local, SFTP (`LastAccessed`) |
+| `Created`, `LastAccessed` | local, FTP listings (`Created`), SFTP (`LastAccessed`) |
 | `IsHidden` | dot-files; local hidden attribute |
 | `ETag`, `VersionId`, `ContentType`, metadata | object stores, WebDAV; local files get a weak ETag (`W/"…"`) from their write time, creation time, and size |
+| `ModifiedPrecision` | how coarse `LastModified` is when a listing gives only minutes or days (FTP `LIST` without `MLSD`); null when exact |
+| `Sha256` | only on an item returned by a verified upload or streamed write |
 
 ## Permissions, ownership, timestamps, and links
 
@@ -35,7 +37,7 @@ var link = await files.ReadLinkAsync("current");
 |---|---|---|---|
 | Permissions (`Permissions`) | Unix only | `SITE CHMOD` | yes, incl. setuid/setgid/sticky |
 | Owner/group (`Ownership`) | no | no | numeric IDs |
-| Timestamps (`SetTimestamps`) | modified + accessed | modified (`MFMT`) | modified + accessed |
+| Timestamps (`SetTimestamps`) | modified + accessed | modified only (`MFMT` or `MDTM`) | modified + accessed |
 | Create link (`CreateLinks`) | yes (relative) | no | yes |
 | Read link (`ReadLinks`) | yes | from listings | no (SSH.NET lacks `readlink`) |
 
@@ -68,16 +70,23 @@ there for interoperability; prefer SHA-256 or stronger for security-sensitive ch
 
 ## Metadata, tags, versions, and signed URLs
 
-| Provider | Metadata | Tags | Conditional create/update/delete | Versions | Signed URLs |
-|---|---|---|---|---|---|
-| Local / UNC | no | no | create | no | no |
-| S3-compatible | read/write | read/write | yes/yes/yes (per server, see below) | read/list/delete | read/write |
-| FTP / FTPS | no | no | no | no | no |
-| SFTP | no | no | no | no | no |
-| WebDAV | discovered properties, read-only | no | create | no | no |
-| Azure Blob | read/write | read/write | yes/yes/yes | read/list/delete | SAS when credentials permit |
-| Google Cloud Storage | read/write | no | yes/yes/yes | read/list/delete | when signing credentials permit |
-| OpenStack Swift | read/write | no | create (update/delete checked just before) | native only; reads by version id | no |
+| Provider | Directories | Metadata | Tags | Conditional create/update/delete | Versions | Signed URLs |
+|---|---|---|---|---|---|---|
+| Local / UNC | physical | no | no | create | no | no |
+| S3-compatible | virtual | read/write | read/write | yes/yes/yes (per server, see below) | read/list/delete | read/write |
+| FTP / FTPS | physical | no | no | no | no | no |
+| SFTP | physical | no | no | no | no | no |
+| WebDAV | physical | discovered properties, read-only | no | create | no | no |
+| Azure Blob | virtual | read/write | read/write | yes/yes/yes | read/list/delete | SAS when credentials permit |
+| Google Cloud Storage | virtual | read/write | no | yes/yes/yes | read/list/delete | when signing credentials permit |
+| OpenStack Swift | virtual | read/write | no | create (update/delete checked just before) | no list or delete; downloads and server-side copies can read a version id | no |
+
+The optional contracts behind these are `IStorageMetadataService` (merge or replace user metadata,
+optionally matching an ETag or version), `IStorageTagService` (up to ten portable tags),
+`IStorageSignedUrlService` (read or write URLs with bounded expiry), and `IStorageVersionService` (version
+pages and exact-version deletes). The extension methods below, with `EnumerateVersionPagesAsync`, call them
+and return `storage.unsupported` where a connection has none. A relayed transfer that pins an older
+`SourceVersionId` needs `IStorageVersionService` on the source.
 
 ```csharp
 var metadata = await files.GetMetadataAsync("asset.bin");
@@ -101,12 +110,21 @@ Treat signed URLs as credentials and never log them.
 
 `StorageMutationCondition` applies ETag/version guards to uploads and deletes:
 
-- **Uploads** are atomic on S3 servers that enforce conditions on `PutObject` (AWS and MinIO; under
-  `ConditionalRequests = Auto` this is probed, and a condition the server ignores or rejects is not sent
-  but checked just before), Azure Blob, and Google Cloud. Everywhere else the content is staged and the
+- **Uploads** with an ETag or version `Condition` are atomic on Azure Blob, Google Cloud, and S3 servers
+  that enforce `If-Match` on both `PutObject` and `CopyObject` (AWS; under `ConditionalRequests = Auto` this
+  is probed). Everywhere else, MinIO included once the probe has run, the content is staged and the
   condition checked immediately before the staged file replaces the destination. An upload returns the
   stored item, not how its condition was enforced; ask the connection with
-  `GetConditionEnforcementAsync` (see [Guaranteed transfers](transfers.md#guaranteed-transfers)).
+  `GetConditionEnforcementAsync` (see [Guaranteed transfers](transfers.md#guaranteed-transfers)), or check
+  `StorageFeature.ConditionalUpdate`, which is what decides the staging (on MinIO,
+  `GetConditionEnforcementAsync(MatchVersion)` answers `Atomic` for uploads although they are staged).
+- **Create-only uploads** (`Overwrite = false`, not otherwise staged) are atomic on Local, WebDAV, S3
+  servers that enforce `If-None-Match` on `PutObject` (AWS and MinIO), Azure Blob, Google Cloud, and Swift.
+  FTP and SFTP have no atomic create-if-absent and do not declare `StorageFeature.ConditionalCreate`; a
+  caller that must not race should check that flag (MinIO's is cleared after the probe, because its copies
+  do not enforce it) or ask `GetConditionEnforcementAsync(StorageConditionKind.CreateOnly)`. Local
+  overwrites are staged too: the new content is written to a
+  temporary file in the same folder and moved over the target, so a reader never sees a half-written file.
 - **Deletes** are atomic on Azure Blob, Google Cloud, and S3 servers that enforce `If-Match` on
   `DeleteObject`. Swift, and S3 servers that ignore it (MinIO), check the condition immediately before the
   delete. Local, FTP, SFTP, and WebDAV refuse a conditional delete with `storage.unsupported`.
@@ -133,15 +151,16 @@ if (reply.IsSuccess && !reply.Value!.Succeeded)
     Console.WriteLine($"Server said {reply.Value.Code}: {reply.Value.Output}");
 ```
 
-It is off by default because commands are not confined to the connection's `Root`. A rejected command
-or non-zero exit comes back as a result with `Succeeded = false`, not as an error. Servers that allow
-only SFTP (`ForceCommand internal-sftp`) refuse shell commands.
+It is off by default because commands are not confined to the connection's `Root` (an SSH command starts
+in the account's home folder). A rejected command or non-zero exit comes back as a result with
+`Succeeded = false`, not as an error; an empty or multi-line FTP command is `storage.invalid_content`.
+Servers that allow only SFTP (`ForceCommand internal-sftp`) refuse shell commands.
 
 ## Free space
 
 `GetSpaceAsync` reports free and used space: SFTP through `statvfs@openssh.com`, FTP through `AVBL`
-where the server implements it, and local connections from the volume. WebDAV and object stores
-return `storage.unsupported`.
+where the server implements it (available bytes only; total and used stay null), and local connections
+from the volume. WebDAV and object stores return `storage.unsupported`.
 
 ```csharp
 var space = await files.GetSpaceAsync();
