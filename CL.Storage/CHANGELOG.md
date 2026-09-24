@@ -361,6 +361,9 @@ are listed under *Added*, even where they changed while this release was being b
   took one of equal size as complete, without checking it was the same file. It now downloads into a
   partial file with the remote version recorded beside it, resumes only while the remote is still that
   version, and otherwise downloads from the start.
+- Removing a running queue job deleted its record even when the attempt ended `NeedsReconciliation`
+  (a move whose copy committed), so nobody was told both source and destination exist. That job is now
+  kept, and `RemoveAsync` returns `storage.conflict`.
 
 ## 2026-09-22
 

@@ -415,7 +415,9 @@ public sealed class StorageTransferQueue : IAsyncDisposable
     /// job's revision, so a job another process changed meanwhile is reloaded instead (<c>storage.conflict</c>).
     /// A running job is cancelled first and removed when its attempt stops; the call returns then, with the
     /// store's answer, or with <c>storage.timeout</c> after <see cref="StorageTransferQueueOptions.ControlTimeout"/>
-    /// (the removal still happens when the attempt stops).
+    /// (the removal still happens when the attempt stops). An attempt that ends
+    /// <see cref="StorageTransferState.NeedsReconciliation"/> keeps the job, and the call fails with
+    /// <c>storage.conflict</c>.
     /// </summary>
     public Task<Result> RemoveAsync(string jobId, CancellationToken cancellationToken = default) =>
         ControlAsync(jobId, ControlRequest.Remove, cancellationToken);
@@ -864,6 +866,12 @@ public sealed class StorageTransferQueue : IAsyncDisposable
             else if (entry.HoldCount > 0 && !settling)
             {
                 return Result.Failure(StorageErrors.Conflict($"Job '{jobId}' is being changed; try again."));
+            }
+            else if (request == ControlRequest.Remove && settling && entry.Record.State == StorageTransferState.NeedsReconciliation)
+            {
+                // Asked while its attempt ran, which ended needing a person's decision: kept, as above.
+                return Result.Failure(StorageErrors.Conflict(
+                    $"Job '{jobId}' changed its destination before it could be stopped; it needs reconciliation, so it was kept."));
             }
             else if (request == ControlRequest.Remove)
             {
@@ -1401,7 +1409,14 @@ public sealed class StorageTransferQueue : IAsyncDisposable
                 var (next, isTransient, gaveUp) = Decide(entry, result, report, phase, holder, fallback);
                 transient = isTransient;
                 if (gaveUp) outcomeError = next.Failure!.ToError();
-                if (request == ControlRequest.Remove)
+                if (request == ControlRequest.Remove && next.State == StorageTransferState.NeedsReconciliation)
+                {
+                    // Removing it would hide that a person must decide (a move whose copy committed: both source
+                    // and destination exist now), so it is kept and the caller told why.
+                    removeError = StorageErrors.Conflict(
+                        $"Job '{claimed.Id}' changed its destination before it could be stopped; it needs reconciliation, so it was kept.");
+                }
+                else if (request == ControlRequest.Remove)
                 {
                     StorageTransferJobRecord current;
                     lock (_gate) current = entry.Record;

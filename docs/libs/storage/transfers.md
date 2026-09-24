@@ -617,8 +617,9 @@ The numbers of `StorageTransferState` are fixed: `Queued` 0 to `Cancelled` 4 as 
   `RetriesLeft` (clearing its failure and block reason), so backoff starts from the base delay again.
 - Pausing or cancelling a running job waits until its transfer has stopped, and succeeds only if it took
   effect; when the job finished first, or committed a move, the call returns `storage.conflict`. Removing a
-  running job cancels it and removes it once its attempt stops, however the attempt ended (a completed job,
-  or one that needs reconciliation, is removed too). The wait is bounded by
+  running job cancels it and removes it once its attempt stops (a completed job is removed too), except
+  when the attempt ended `NeedsReconciliation` (a move whose copy committed): that job is kept, and the call
+  returns `storage.conflict` saying why. The wait is bounded by
   `StorageTransferQueueOptions.ControlTimeout` (30 s by default, zero to one day) and by the call's token,
   since a provider may not honour cancellation at once, or at all. The request is held by the queue before
   the wait and still takes effect when the attempt stops; a call that stops waiting first fails with

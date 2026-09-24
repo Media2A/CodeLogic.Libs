@@ -3,7 +3,10 @@ using CL.Storage.Configuration;
 using CL.Storage.Errors;
 using CL.Storage.Models;
 using CL.Storage.Providers;
+using CL.Storage.Providers.Local;
 using CL.Storage.Providers.S3;
+using CL.Storage.Queue;
+using CodeLogic.Core.Events;
 using CL.Storage.Registry;
 using CodeLogic.Core.Results;
 using Xunit;
@@ -263,5 +266,54 @@ public sealed class FinalFixesTests
         Assert.True(restarted.IsSuccess, restarted.Error?.ToString());
         Assert.Equal([0L, 0L], offsets);
         Assert.Equal(Enumerable.Repeat((byte)7, 100).ToArray(), await File.ReadAllBytesAsync(target));
+    }
+
+    // ---------------------------------------------------------------- F5
+
+    private static readonly TimeSpan Wait = TimeSpan.FromSeconds(30);
+
+    /// <summary>A library with a local <c>Destination</c> connection, and the directory it lives in.</summary>
+    private static async Task<(global::CL.Storage.StorageLibrary Library, TestDirectory Directory, LocalStorageBackend Destination)> QueueLibraryAsync()
+    {
+        var directory = new TestDirectory();
+        var context = StorageLibraryTestSupport.CreateContext(directory.Path, new EventBus());
+        var library = new global::CL.Storage.StorageLibrary();
+        await StorageLibraryTestSupport.InitializeAsync(library, context, storage => storage.Enabled = false);
+        var destination = new LocalStorageBackend("Destination", new LocalConnectionConfig { RootPath = directory.CreateDirectory("dst") });
+        Assert.True(library.RegisterBackend("Destination", destination).IsSuccess);
+        return (library, directory, destination);
+    }
+
+    [Fact] // needs-review F5
+    public async Task Removing_a_running_move_whose_copy_committed_keeps_the_job_for_reconciliation()
+    {
+        var (library, directory, destination) = await QueueLibraryAsync();
+        using var _l = library; using var _d = directory;
+        var deleting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // The source delete of the move never finishes on its own: the copy has committed when it is stopped.
+        var sticky = new FakeStorageBackend(
+            "Sticky",
+            getInfo: (path, _) => Task.FromResult(Result<StorageItem>.Success(new StorageItem { Path = path, Name = path, ItemType = StorageItemType.File, Size = 1 })),
+            downloadWithOptions: (_, _, _) => Task.FromResult(Result<Stream>.Success(new MemoryStream([1]))),
+            delete: async (_, token) =>
+            {
+                deleting.TrySetResult();
+                await Task.Delay(Timeout.Infinite, token);
+                return Result.Success();
+            });
+        Assert.True(library.RegisterBackend("Sticky", sticky).IsSuccess);
+        var store = new InMemoryStorageTransferJobStore();
+        var opened = await library.OpenTransferQueueAsync(new StorageTransferQueueOptions { Store = store });
+        await using var queue = opened.Value!;
+
+        var job = (await queue.EnqueueMoveAsync("Sticky", "a.bin", "Destination", "a.bin")).Value!;
+        await deleting.Task.WaitAsync(Wait);
+        var removed = await queue.RemoveAsync(job.Id);
+        await queue.WaitForIdleAsync().WaitAsync(Wait);
+
+        Assert.Equal(StorageErrors.ConflictCode, removed.Error?.Code);
+        Assert.Equal(StorageTransferState.NeedsReconciliation, queue.Get(job.Id)?.State);
+        Assert.Equal(StorageTransferState.NeedsReconciliation, (await store.GetAsync(job.Id, default))?.State);
+        Assert.True((await destination.ExistsAsync("a.bin")).Value);
     }
 }
