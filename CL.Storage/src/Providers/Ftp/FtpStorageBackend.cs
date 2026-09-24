@@ -1169,6 +1169,7 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             },
             Size = item.Type == FtpObjectType.File && item.Size >= 0 ? item.Size : null,
             LastModified = Utc(item.Modified),
+            ModifiedPrecision = ListedPrecision(item),
             Created = Utc(item.Created),
             UnixMode = ModeOf(item.Chmod),
             Owner = string.IsNullOrWhiteSpace(item.RawOwner) ? null : item.RawOwner,
@@ -1177,6 +1178,25 @@ public sealed class FtpStorageBackend : IStorageBackend, IStorageAttributeServic
             IsHidden = name.StartsWith('.')
         };
     }
+
+    /// <summary>
+    /// How coarse a listed time is. A LIST line gives minutes ("Sep 24 12:34", "09-24-26 12:34PM"), or only a date
+    /// for files older than about six months ("Sep 24 2025"); MLSD/MLST ("modify=") and MDTM, which leaves no line,
+    /// give exact seconds. Comparing an exact time with a listed one must allow for this, or an unchanged file on a
+    /// LIST-only server would look changed every time.
+    /// </summary>
+    internal static TimeSpan? ListedPrecision(FtpListItem item)
+    {
+        var line = item.Input;
+        if (string.IsNullOrEmpty(line) || item.Modified == DateTime.MinValue) return null;
+        if (line.Contains("modify=", StringComparison.OrdinalIgnoreCase)) return null;
+        return ListedTimeOfDay.IsMatch(line) ? TimeSpan.FromMinutes(1) : TimeSpan.FromDays(1);
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex ListedTimeOfDay = new(
+        @"(?<![\d:])\d{1,2}:\d{2}(?![\d:])",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(100));
 
     /// <summary>
     /// The client converts listing times to UTC; an unspecified kind must not be reinterpreted as the

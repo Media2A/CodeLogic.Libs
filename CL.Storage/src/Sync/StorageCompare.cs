@@ -547,7 +547,7 @@ public static class StorageCompare
         !storage.Capabilities.Supports(StorageFeature.SetTimestamps) &&
         !item.Metadata.ContainsKey(StorageCompareOptions.ModifiedMetadataKey);
 
-    private static StorageDiffReason Basic(StorageItem left, StorageItem right, StorageCompareOptions options)
+    internal static StorageDiffReason Basic(StorageItem left, StorageItem right, StorageCompareOptions options)
     {
         if (left.ItemType != right.ItemType)
             return StorageDiffReason.Type;
@@ -560,8 +560,11 @@ public static class StorageCompare
             reasons |= StorageDiffReason.Size;
         if (options.CompareBy.HasFlag(StorageCompareBy.Time) && EffectiveModified(left) is { } l && EffectiveModified(right) is { } r)
         {
-            if (l - r > options.TimeTolerance) reasons |= StorageDiffReason.SourceNewer;
-            else if (r - l > options.TimeTolerance) reasons |= StorageDiffReason.DestinationNewer;
+            // A coarse time (an FTP listing gives minutes) stands for the interval it was truncated from.
+            var lHigh = l + (left.ModifiedPrecision ?? TimeSpan.Zero);
+            var rHigh = r + (right.ModifiedPrecision ?? TimeSpan.Zero);
+            if (l - rHigh > options.TimeTolerance) reasons |= StorageDiffReason.SourceNewer;
+            else if (r - lHigh > options.TimeTolerance) reasons |= StorageDiffReason.DestinationNewer;
         }
         return reasons;
     }

@@ -99,7 +99,16 @@ public sealed record StorageSyncIdentity(long? Size, DateTimeOffset? Modified, s
     internal static StorageSyncIdentity? Of(StorageItem? item) =>
         item is null || item.ItemType == StorageItemType.Directory
             ? null
-            : new StorageSyncIdentity(item.Size, StorageCompare.EffectiveModified(item), item.ETag, item.VersionId, item.Sha256);
+            : new StorageSyncIdentity(item.Size, StorageCompare.EffectiveModified(item), item.ETag, item.VersionId, item.Sha256)
+            {
+                ModifiedPrecision = item.ModifiedPrecision
+            };
+
+    /// <summary>
+    /// How coarse <see cref="StorageSyncIdentity.Modified"/> was when it was read (an FTP listing without MLSD gives
+    /// minutes); null when exact. See <see cref="StorageItem.ModifiedPrecision"/>.
+    /// </summary>
+    public TimeSpan? ModifiedPrecision { get; init; }
 
     /// <summary>Whether an item is still this version: by version, else ETag, else size and time.</summary>
     internal bool Matches(StorageItem? item, TimeSpan tolerance)
@@ -114,7 +123,8 @@ public sealed record StorageSyncIdentity(long? Size, DateTimeOffset? Modified, s
         }
         var modified = StorageCompare.EffectiveModified(item);
         return Size == item.Size &&
-               (Modified is null || modified is null || (Modified.Value - modified.Value).Duration() <= tolerance);
+               (Modified is null || modified is null ||
+                SameTime(Modified.Value, ModifiedPrecision, modified.Value, item.ModifiedPrecision, tolerance));
     }
 
     /// <summary>Whether two identities describe the same version.</summary>
@@ -127,7 +137,22 @@ public sealed record StorageSyncIdentity(long? Size, DateTimeOffset? Modified, s
             if (!Providers.StorageETags.WeakEquals(ETag, other.ETag)) return false;
             if (!Providers.StorageETags.IsWeak(ETag) && !Providers.StorageETags.IsWeak(other.ETag)) return true;
         }
-        return Size == other.Size && (Modified is null || other.Modified is null || (Modified.Value - other.Modified.Value).Duration() <= tolerance);
+        return Size == other.Size && (Modified is null || other.Modified is null ||
+            SameTime(Modified.Value, ModifiedPrecision, other.Modified.Value, other.ModifiedPrecision, tolerance));
+    }
+
+    /// <summary>
+    /// Whether two modification times agree within <paramref name="tolerance"/>, where a coarse time (one with a
+    /// precision) stands for the interval [time, time + precision) it was truncated from.
+    /// </summary>
+    internal static bool SameTime(DateTimeOffset a, TimeSpan? aPrecision, DateTimeOffset b, TimeSpan? bPrecision, TimeSpan tolerance)
+    {
+        var aHigh = a + (aPrecision ?? TimeSpan.Zero);
+        var bHigh = b + (bPrecision ?? TimeSpan.Zero);
+        if (aPrecision is null && bPrecision is null) return (a - b).Duration() <= tolerance;
+        // The intervals, widened by the tolerance, overlap; a coarse interval is half-open.
+        return a - bHigh < tolerance + (bPrecision is null ? TimeSpan.FromTicks(1) : TimeSpan.Zero) &&
+               b - aHigh < tolerance + (aPrecision is null ? TimeSpan.FromTicks(1) : TimeSpan.Zero);
     }
 }
 
