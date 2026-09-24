@@ -17,7 +17,7 @@ Every provider maps its own failures to the same codes:
 | `storage.not_found` | the item does not exist | FTP 550, SFTP no-such-file, HTTP 404/410 |
 | `storage.conflict` | the destination exists, or a condition failed | `ConflictPolicy.Fail`, ETag mismatch, HTTP 409/412/423 |
 | `storage.invalid_path` | the path escapes the mount or is malformed | `..`, a local path outside the root, FTP 501/553 |
-| `storage.invalid_content` | an argument or option is invalid | bad octal mode, bad command text |
+| `storage.invalid_content` | an argument or option is invalid | bad octal mode, bad command text, invalid connection settings (`AddOrUpdateConnectionAsync`, `TestConnectionAsync`) |
 | `storage.too_large` | a bounded read or upload exceeded its limit | `DownloadBytesAsync` limits, HTTP 413, a sync tree over `MaxItems` |
 | `storage.unsupported` | the connection cannot do this | missing capability, server lacks a command |
 | `storage.authentication_failed` | the credentials were rejected | FTP 530, SSH auth, HTTP 401 |
@@ -32,7 +32,7 @@ Every provider maps its own failures to the same codes:
 | `storage.unavailable` | the service is unavailable | provider outages, other HTTP 5xx, FTP 450 and other 4xx replies; a disposed transfer queue; a job whose store failed 8 times in a row |
 | `storage.partial_failure` | a multi-step operation stopped halfway | restore or move-source deletion failed, a WebDAV `207 Multi-Status` |
 | `storage.cancelled` | the caller cancelled, reported where a report says what was left | a cancelled `CopyAsync`/`MoveAsync` (`Outcome = Cancelled`) |
-| `storage.provider_error` | anything not classified above | carries the exception type (never its message); invalid settings passed to `AddOrUpdateConnectionAsync` |
+| `storage.provider_error` | anything not classified above | carries the exception type (never its message) |
 | `storage.unauthorized` | legacy code, not raised by the built-in providers | `StorageErrors.Create` still maps it |
 
 Classify errors by `Code` (or `StorageErrorInfo.IsTransient`), not by the Core error kind:

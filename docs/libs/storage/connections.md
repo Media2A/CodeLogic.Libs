@@ -260,7 +260,8 @@ Result<HealthStatus> health = await storage.CheckConnectionHealthAsync("backup")
 Runtime changes are persisted to the provider's JSON section, or installed for the process only with
 `persist: false`. A new or replacing connection is health-checked before it goes live, and in-flight
 operations and leases on a replaced one drain first. Invalid settings, a failed build, or a failed health
-check return a failed `Result` (invalid settings and a build failure as `storage.provider_error`); an id
+check return a failed `Result` (invalid settings as `storage.invalid_content`, a build failure as
+`storage.provider_error`); an id
 already used by another provider is `storage.conflict`. `RemoveConnectionAsync(id, persist)` removes one,
 `TryGetStorage` looks one up without throwing, `GetConnections()` lists them, and
 `RegisterBackend`/`RegisterBackendAsync` install a custom `IStorageBackend` for the process only.
@@ -300,8 +301,9 @@ required. `persist` only updates the in-memory copy. Pass library-wide settings 
 `TestConnectionAsync` tries settings without saving or registering them, even before the library is
 initialized. It reports each step it ran — `validate`, `connect`, `list`, `details` — and stops at the
 first failure of the first three; a failed `details` step is recorded, but the test still succeeds (with
-no `Diagnostics`). Settings identical to a registered FTP or SFTP connection's share its session pool, so
-the test may reuse a warm session:
+no `Diagnostics`). The test opens its own sessions and closes them when it ends, even when the settings are
+identical to a registered connection's; invalid settings fail the `validate` step with
+`storage.invalid_content`, as `AddOrUpdateConnectionAsync` does:
 
 ```csharp
 var settings = new SftpConnectionConfig { Host = "sftp.example.com", Username = "deploy", Password = "..." };

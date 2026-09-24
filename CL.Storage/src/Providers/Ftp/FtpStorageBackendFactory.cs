@@ -9,12 +9,18 @@ using FluentFTP.Proxy.AsyncProxy;
 
 namespace CL.Storage.Providers.Ftp;
 
-internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
+internal sealed class FtpStorageBackendFactory : IStorageBackendFactory, IIsolatedStorageBackendFactory
 {
     public Type ConfigurationType => typeof(FtpConnectionConfig);
     public StorageProvider Provider => StorageProvider.Ftp;
 
     public IStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer = null)
+        => Create(connectionId, configuration, maxBufferedDownloadBytes, observer, share: true);
+
+    public IStorageBackend CreateIsolated(string connectionId, object configuration, long maxBufferedDownloadBytes)
+        => Create(connectionId, configuration, maxBufferedDownloadBytes, observer: null, share: false);
+
+    private static FtpStorageBackend Create(string connectionId, object configuration, long maxBufferedDownloadBytes, IStorageConnectionObserver? observer, bool share)
     {
         // Registrations with identical settings share one pool, so re-registering keeps warm sessions. The pool works
         // from a copy of the settings, so the caller's object changing later cannot make it differ from its key.
@@ -22,7 +28,7 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
         // Loaded outside the shared-resource lock; dropped again when the pool already exists.
         var loaded = ClientCertificates.Load(value.ClientCertificatePath, value.ClientCertificateContent, value.ClientCertificatePassword);
         var used = false;
-        var shared = SharedResources.Acquire(key, () =>
+        SharedPool<AsyncFtpClient> Build()
         {
             used = true;
             var recorder = new ServerIdentityRecorder();
@@ -32,16 +38,18 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory
             {
                 Owned = certificate
             };
-        }, async pool =>
+        }
+        static async ValueTask DisposePool(SharedPool<AsyncFtpClient> pool)
         {
             await pool.Pool.DisposeAsync().ConfigureAwait(false);
             pool.Owned?.Dispose();
-        });
+        }
+        var shared = share ? SharedResources.Acquire(key, Build, DisposePool) : Build();
         if (!used) loaded?.Dispose();
         var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new FtpStorageBackend(
             connectionId,
-            new SharedPoolHandle<AsyncFtpClient>(key, shared, linger),
+            share ? new SharedPoolHandle<AsyncFtpClient>(key, shared, linger) : new IsolatedPoolHandle<AsyncFtpClient>(shared.Pool, () => DisposePool(shared)),
             value.Root,
             maxBufferedDownloadBytes,
             value.Retry,

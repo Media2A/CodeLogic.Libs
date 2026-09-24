@@ -130,6 +130,7 @@ compares exact codes should switch to the table below or to `StorageErrorInfo.Is
 | Connection dropped mid-operation | `unavailable` / `provider_error` | `connection_lost` |
 | Rate limited or too many sessions (HTTP 429/503, FTP 421, SSH) | `unavailable` / `provider_error` | `server_busy` |
 | Disk full or quota (FTP 452/552, HTTP 507, local ENOSPC) | `unavailable` / `provider_error` | `quota_exceeded` |
+| Invalid settings passed to `AddOrUpdateConnectionAsync` | `provider_error` | `invalid_content` (as `TestConnectionAsync`) |
 
 `StorageErrorInfo.IsTransient` returns true for `timeout`, `unavailable`, `connection_failed`,
 `connection_lost`, and `server_busy`. Provider codes are available through

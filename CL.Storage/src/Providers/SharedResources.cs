@@ -46,6 +46,17 @@ internal sealed class OwnedPool<TClient>(ProviderClientPool<TClient> pool) : IPo
     public ValueTask ReleaseAsync() => Pool.DisposeAsync();
 }
 
+/// <summary>A pool owned by one backend together with what its sessions use, all released with the backend.</summary>
+internal sealed class IsolatedPoolHandle<TClient>(ProviderClientPool<TClient> pool, Func<ValueTask> release) : IPoolHandle<TClient> where TClient : class
+{
+    private int _released;
+
+    public ProviderClientPool<TClient> Pool { get; } = pool;
+
+    public ValueTask ReleaseAsync() =>
+        Interlocked.Exchange(ref _released, 1) != 0 ? ValueTask.CompletedTask : release();
+}
+
 /// <summary>
 /// Resources shared by backends with identical settings — session pools and what their clients report —
 /// so replacing a registration with the same settings keeps its warm sessions. A resource lingers for a

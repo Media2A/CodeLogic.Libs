@@ -349,6 +349,11 @@ are listed under *Added*, even where they changed while this release was being b
   afterwards failed, returned the read's error without `destinationState=complete`, so it looked like a
   plain failure. The read-back is retried on transient errors, and a failure after it now carries
   `destinationState=complete`.
+- `TestConnectionAsync` put exception messages (which can carry hosts, paths, or credentials) into its
+  errors; it now reports the exception type only. It also joined the session pool of a registered FTP or
+  SFTP connection with the same settings; it now opens its own sessions and closes them when it ends.
+- Invalid settings passed to `AddOrUpdateConnectionAsync` are `storage.invalid_content` (were
+  `storage.provider_error`), as `TestConnectionAsync` reports them.
 
 ## 2026-09-22
 

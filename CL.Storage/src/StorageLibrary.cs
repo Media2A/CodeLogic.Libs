@@ -590,7 +590,10 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         return TestConnectionCoreAsync(
             connection.GetValidationErrors().ToArray(),
             connection.GetType(),
-            () => _factories[connection.GetType()].Create("connection-test", CloneProviderConnection(connection), DefaultTestBufferBytes),
+            // A pool of its own: a test must never use or disturb the sessions of a live connection with the same settings.
+            () => _factories[connection.GetType()] is IIsolatedStorageBackendFactory isolated
+                ? isolated.CreateIsolated("connection-test", CloneProviderConnection(connection), DefaultTestBufferBytes)
+                : _factories[connection.GetType()].Create("connection-test", CloneProviderConnection(connection), DefaultTestBufferBytes),
             host,
             port,
             security,
@@ -648,7 +651,8 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
-            var invalid = StorageErrors.InvalidContent($"The connection settings could not be applied: {error.Message}");
+            // The exception type only: its message can carry hosts, paths, or credentials.
+            var invalid = StorageErrors.InvalidContent($"The connection settings could not be applied ({error.GetType().Name}).");
             steps.Add(new StorageConnectionTestStep("validate", false, Stopwatch.GetElapsedTime(started), invalid));
             return Fail(invalid, null);
         }
@@ -668,7 +672,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
                 catch (Exception error)
                 {
                     result = Result<T>.Failure(ProviderErrorMapper.FromTransport(error, $"Connection test '{name}'", "server")
-                        ?? StorageErrors.ProviderError($"Connection test step '{name}' failed: {error.Message}"));
+                        ?? StorageErrors.FromException(error, $"Connection test step '{name}'"));
                 }
                 steps.Add(new StorageConnectionTestStep(name, result.IsSuccess, Stopwatch.GetElapsedTime(stepStarted), result.Error));
                 return result;
@@ -1930,7 +1934,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
         var validation = localConnection.Validate();
         if (!validation.IsValid)
-            return Result.Failure(StorageErrors.ProviderError(
+            return Result.Failure(StorageErrors.InvalidContent(
                 $"Local storage connection '{id}' is invalid: {string.Join("; ", validation.Errors)}"));
 
         BackendEntry? replacement = null;
@@ -2025,7 +2029,7 @@ public sealed class StorageLibrary : ILibrary, IAsyncDisposable
 
         var errors = connection.GetValidationErrors().ToArray();
         if (errors.Length > 0)
-            return Result.Failure(StorageErrors.ProviderError(
+            return Result.Failure(StorageErrors.InvalidContent(
                 $"{descriptor.Value.Provider} storage connection '{id}' is invalid: {string.Join("; ", errors)}"));
 
         var effectiveConnection = CloneProviderConnection(connection);
