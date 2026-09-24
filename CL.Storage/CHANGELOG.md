@@ -357,6 +357,10 @@ are listed under *Added*, even where they changed while this release was being b
 - On MinIO, `GetConditionEnforcementAsync(MatchVersion)` answered `Atomic` for uploads, which are staged
   there and checked just before the commit; it now answers `CheckedBeforeCommit` unless the server
   enforces `If-Match` on both `PutObject` and `CopyObject`.
+- `DownloadToFileAsync` with `ConflictPolicy.Resume` appended the remote tail to any shorter local file and
+  took one of equal size as complete, without checking it was the same file. It now downloads into a
+  partial file with the remote version recorded beside it, resumes only while the remote is still that
+  version, and otherwise downloads from the start.
 
 ## 2026-09-22
 

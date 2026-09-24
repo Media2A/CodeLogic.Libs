@@ -178,4 +178,90 @@ public sealed class FinalFixesTests
         Assert.Equal(staged ? StorageConditionEnforcement.CheckedBeforeCommit : StorageConditionEnforcement.Atomic, answered);
         Assert.True(staged);
     }
+
+    // ---------------------------------------------------------------- F4
+
+    /// <summary>A stream that fails with a dropped connection after <paramref name="limit"/> bytes.</summary>
+    private sealed class FailingAfter(Stream inner, int limit) : Stream
+    {
+        private int _read;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_read >= limit) throw new IOException("The connection dropped.");
+            var read = inner.Read(buffer, offset, Math.Min(count, limit - _read));
+            _read += read;
+            return read;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing) { if (disposing) inner.Dispose(); base.Dispose(disposing); }
+    }
+
+    [Theory] // needs-review F4
+    [InlineData(40)]
+    [InlineData(100)]
+    public async Task A_resumed_download_does_not_trust_a_local_file_it_did_not_leave(int localLength)
+    {
+        using var directory = new TestDirectory();
+        var storage = Local(directory.CreateDirectory("remote"));
+        await storage.UploadBytesAsync("f.bin", Content(100));
+        var target = Path.Combine(directory.CreateDirectory("local"), "f.bin");
+        await File.WriteAllBytesAsync(target, Enumerable.Repeat((byte)9, localLength).ToArray());
+
+        var result = await storage.DownloadToFileAsync("f.bin", target, conflictPolicy: StorageConflictPolicy.Resume);
+
+        Assert.True(result.IsSuccess, result.Error?.ToString());
+        Assert.Equal(Content(100), await File.ReadAllBytesAsync(target));
+    }
+
+    [Fact] // needs-review F4
+    public async Task An_interrupted_download_resumes_only_while_the_remote_is_the_version_it_started_from()
+    {
+        using var directory = new TestDirectory();
+        var local = Local(directory.CreateDirectory("remote"));
+        await local.UploadBytesAsync("f.bin", Content(100));
+        var offsets = new List<long>();
+        var drop = true;
+        var storage = new InterceptBackend(local)
+        {
+            Download = async (path, options, token) =>
+            {
+                offsets.Add(options?.Offset ?? 0);
+                var opened = await local.DownloadAsync(path, options, token);
+                if (!drop || opened.IsFailure) return opened;
+                drop = false;
+                return Result<Stream>.Success(new FailingAfter(opened.Value!, 30));
+            }
+        };
+        var target = Path.Combine(directory.CreateDirectory("local"), "f.bin");
+
+        var failed = await storage.DownloadToFileAsync("f.bin", target, conflictPolicy: StorageConflictPolicy.Resume);
+        var resumed = await storage.DownloadToFileAsync("f.bin", target, conflictPolicy: StorageConflictPolicy.Resume);
+
+        Assert.True(failed.IsFailure);
+        Assert.True(resumed.IsSuccess, resumed.Error?.ToString());
+        Assert.Equal([0L, 30L], offsets);
+        Assert.Equal(Content(100), await File.ReadAllBytesAsync(target));
+        Assert.Equal(["f.bin"], Directory.GetFiles(Path.GetDirectoryName(target)!).Select(Path.GetFileName));
+
+        // Interrupted again, then the remote is replaced by another version of the same length: start over.
+        drop = true;
+        offsets.Clear();
+        File.Delete(target);
+        Assert.True((await storage.DownloadToFileAsync("f.bin", target, conflictPolicy: StorageConflictPolicy.Resume)).IsFailure);
+        await local.UploadBytesAsync("f.bin", Enumerable.Repeat((byte)7, 100).ToArray());
+        File.SetLastWriteTimeUtc(Path.Combine(directory.Path, "remote", "f.bin"), DateTime.UtcNow.AddMinutes(5));
+        var restarted = await storage.DownloadToFileAsync("f.bin", target, conflictPolicy: StorageConflictPolicy.Resume);
+
+        Assert.True(restarted.IsSuccess, restarted.Error?.ToString());
+        Assert.Equal([0L, 0L], offsets);
+        Assert.Equal(Enumerable.Repeat((byte)7, 100).ToArray(), await File.ReadAllBytesAsync(target));
+    }
 }

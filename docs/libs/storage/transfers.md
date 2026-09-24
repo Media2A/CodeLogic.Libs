@@ -392,10 +392,13 @@ await files.AppendAsync("logs/today.log", line);
 await files.CleanupStaleStagingAsync("", TimeSpan.FromDays(1)); // leftovers of crashed transfers
 ```
 
-`DownloadToFileAsync` resumes a partial local file with a ranged download. Unlike the staged resumes above,
-it trusts the local file: a shorter one gets the remote tail appended and one of equal size counts as
-complete, without comparing content (a larger one is downloaded again). Use it only for a partial file this
-download itself left. `AppendAsync` appends to a file directly, which needs `StorageFeature.Append`.
+`DownloadToFileAsync` with `Resume` downloads into `name.clstorage-partial` next to the destination and
+records the remote version it holds (source, length, ETag, version, modification time) in
+`name.clstorage-partial.json` before the first byte. An interrupted download keeps both; the next one
+appends only the missing range, and only while the remote is still that version (checked again after the
+tail is read). Anything else — a changed remote, a server that reports no ETag, version, or time, or a
+local file this download did not leave — is downloaded again from the start. The destination is replaced
+only when the content is complete. `AppendAsync` appends to a file directly, which needs `StorageFeature.Append`.
 A resumable upload that fails carries `stagingPath` and `bytesStaged` in its error details.
 
 ## Progress and speed limits
