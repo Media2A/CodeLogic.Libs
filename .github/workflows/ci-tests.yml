@@ -156,7 +156,8 @@ jobs:
       CL_STORAGE_TEST_WEBDAV_MTLS_URL: https://localhost:8444/
       CL_STORAGE_TEST_WEBDAV_USER: cltest
       CL_STORAGE_TEST_WEBDAV_PASS: cltest-pw
-      RCLONE_VERSION: v1.75.1
+      # Not named RCLONE_*: rclone reads every RCLONE_<NAME> variable as its --<name> flag.
+      WEBDAV_SERVER_RCLONE: v1.75.1
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -171,12 +172,12 @@ jobs:
         shell: bash
         run: |
           set -e
-          curl -sSLo rclone.zip "https://downloads.rclone.org/$RCLONE_VERSION/rclone-$RCLONE_VERSION-windows-amd64.zip"
+          curl -sSLo rclone.zip "https://downloads.rclone.org/$WEBDAV_SERVER_RCLONE/rclone-$WEBDAV_SERVER_RCLONE-windows-amd64.zip"
           unzip -q rclone.zip
           mkdir -p "$RUNNER_TEMP/dav"
           MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=localhost" \
             -addext "subjectAltName=DNS:localhost" -keyout "$RUNNER_TEMP/srv.key" -out "$RUNNER_TEMP/srv.crt"
-          "./rclone-$RCLONE_VERSION-windows-amd64/rclone.exe" serve webdav "$RUNNER_TEMP/dav" --addr localhost:8444 \
+          "./rclone-$WEBDAV_SERVER_RCLONE-windows-amd64/rclone.exe" serve webdav "$RUNNER_TEMP/dav" --addr localhost:8444 \
             --cert "$RUNNER_TEMP/srv.crt" --key "$RUNNER_TEMP/srv.key" \
             --client-ca tests/Storage.Integration.Tests/fixtures/mtls/client-ca.crt --min-tls-version tls1.3 \
             --user cltest --pass cltest-pw > "$RUNNER_TEMP/rclone.log" 2>&1 &
