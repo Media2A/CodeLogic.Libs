@@ -63,9 +63,11 @@ Each connection mounts one security boundary:
 - an Azure/Swift container and optional prefix;
 - an FTP, SFTP, or WebDAV directory.
 
-API paths are relative to that mount. Backslashes are normalized to `/`, redundant `.` segments are
-removed, and absolute or parent-escaping paths fail with `storage.invalid_path`. The empty path means
-the mounted root for info/listing and idempotent root directory creation. Link targets, raw-command
+API paths are relative to that mount. Backslashes are normalized to `/`, empty and `.` segments are
+removed (so a leading `/` is ignored), and a `..` segment or a NUL fails with `storage.invalid_path`, as
+does a local path that resolves outside the root (a drive-qualified path, or a link leading out). The
+empty path means the mounted root for info/listing and idempotent root directory creation; transfers need
+a non-root path. Link targets, raw-command
 paths, and every other path the library resolves stay inside the mount; only raw commands (off by
 default) can reach outside it.
 
@@ -93,8 +95,10 @@ when the connections use different providers. Every remote connection accepts `P
 
 ### Security defaults
 
-- S3, WebDAV, GCS, and Swift custom endpoints require HTTPS unless `AllowInsecureHttp` is enabled.
-- Endpoint user info, query strings, and fragments are rejected so secrets do not become configuration URLs.
+- S3, WebDAV, GCS, and Swift custom endpoints require HTTPS unless `AllowInsecureHttp` is enabled; an
+  Azure `ServiceUri` must be HTTPS (Azurite works through a connection string).
+- S3, WebDAV, and GCS endpoint URLs with user info, a query string, or a fragment are rejected, so secrets
+  do not end up in configuration URLs.
 - WebDAV custom headers cannot replace authorization/host/framing headers or contain line breaks.
 - FTPS and WebDAV validate the certificate chain by default. Certificate (`TrustedCertificateSha256`)
   or public-key (`TrustedPublicKeySha256`) pins deliberately trust a specific server; there is no
@@ -142,7 +146,8 @@ Listings hide the library's own staging and backup items (`.cl-storage-*`, `.cls
 hidden) together with what hidden folders hold (on object stores, whose listings come in pages, every
 folder name between the listed folder and an item is tested, so `.git/b` stays hidden on a page that no
 longer holds `.git` itself), and `NamePattern` filters names with `*` and `?`
-wildcards (case-insensitive). Recursive listings on S3, Azure Blob, Google Cloud, and Swift include
+wildcards (case-insensitive); it applies to names only, so a recursive listing drops folders that do not
+match but still returns matching files inside them. Recursive listings on S3, Azure Blob, Google Cloud, and Swift include
 folders that exist only as key prefixes; they are sorted page by page, and an inferred folder can appear
 again on a later page, so build a tree by path.
 
@@ -150,9 +155,20 @@ again on a later page, so build a tree by path.
 provider repeats a token. Batch helpers preserve input order, cap item count/concurrency, and retain
 one result per item rather than stopping at the first expected provider failure.
 
-`StorageServiceExtensions` adds `UploadFileAsync` and atomic `DownloadToFileAsync`, bounded
-`ReadTextAsync`/`WriteTextAsync` and `ReadJsonAsync<T>`/`WriteJsonAsync<T>`, and streaming checksums
-(see [Files & Attributes](files.md#server-side-checksums)).
+`StorageServiceExtensions` adds `UploadFileAsync` and atomic `DownloadToFileAsync` (both with conflict
+policies and resume), bounded `ReadTextAsync`/`WriteTextAsync` and `ReadJsonAsync<T>`/`WriteJsonAsync<T>`,
+`UploadWithProgressAsync`/`DownloadWithProgressAsync`, and streaming checksums with MD5, SHA-256, SHA-384,
+or SHA-512 (see [Files & Attributes](files.md#server-side-checksums)). The batch helpers are
+`GetInfoBatchAsync`, `DeleteBatchAsync`, `CopyBatchAsync`, and `MoveBatchAsync`, bounded by
+`StorageBatchOptions` (`MaxConcurrency` 4, `MaxItems` 10,000).
+
+```csharp
+var progress = new Progress<StorageTransferProgress>(value =>
+    Console.WriteLine($"{value.BytesTransferred} bytes"));
+
+await files.UploadWithProgressAsync("large.bin", input, progress);
+var text = await files.ReadTextAsync("notes/today.txt");
+```
 
 ## Capabilities
 
@@ -167,7 +183,10 @@ if (files.Capabilities.Supports(StorageFeature.Permissions))
 Optional features return `storage.unsupported` on connections that lack them. Flags include
 `MetadataWrite`, `Tags`, `Versioning`, `SignedReadUrls`, `SignedWriteUrls`, `Permissions`, `Ownership`, `SetTimestamps`,
 `CreateLinks`, `ReadLinks`, `Checksums`, `Append`, `ResumableUpload`, `AtomicMove`, `RawCommands`,
-`SpaceInfo`, `ChangeNotifications`, `ConditionalCreate`, and `CaseInsensitivePaths`.
+`SpaceInfo`, `ChangeNotifications`, `ConditionalCreate`, `ConditionalUpdate`, `ConditionalDelete`, and
+`CaseInsensitivePaths`. `Capabilities.Limits` (`StorageLimits`) adds what a provider reports: page size,
+object and single-upload size, metadata size, tag count, and preferred part size. See the capability table
+in [Files & Attributes](files.md#metadata-tags-versions-and-signed-urls).
 
 A flag says what the provider can do; on S3-compatible servers, whether a conditional request is really
 enforced also depends on the server (see `ConditionalRequests` in
