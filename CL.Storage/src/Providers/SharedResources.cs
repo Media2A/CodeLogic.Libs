@@ -75,10 +75,16 @@ internal static class SharedResources
         public long Generation { get; set; }
         /// <summary>Cancels the linger of a resource nobody uses, so it is disposed at once.</summary>
         public CancellationTokenSource? Linger { get; set; }
+        /// <summary>The storage libraries that have used the resource, so stopping one flushes only its own.</summary>
+        public HashSet<object> Owners { get; } = new(ReferenceEqualityComparer.Instance);
     }
 
     /// <summary>Returns the shared resource for a key, creating it for the first user.</summary>
-    public static T Acquire<T>(string key, Func<T> create, Func<T, ValueTask> dispose) where T : class
+    /// <param name="key">The settings key.</param>
+    /// <param name="create">Creates the resource for the first user.</param>
+    /// <param name="dispose">Disposes the resource when its last user is gone.</param>
+    /// <param name="owner">The storage library acquiring it (any object that identifies it), for <see cref="FlushIdleAsync"/>.</param>
+    public static T Acquire<T>(string key, Func<T> create, Func<T, ValueTask> dispose, object? owner = null) where T : class
     {
         Holder? replaced = null;
         T value;
@@ -103,6 +109,7 @@ internal static class SharedResources
             CancelLinger(holder);
             holder.Users++;
             holder.Generation++;
+            if (owner is not null) holder.Owners.Add(owner);
             value = (T)holder.Value;
         }
         if (replaced is not null)
@@ -169,18 +176,22 @@ internal static class SharedResources
     }
 
     /// <summary>
-    /// Disposes every resource no one is using, instead of letting it linger; called when a storage library
-    /// stops, so its idle sessions do not outlive it. Resources other libraries still use are kept.
+    /// Disposes the resources no one is using that only <paramref name="owner"/> has used, instead of letting them
+    /// linger; called when a storage library stops, so its idle sessions do not outlive it. Resources another
+    /// library still uses, or has used and may take up again, are kept (and linger out as usual).
     /// </summary>
-    public static async ValueTask FlushIdleAsync()
+    public static async ValueTask FlushIdleAsync(object owner)
     {
         Holder[] idle;
         lock (Gate)
         {
-            idle = [.. Resources.Values.Where(holder => holder.Users == 0)];
-            foreach (var key in Resources.Where(pair => pair.Value.Users == 0).Select(pair => pair.Key).ToList())
+            var flushed = Resources.Where(pair => pair.Value.Users == 0 && pair.Value.Owners.Contains(owner) && pair.Value.Owners.Count == 1).ToList();
+            idle = [.. flushed.Select(pair => pair.Value)];
+            foreach (var (key, _) in flushed)
                 Resources.Remove(key);
             foreach (var holder in idle) CancelLinger(holder);
+            // A library that stopped no longer keeps a resource another one shares.
+            foreach (var holder in Resources.Values) holder.Owners.Remove(owner);
         }
         foreach (var holder in idle)
         {

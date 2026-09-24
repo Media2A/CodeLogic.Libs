@@ -44,7 +44,8 @@ internal sealed class FtpStorageBackendFactory : IStorageBackendFactory, IIsolat
             await pool.Pool.DisposeAsync().ConfigureAwait(false);
             pool.Owned?.Dispose();
         }
-        var shared = share ? SharedResources.Acquire(key, Build, DisposePool) : Build();
+        // The observer is the registering library's own, so it identifies the library the pool lingers for.
+        var shared = share ? SharedResources.Acquire(key, Build, DisposePool, observer) : Build();
         if (!used) loaded?.Dispose();
         var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new FtpStorageBackend(

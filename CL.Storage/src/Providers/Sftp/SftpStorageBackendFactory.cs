@@ -29,7 +29,8 @@ internal sealed class SftpStorageBackendFactory : IStorageBackendFactory, IIsola
             var recorder = new ServerIdentityRecorder();
             return new SharedPool<SftpClient>(SftpStorageBackend.CreatePool(() => CreateClient(value, recorder), value.Session), recorder);
         }
-        var shared = share ? SharedResources.Acquire(key, Build, pool => pool.Pool.DisposeAsync()) : Build();
+        // The observer is the registering library's own, so it identifies the library the pool lingers for.
+        var shared = share ? SharedResources.Acquire(key, Build, pool => pool.Pool.DisposeAsync(), observer) : Build();
         var linger = TimeSpan.FromSeconds((value.Session ?? new StorageSessionConfig()).LingerSeconds);
         return new SftpStorageBackend(
             connectionId,

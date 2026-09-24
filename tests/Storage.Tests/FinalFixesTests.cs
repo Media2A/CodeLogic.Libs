@@ -6,6 +6,7 @@ using CL.Storage.Models;
 using CL.Storage.Providers;
 using CL.Storage.Providers.Local;
 using CL.Storage.Providers.S3;
+using CL.Storage.Providers.Sftp;
 using CL.Storage.Queue;
 using CodeLogic.Core.Events;
 using CL.Storage.Registry;
@@ -463,5 +464,31 @@ public sealed class FinalFixesTests
 
         Assert.All(results, result => Assert.True(result.IsSuccess, result.Error?.ToString()));
         Assert.Single(results, result => result.Value is not null);
+    }
+
+    [Fact] // needs-review F8
+    public async Task Stopping_one_library_keeps_the_lingering_sessions_of_another()
+    {
+        var one = new global::CL.Storage.StorageLibrary();
+        var other = new global::CL.Storage.StorageLibrary();
+        var settings = new SftpConnectionConfig
+        {
+            Host = "127.0.0.1", Port = 1, Username = Guid.NewGuid().ToString("N"), Password = "p", AutoAcceptHostKey = true,
+            Session = new StorageSessionConfig { LingerSeconds = 600 }
+        };
+        var key = ProviderSettingsKey.For(settings);
+        // A connection of the other library, replaced or removed: its pool lingers for a re-registration.
+        var backend = new SftpStorageBackendFactory().Create("S", settings, 1 << 20, other.ConnectionObserver);
+        await backend.DisposeAsync();
+        Assert.True(SharedResources.Holds(key));
+
+        await one.OnStopAsync();
+        var keptForOther = SharedResources.Holds(key);
+        await other.OnStopAsync();
+
+        Assert.True(keptForOther);
+        Assert.False(SharedResources.Holds(key));
+        one.Dispose();
+        other.Dispose();
     }
 }

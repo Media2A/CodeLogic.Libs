@@ -229,7 +229,8 @@ alive.
 When the last one is removed, its sessions close at once. With `LingerSeconds` (0 to 3600, default 0) they
 stay open that long instead, and a registration added again with the same settings picks them up. Leave
 it at 0 for servers with a strict per-user connection limit, since lingering sessions count against it.
-Idle pools are closed when the library stops.
+Idle pools are closed when the library stops, except those another library in the same process has used
+too (they linger out as usual).
 
 Listing continuation tokens are tied to the settings rather than the registration id too, so paging
 continues after the same settings are registered again under a new id. A token refers to a listing

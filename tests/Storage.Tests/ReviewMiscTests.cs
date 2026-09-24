@@ -54,10 +54,11 @@ public sealed class ReviewMiscTests
     {
         var key = Guid.NewGuid().ToString("N");
         var disposed = 0;
-        _ = SharedResources.Acquire(key, () => new object(), _ => { Interlocked.Increment(ref disposed); return ValueTask.CompletedTask; });
+        var owner = new object();
+        _ = SharedResources.Acquire(key, () => new object(), _ => { Interlocked.Increment(ref disposed); return ValueTask.CompletedTask; }, owner);
         var lingering = SharedResources.ReleaseAsync(key, TimeSpan.FromMinutes(10)).AsTask();
 
-        await SharedResources.FlushIdleAsync();
+        await SharedResources.FlushIdleAsync(owner);
         await lingering.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(1, disposed);
