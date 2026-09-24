@@ -5,24 +5,16 @@
 Everything below is relative to the published **4.8.93**. Types and members that 4.8.93 never shipped
 are listed under *Added*, even where they changed while this release was being built.
 
-> **Release as 4.9, not as another 4.8.x (recommendation).** This release breaks source and binary
-> compatibility with 4.8.93 (see *Changed (breaking)*). The repository publishes every library as
-> `<version.txt>.<CI run>` and pins `AssemblyVersion` to `Major.Minor.0.0`, so today it would ship as
-> `4.8.<run>` with the same `AssemblyVersion` 4.8.0.0 as 4.8.93. Then:
+> **A breaking release within the 4.8 line.** This release breaks source and binary compatibility with
+> 4.8.93 (see *Changed (breaking)*), and ships as `4.8.<run>` like every library in this repository, with
+> the same `AssemblyVersion` 4.8.0.0. So:
 >
-> - a project that floats on `4.8.*`, or a bot that takes patch updates, picks it up silently;
-> - an assembly compiled against 4.8.93 (another package, or a plugin) still loads, and fails at runtime
->   with `MissingMethodException` or `MissingFieldException` the first time it calls a changed member,
->   for example `StorageLibrary.CopyAsync`, which now returns `StorageTransferReport` instead of `Result`.
->
-> Bumping to 4.9 makes the break visible where it can be: floating `4.8.*` ranges and patch updaters do
-> not pick it up, and the version says "read the migration guide". It does **not** make .NET refuse to load
-> the assembly: .NET (Core) binds a reference to 4.8.0.0 to 4.9.0.0 without complaint, so dependants
-> must be rebuilt either way, and packages that depend on CodeLogic.Storage should declare `[4.9, 4.10)`.
-> Because `version.txt` is shared by every library in this repository and tracks the CodeLogic framework
-> line, the owner has to choose between bumping the whole repository to 4.9, or giving CL.Storage its own
-> major.minor in the pack step (the CI's `-p:Version=` override must then use it too). `version.txt` is
-> not changed here.
+> - **rebuild** everything that references CodeLogic.Storage and follow `MIGRATION.md`: an assembly compiled
+>   against 4.8.93 (another package, or a plugin) still loads, and fails at runtime with
+>   `MissingMethodException` or `MissingFieldException` the first time it calls a changed member, for
+>   example `StorageLibrary.CopyAsync`, which now returns `StorageTransferReport` instead of `Result`;
+> - **pin the version** you have tested rather than floating on `4.8.*`, and review CodeLogic.Storage updates
+>   instead of letting a patch updater take them.
 
 ### Changed (breaking)
 

@@ -142,7 +142,7 @@ partners that pass on the old code as well (round 4 found `Sides_keeping_differe
 | D4 | documented | 2e72849 | *MIGRATION 'Upgrading from 4.8.93': StorageTransferJob and StorageSyncReport shapes, AutomaticRetries 3, dispose leaves jobs queued, tokens keyed by settings, same size not complete, SyncId/applies, file-versus-folder rule* |
 | D5 | documented | 2e72849 | *MaxFinishedJobs 1,000; MaxItems 1,000,000; ItemRetries; Blocked outside FailedJobs; partial_failure -> NeedsReconciliation; case collision fails CompareAsync; inferred folders in CHANGELOG, MIGRATION, transfers.md* |
 | D6 | documented | 2e72849 | *one CHANGELOG section against 4.8.93; types 4.8.93 never shipped are under Added (checked by reflection against the 4.8.93 package)* |
-| D7 | documented (recommendation) | 2e72849 | *CHANGELOG recommends 4.9 and explains that .NET still binds 4.8.0.0 to 4.9.0.0, so dependants must be rebuilt either way; version.txt not changed* |
+| D7 | documented | 2e72849 | *released in the 4.8 line by the owner's decision; CHANGELOG and MIGRATION say to rebuild dependants and pin the version; version.txt not changed* |
 | D8 | fixed | 2e72849 | *Result<HealthStatus>; all 49 C# samples in README and docs/libs/storage compile against the branch* |
 | D9 | documented | 2e72849 | *Atomic claims are now per server (AWS enforces, MinIO not on CopyObject/DeleteObject)* |
 | D10 | documented | 2e72849 | *connections.md and README: listings over 250,000 items are not kept* |
