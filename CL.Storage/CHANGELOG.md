@@ -367,6 +367,8 @@ are listed under *Added*, even where they changed while this release was being b
 - A queue job whose claim kept failing in the job store was retried for ever; failed claims now count
   towards the store-failure limit (doubling delay, failed after 8 in a row). A job re-queued after a store
   failure announced its retry with `storage.cancelled`; it is now `storage.unavailable`.
+- `ApplySyncAsync` ignored `StorageSyncOptions.DryRun` and applied the plan; with `DryRun` it now reports
+  every step `NotRun` (or `Withheld`), writes nothing, and does not save the baseline.
 
 ## 2026-09-22
 

@@ -142,6 +142,8 @@ public static class StorageSync
     /// baseline moved on (another run synced in between), or when it has blocked conflicts (unless
     /// <see cref="StorageSyncOptions.ApplyWithConflicts"/>). Every step first checks that its items are still the
     /// versions planned; a changed item's step is reported <see cref="StorageSyncActionOutcome.Stale"/> and not taken.
+    /// With <see cref="StorageSyncOptions.DryRun"/> the same checks run, and the report lists every step as not run:
+    /// nothing is written and the baseline is not saved.
     /// </summary>
     /// <param name="source">Source connection.</param>
     /// <param name="sourcePath">Source directory; must be the plan's.</param>
@@ -205,6 +207,10 @@ public static class StorageSync
             if ((current.Value?.Generation ?? 0) != plan.BaselineGeneration)
                 return Result<StorageSyncReport>.Failure(StorageErrors.Conflict("Another run synced these directories after the plan was made; plan again."));
         }
+
+        // Checked like a real apply, then reported without writing anything or saving the baseline.
+        if (options.DryRun)
+            return Result<StorageSyncReport>.Success(DryRunReport(plan));
 
         var run = new SyncRun(source, destination, plan, options);
         var cancelled = false;
@@ -310,17 +316,18 @@ public static class StorageSync
         var plan = await source.PlanSyncAsync(sourcePath, destination, destinationPath, options, cancellationToken).ConfigureAwait(false);
         if (plan.IsFailure) return Result<StorageSyncReport>.Failure(plan.Error!);
         if (options.DryRun)
-        {
-            return Result<StorageSyncReport>.Success(new StorageSyncReport
-            {
-                Plan = plan.Value!,
-                DryRun = true,
-                Results = [.. plan.Value!.Actions.Select(action => new StorageSyncActionResult(action,
-                    action.WithheldReason is null ? StorageSyncActionOutcome.NotRun : StorageSyncActionOutcome.Withheld))]
-            });
-        }
+            return Result<StorageSyncReport>.Success(DryRunReport(plan.Value!));
         return await source.ApplySyncAsync(sourcePath, destination, destinationPath, plan.Value!, plan.Value!.Digest, options, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>What a dry run reports: every step of the plan, not run (or withheld), and nothing saved.</summary>
+    private static StorageSyncReport DryRunReport(StorageSyncPlan plan) => new()
+    {
+        Plan = plan,
+        DryRun = true,
+        Results = [.. plan.Actions.Select(action => new StorageSyncActionResult(action,
+            action.WithheldReason is null ? StorageSyncActionOutcome.NotRun : StorageSyncActionOutcome.Withheld))]
+    };
 
     private static async Task<Result<StorageSyncBaseline?>> LoadBaselineAsync(IStorageSyncStateStore store, string syncId, CancellationToken cancellationToken)
     {

@@ -761,9 +761,9 @@ differ are conflicts.
   Only the caller's cancellation is thrown.
 - Two applies of the same `SyncId` run one after the other within a process; the lock does not reach other
   processes.
-- `DryRun` applies to `SyncAsync`: it returns the plan, with every step `NotRun` (or `Withheld`), without
-  changing anything. `PlanSyncAsync` never changes anything, and `ApplySyncAsync` does not read `DryRun`:
-  it applies the plan.
+- `DryRun` applies to `SyncAsync` and `ApplySyncAsync`: they return the plan, with every step `NotRun` (or
+  `Withheld`), without changing anything or saving the baseline (`ApplySyncAsync` still runs its checks
+  on the plan first). `PlanSyncAsync` never changes anything.
 
 ### Deletion safety
 

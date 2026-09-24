@@ -9,6 +9,7 @@ using CL.Storage.Providers.S3;
 using CL.Storage.Queue;
 using CodeLogic.Core.Events;
 using CL.Storage.Registry;
+using CL.Storage.Sync;
 using CodeLogic.Core.Results;
 using Xunit;
 using static Storage.Tests.NeedsReviewTransferTests;
@@ -397,5 +398,30 @@ public sealed class FinalFixesTests
         Assert.Equal(StorageTransferState.Completed, queue.Get(job.Id)?.State);
         var retrying = Assert.Single(events.Published.OfType<StorageTransferRetryingEvent>());
         Assert.Equal(StorageErrors.UnavailableCode, retrying.ErrorCode);
+    }
+
+    // ---------------------------------------------------------------- F7
+
+    [Fact] // needs-review F7
+    public async Task Applying_a_plan_as_a_dry_run_reports_it_and_changes_nothing()
+    {
+        using var directory = new TestDirectory();
+        var left = Local(directory.CreateDirectory("left"), "Left");
+        var right = Local(directory.CreateDirectory("right"), "Right");
+        await left.UploadBytesAsync("a.txt", [1]);
+        var store = new InMemoryStorageSyncStateStore();
+        var options = new StorageSyncOptions { Direction = StorageSyncDirection.TwoWay, StateStore = store, SyncId = "s" };
+        var plan = await left.PlanSyncAsync("", right, "", options);
+        Assert.True(plan.IsSuccess, plan.Error?.ToString());
+        Assert.NotEmpty(plan.Value!.Actions);
+
+        var applied = await left.ApplySyncAsync("", right, "", plan.Value, plan.Value.Digest, options with { DryRun = true });
+
+        Assert.True(applied.IsSuccess, applied.Error?.ToString());
+        Assert.True(applied.Value!.DryRun);
+        Assert.All(applied.Value.Results, result => Assert.Equal(StorageSyncActionOutcome.NotRun, result.Outcome));
+        Assert.False(applied.Value.BaselineSaved);
+        Assert.False((await right.ExistsAsync("a.txt")).Value);
+        Assert.Null(await store.LoadAsync("s", default));
     }
 }
