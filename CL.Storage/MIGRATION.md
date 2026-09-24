@@ -144,10 +144,11 @@ positional members are unchanged. Use `TestConnectionAsync` to check settings be
 
 ## Upgrading from CodeLogic.Storage 4.8.93
 
-This release breaks source and binary compatibility with 4.8.93. Rebuild everything that references
-CodeLogic.Storage: an assembly compiled against 4.8.93 still loads, and fails with
-`MissingMethodException` the first time it calls a changed member. `CHANGELOG.md` lists every change;
-this section says what to do about each.
+This release breaks source and binary compatibility with 4.8.93, which is why `CHANGELOG.md` recommends
+publishing it as 4.9. Rebuild everything that references CodeLogic.Storage: whether it ships as 4.8.x
+(the same `AssemblyVersion` 4.8.0.0) or as 4.9, .NET loads it for an assembly compiled against 4.8.93,
+which then fails with `MissingMethodException` the first time it calls a changed member. `CHANGELOG.md`
+lists every change; this section says what to do about each.
 
 ### Copy and move return a report
 
@@ -228,6 +229,18 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
 
 ### Transfer queue
 
+```csharp
+// 4.8.93
+StorageTransferQueue queue = storage.CreateTransferQueue();
+StorageTransferJob job = queue.EnqueueCopy("a", "x.bin", "b", "x.bin", priority: StorageTransferPriority.High);
+queue.Cancel(job.Id);
+
+// now
+await using StorageTransferQueue queue = (await storage.OpenTransferQueueAsync()).Value!;
+Result<StorageTransferJob> job = await queue.EnqueueCopyAsync("a", "x.bin", "b", "x.bin", priority: 10);
+if (job.IsSuccess) await queue.CancelAsync(job.Value!.Id);
+```
+
 | 4.8.93 | Now |
 |---|---|
 | `storage.CreateTransferQueue(options)` | `(await storage.OpenTransferQueueAsync(options)).Value!` |
@@ -236,18 +249,21 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
 | `Guid` job ids (also on the started/completed/failed events) | `string` ids, optionally chosen by the caller |
 | `queue.Cancel(id)`, `Retry(id)`, `RetryFailed()`, `ClearFinished()` | `CancelAsync`, `RetryAsync`, `RetryFailedAsync`, `ClearAsync()` |
 | `queue.EnqueueDownload(src, path, local, StorageConflictPolicy.Resume)` | `await queue.EnqueueDownloadAsync(src, path, local, conflictPolicy: StorageConflictPolicy.Resume)`; the new fourth parameter is `StorageDownloadOptions? options` |
-| `RetryDelay` | `RetryBaseDelay` and `RetryMaxDelay` (exponential backoff) |
-| `new StorageTransferJob(...)`, `Deconstruct` | not available; read the get-only properties |
+| `RetryDelay` (5 s, fixed) | `RetryBaseDelay` (2 s) doubling up to `RetryMaxDelay` (5 min), with jitter |
+| `new StorageTransferJob(...)`, `Deconstruct`, `job with { State = ... }` | not available; read the get-only properties |
 | `job.EnqueuedAt`, `job.FinishedAt` | `job.Record.EnqueuedAt`, `job.Record.FinishedAt` |
-| removal raised `JobChanged` with `Cancelled` | removal raises `JobRemoved` |
+| `ClearFinished()` removed silently | removals (`RemoveAsync`, `ClearAsync`, pruning) raise `JobRemoved` |
 
 - `AutomaticRetries` defaults to 3 (it was 2). Set it explicitly to keep 2.
-- Disposing the queue leaves queued jobs queued in the store instead of cancelling them; with the default
-  in-memory store they are simply gone with the queue.
+- Disposing the queue leaves queued jobs queued in the store instead of cancelling them (no `JobChanged`
+  with `Cancelled` any more); with the default in-memory store they are simply gone with the queue.
 - At most `MaxFinishedJobs` (1,000) finished jobs are kept; set `null` to keep them all.
 - Authentication and trust failures stop as `Blocked` instead of `Failed`, and a partial failure as
-  `NeedsReconciliation`. `FailedJobs`/`RetryFailedAsync` cover `Failed` only; retry the others one by one
-  with `RetryAsync`. Handle the new states `Paused`, `Blocked`, `NeedsReconciliation`, and `Interrupted`.
+  `NeedsReconciliation`. A cancel or pause that lands after the destination committed does not undo it: a
+  copy ends `Completed`, a move whose source is still there `NeedsReconciliation`, and `CancelAsync` or
+  `PauseJobAsync` fails with `storage.conflict`. `FailedJobs`/`RetryFailedAsync` cover `Failed` only;
+  retry the others one by one with `RetryAsync`. Handle the new states `Paused`, `Blocked`,
+  `NeedsReconciliation`, and `Interrupted`.
 - Stored `StorageTransferState` numbers keep their meaning: 0–4 are `Queued`, `Running`, `Completed`,
   `Failed`, and `Cancelled`, as in 4.8.93; new states are numbered after them.
 - `PauseJobAsync`, `CancelAsync`, and `RemoveAsync` on a running job return `storage.timeout` after
@@ -271,6 +287,16 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
   `report.Results` (each has `Outcome` and `Error`). `report.Failed` is a list of `StorageSyncActionResult`
   (the action is `.Action`, the error `.Error`). `report.Actions` lists the planned steps, conflicts
   included; `Copied` and `Deleted` still count what was done, and withheld deletions are in `report.Withheld`.
+
+  ```csharp
+  // 4.8.93
+  foreach (StorageSyncAction failed in report.Failed) Log(failed.RelativePath, failed.Error);
+
+  // now
+  foreach (StorageSyncActionResult failed in report.Failed) Log(failed.Action.RelativePath, failed.Error);
+  ```
+- **Retries.** A step that fails transiently is tried again up to `ItemRetries` times (2 by default); set
+  `ItemRetries = 0` for the old single attempt.
 - **Two-way.** Without a baseline, differing files are conflicts, and the default `ConflictPolicy = Block`
   refuses to apply the plan. Set `ConflictPolicy = NewerWins` for the old behaviour, or add `StateStore`
   and `SyncId` for a real three-way sync.
@@ -316,6 +342,8 @@ if (report.IsFailure) Handle(report.Error!);      // or: Result copied = report.
   probe has run: before relying on one, ask `GetConditionEnforcementAsync`.
 - WebDAV non-recursive folder deletes need a server with WebDAV locks (class 2); others now answer
   `storage.unsupported` and keep the folder. WebDAV uploads onto an existing folder are refused.
+- A non-recursive object-store listing refuses a recursive listing's continuation token
+  (`storage.invalid_path`); page with the options the token came from.
 - Azure moves delete the source's snapshots; copy and delete yourself to keep them.
 
 ### Shared sessions and tokens

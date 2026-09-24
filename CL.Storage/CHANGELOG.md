@@ -90,20 +90,29 @@ are listed under *Added*, even where they changed while this release was being b
 
 **Transfer queue**
 
-- `CreateTransferQueue` is replaced by `OpenTransferQueueAsync`. `Enqueue*` and every control method are
-  asynchronous and return results: `Cancel`, `Retry`, `RetryFailed`, and `ClearFinished` became
-  `CancelAsync`, `RetryAsync`, `RetryFailedAsync`, and `ClearAsync`.
-- Job ids are strings (they were `Guid`), also on `StorageTransferStartedEvent`, `CompletedEvent`, and
-  `FailedEvent`. Priorities are integers, higher first; `StorageTransferPriority` is gone.
-- `StorageTransferJob` is no longer a positional record: its constructor and `Deconstruct` are gone, its
-  properties are get-only views of `job.Record`, and `EnqueuedAt`/`FinishedAt` are on `job.Record`.
-- `RetryDelay` became `RetryBaseDelay` and `RetryMaxDelay` (exponential backoff with jitter).
-  `AutomaticRetries` defaults to 3 (it was 2).
-- Disposing the queue leaves queued jobs queued in the store instead of cancelling them. Removing a job
-  raises `JobRemoved` instead of a `JobChanged` with `Cancelled`.
+- `CreateTransferQueue` is replaced by `OpenTransferQueueAsync`, which returns
+  `Result<StorageTransferQueue>`. Every control method is asynchronous and returns a result:
+  `EnqueueCopy`, `EnqueueMove`, `EnqueueUpload`, `EnqueueDownload`, `EnqueueUploadDirectory`, and
+  `EnqueueDownloadDirectory` became `Enqueue…Async`
+  returning `Result<StorageTransferJob>` (with optional `jobId` and `cancellationToken` parameters), and
+  `Cancel`, `Retry`, `RetryFailed`, and `ClearFinished` became `CancelAsync`, `RetryAsync`,
+  `RetryFailedAsync`, and `ClearAsync`.
+- Job ids are strings (they were `Guid`), also in the constructors, `JobId`, and `Deconstruct` of
+  `StorageTransferStartedEvent`, `StorageTransferCompletedEvent`, and `StorageTransferFailedEvent`.
+  Priorities are integers (default 0), higher first; `StorageTransferPriority` is gone.
+- `StorageTransferJob` is no longer a positional record: its constructor and `Deconstruct` are gone, it
+  has a `required Record`, its other properties are get-only views of `job.Record`, and
+  `EnqueuedAt`/`FinishedAt` are on `job.Record`.
+- `RetryDelay` (a fixed 5 s) became `RetryBaseDelay` (2 s) and `RetryMaxDelay` (5 min): exponential
+  backoff with jitter. `AutomaticRetries` defaults to 3 (it was 2).
+- Disposing the queue leaves queued jobs queued in the store; 4.8.93 cancelled them (a `JobChanged` with
+  `Cancelled` each). Jobs removed by `RemoveAsync`, `ClearAsync`, or pruning raise `JobRemoved`
+  (`ClearFinished` raised nothing).
 - Finished jobs are pruned beyond `MaxFinishedJobs` (1,000 by default).
-- Authentication and trust failures end `Blocked` instead of `Failed`; a `storage.partial_failure` ends
-  `NeedsReconciliation`. `FailedJobs` and `RetryFailedAsync` cover `Failed` jobs only.
+- Authentication and trust failures end `Blocked` instead of `Failed`; a `storage.partial_failure`, or a
+  move cancelled or paused after its copy committed, ends `NeedsReconciliation` (a copy that committed ends
+  `Completed`), and the cancel or pause then fails with `storage.conflict`. `FailedJobs` and
+  `RetryFailedAsync` cover `Failed` jobs only.
 - `StorageTransferState` keeps its 4.8.93 numbers (`Queued` 0, `Running` 1, `Completed` 2, `Failed` 3,
   `Cancelled` 4); `Paused`, `Blocked`, `NeedsReconciliation`, and `Interrupted` follow them. Exhaustive
   switches need the new states. Every public enum now spells out its numbers.
@@ -129,12 +138,16 @@ are listed under *Added*, even where they changed while this release was being b
 - Cancelling `ApplySyncAsync` or `SyncAsync` once it has started applying no longer throws
   `OperationCanceledException`: it returns a success whose `report.Cancelled` is `true` (steps not started
   are `NotRun`, and a two-way baseline is still saved). Cancelling while planning still throws.
-- `StorageSyncAction` is a record with named properties and no `Error` (its constructor and `Deconstruct`
-  changed). `StorageSyncActionKind` keeps 0–3 (`CopyToDestination`, `CopyToSource`, `DeleteFromDestination`,
+- `StorageSyncAction` is no longer positional: its constructor and `Deconstruct` are gone, `RelativePath`
+  and `Kind` are `required`, and it has no `Error`. `StorageSyncReport` is no longer positional either;
+  it has a `required Plan`, `Actions` and `Unchanged` are get-only, and `Actions` lists the planned steps,
+  conflicts included. Outcomes are in `report.Results`, and `report.Failed` is a list of
+  `StorageSyncActionResult`.
+- `StorageSyncActionKind` keeps 0–3 (`CopyToDestination`, `CopyToSource`, `DeleteFromDestination`,
   `CreateDirectory`) and adds `DeleteFromSource` (4), `CreateDirectoryAtSource` (5), `RenameAtDestination`
-  (6), and `Conflict` (7); `StorageDiffReason` adds `Undecidable` (32). Exhaustive switches need them. `StorageSyncReport` is no longer positional (its constructor and `Deconstruct` are gone);
-  `Actions` and `Unchanged` are get-only and `Actions` lists the planned steps, conflicts included. Outcomes are in `report.Results`, and
-  `report.Failed` is a list of `StorageSyncActionResult`.
+  (6), and `Conflict` (7); `StorageDiffReason` adds `Undecidable` (32). Exhaustive switches need them.
+- A step that fails transiently is tried again up to `ItemRetries` times (2 by default) before it counts
+  as failed.
 - `TwoWay` without a baseline reports differing files as conflicts (`Block` by default) instead of letting
   the newer one win; set `ConflictPolicy = NewerWins` for the old behaviour.
 - `Update` and `Mirror` never replace a newer destination with an older source, even when the sizes differ.
@@ -186,9 +199,10 @@ are listed under *Added*, even where they changed while this release was being b
   `ConditionalUpdate`/`ConditionalDelete` flags are provisional until the probe has run and then name only
   what is enforced (MinIO loses all three), and an inconclusive probe backs off from 1 to 32 minutes. The
   probe's writes leave versions and delete markers on versioned buckets and fire notifications.
-- S3: a `CopyObject` or `CompleteMultipartUpload` is not cancelled once sent; server-side copies above 5 GiB
-  use parts of at least 128 MiB. Azure: a started copy is waited for whatever the caller's token says; a
-  move deletes the source's snapshots.
+- S3: a `CopyObject` or `CompleteMultipartUpload` is not cancelled once sent. Azure: a started copy is
+  waited for whatever the caller's token says; a move deletes the source's snapshots.
+- A non-recursive object-store listing refuses a continuation token from a recursive one
+  (`storage.invalid_path`).
 - WebDAV: an upload onto an existing folder is refused (`storage.conflict`); a non-recursive folder delete
   locks the collection and deletes it only while empty, and a server without locks answers
   `storage.unsupported` (the folder stays). FTP: a non-recursive folder delete is a raw `RMD`; a recursive
@@ -207,7 +221,7 @@ are listed under *Added*, even where they changed while this release was being b
 - FTP and SFTP registrations with identical settings share one session pool, so `MaxSessions` caps them
   together. Listing continuation tokens on Local, FTP, SFTP, and WebDAV are tied to the settings instead of
   the connection id (a listing over 250,000 items is not kept, so its token is walked again).
-- `StorageChangeKind` gained `Overflow`; exhaustive switches need the new case.
+- `StorageChangeKind` gained `Overflow` (4); exhaustive switches need the new case.
 
 ### Added
 
@@ -218,49 +232,76 @@ are listed under *Added*, even where they changed while this release was being b
 - **Guaranteed single-file transfers**: `DestinationCondition`, `SourceVersionId` (needs `Versioning`),
   `ExpectedSourceETag`, `ExpectedSourceLength`, `Verify`, and `ExpectedSha256` on `StorageTransferOptions`;
   `ExpectedLength`, `Verify`, `ExpectedSha256`, `SourceIdentity`, and `SourceIdentityIsContentVersion` on
-  `StorageUploadOptions`. Content is
-  staged, checked, confirmed, and promoted; the destination condition is handed to the provider's move.
-- **Staged resume** with `StorageResumeToken`, which survives restarts; one writer per staging object.
-- **`OpenWriteAsync`**: a push-style write stream with `CommitAsync` and `AbortAsync`;
-  `StorageWriteException` carries the storage error when the destination stops accepting data.
-- `StorageItem.Sha256`; `StorageTransferOptions.PreScan`; `FilesCompleted`/`FilesTotal` on progress.
-- **Durable transfer queue**: `StorageTransferJobSpec` (jobs as data), `IStorageTransferJobStore` with
-  revisions, conditional removal (`RemoveAsync(jobId, expectedRevision, lease)`), `ReleaseAsync`,
-  store-owned leases and fencing; `StorageTransferJobRecord` with `ToJson`/`FromJson` and `IsReadable`;
-  restart rules from recorded phases; idempotent caller-chosen ids; `Paused`, `Blocked`,
-  `NeedsReconciliation`, and `Interrupted`; `PauseJobAsync`/`ResumeJobAsync`, `SetPriorityAsync`,
-  `MoveUpAsync`/`MoveDownAsync`, `RemoveAsync`, `ClearAsync(states)`; exponential backoff honouring
-  `Retry-After`; throttled progress; `EventContext`; adaptive concurrency; `ShutdownTimeout`;
-  `JobRemoved`; cancelled, retrying, blocked, needs-reconciliation, and interrupted bus events
-  (`StorageTransferInterruptedEvent`). Stopping the library disposes the queues it opened.
-- `StorageErrors.Cancelled` (`storage.cancelled`, never transient; classify by code, not by the Core error
-  kind). `StorageErrors.Create` rebuilds an error from a stored code, message, and details;
-  `StorageErrorInfo.DestinationCommitted`, `DestinationStateKey`, and `LeftBehindKey`.
-- **Three-way sync**: a baseline store (`IStorageSyncStateStore`), a classifier per side, `BothModified`/
-  `BothCreated`/`DeleteVersusModify` conflicts with `Block`, `KeepBoth`, and `NewerWins`, deletions through
-  the baseline, `PlanSyncAsync`/`ApplySyncAsync` with an approvable plan (`SchemaVersion`, connection ids,
-  `OptionsDigest`), deletion safety (`MaxDeletes`, `MaxDeletePercent`, empty sides), include/exclude globs,
-  case-collision refusal (`StorageFeature.CaseInsensitivePaths`), `cl-mtime`, budgeted parallel hashing,
-  per-item retries (`ItemRetries`), continue-or-stop, `report.BaselineError`, and link handling.
-- `StorageLibraryOptions.RuntimeOnly`: no configuration section is registered, read, or written; the
-  settings passed in are copied.
+  `StorageUploadOptions`. Content is staged, checked, confirmed, and promoted; the destination condition is
+  handed to the provider's move.
+- **Staged resume** with `StorageResumeToken` (`StorageTransferOptions.ResumeToken`), which survives
+  restarts; one writer per staging object.
+- **`OpenWriteAsync`** (`StorageWriteExtensions`): a push-style `StorageWriteStream` (`CommitAsync`,
+  `AbortAsync`, `BytesWritten`, `DestinationPath`); `StorageWriteException` carries the storage error when
+  the destination stops accepting data.
+- `StorageItem.Sha256` and `StorageItem.ModifiedPrecision`; `StorageTransferOptions.PreScan`;
+  `FilesCompleted`/`FilesTotal` on progress; download progress carries `TotalBytes` even without a `Length`.
+- **Durable transfer queue**, opened with `StorageLibrary.OpenTransferQueueAsync`:
+  - jobs as data (`StorageTransferJobSpec`, `EnqueueAsync(spec)`), idempotent caller-chosen ids, and
+    `StorageTransferJobRecord` (`ToJson`/`FromJson`, `IsReadable`, `StorageTransferCheckpoint`,
+    `StorageTransferFailure`) behind `IStorageTransferJobStore` (`InMemoryStorageTransferJobStore` by
+    default) with revisions, conditional removal (`RemoveAsync(jobId, expectedRevision, lease)`),
+    `ReleaseAsync`, and store-owned leases with fencing (`StorageTransferLease`);
+  - restart rules from the recorded `StorageTransferPhase`; the states `Paused`, `Blocked`
+    (`StorageTransferBlockReason`), `NeedsReconciliation`, and `Interrupted`; `job.LastReport` and
+    `job.BlockReason`;
+  - `Get`, `PauseJobAsync`/`ResumeJobAsync`, `SetPriorityAsync`, `MoveUpAsync`/`MoveDownAsync`,
+    `RemoveAsync`, `ClearAsync(states)`, `RefreshAsync`, `ConcurrencyLimit`, and `JobRemoved`;
+  - options `Store`, `WorkerId`, `LeaseDuration`, `RequeueInterruptedWhenSafe`, `MaxFinishedJobs`,
+    `AdaptiveConcurrency`, `ProgressInterval`, `EventContext`, `StoreRefreshInterval`, `ShutdownTimeout`,
+    and `ControlTimeout`; exponential backoff honouring `Retry-After`;
+  - bus events `StorageTransferCancelledEvent`, `StorageTransferRetryingEvent`,
+    `StorageTransferBlockedEvent`, `StorageTransferNeedsReconciliationEvent`, and
+    `StorageTransferInterruptedEvent`. Stopping the library disposes the queues it opened.
+- `StorageErrors.Cancelled` and `CancelledCode` (`storage.cancelled`, never transient; classify by code, not
+  by the Core error kind); `StorageErrors.Create` rebuilds an error from a stored code, message, and
+  details; `StorageErrorInfo.DestinationCommitted` and the keys `DestinationStateKey`, `LeftBehindKey`,
+  `TlsReasonKey`, `PresentedCertificateKey`, `PresentedPublicKeyKey`, and `PresentedFingerprintKey`.
+- **Three-way sync**: `PlanSyncAsync`/`ApplySyncAsync` (on `StorageLibrary` and as `IStorageService`
+  extensions) with an approvable, serializable `StorageSyncPlan` (`Digest`, `ComputeDigest`, `SchemaVersion`,
+  connection ids, `OptionsDigest`, `Warnings`, `Conflicts`, `ToJson`/`FromJson`); a baseline store
+  (`IStorageSyncStateStore`, `InMemoryStorageSyncStateStore`, `StorageSyncBaseline`,
+  `StorageSyncBaselineEntry`, `StorageSyncIdentity`) with a classifier per side;
+  `BothModified`/`BothCreated`/`DeleteVersusModify` conflicts (`StorageSyncConflictKind`) under `Block`,
+  `KeepBoth`, or `NewerWins`
+  (`StorageSyncConflictPolicy`); per-step outcomes (`StorageSyncActionResult`, `StorageSyncActionOutcome`:
+  `Applied`, `Failed`, `Stale`, `Withheld`, `NotRun`) with `report.Results`, `Stale`, `Withheld`,
+  `Conflicts`, `Cancelled`, `BaselineSaved`, and `BaselineError`; step details on `StorageSyncAction`
+  (`Source`, `Destination`, `Conflict`, `DestinationRelativePath`, `TargetPath`, `ReadPath`,
+  `WithheldReason`).
+- New `StorageSyncOptions`: `SyncId`, `StateStore`, `ConflictPolicy`, `PropagateDeletes`,
+  `ApplyWithConflicts`, `Verify`, `MaxDeletes`, `MaxDeletePercent`, `AllowEmptySide`, `ItemRetries`, and
+  `ContinueOnError`. New `StorageCompareOptions`: `Include`/`Exclude` globs, `LinkHandling`,
+  `CaseInsensitive` (case-collision refusal, `StorageFeature.CaseInsensitivePaths`), `MaxItems`,
+  `HashConcurrency`, `MaxHashedFiles`, `MaxHashedBytes`, and `ModifiedMetadataKey` (`cl-mtime`).
+  `StorageDiffEntry.DestinationRelativePath`; `StorageCompare.CompareAsync` (the same as the
+  `CompareAsync` extension).
+- `StorageLibraryOptions` (`RuntimeOnly`, `Settings`) and `new StorageLibrary(options)`: in runtime-only
+  mode no configuration section is registered, read, or written, and the settings passed in are copied
+  (`StorageLibrary.RuntimeOnly`).
 - `tlsReason` on `storage.tls_failure` (`server_certificate_rejected` with the presented certificate,
   `client_certificate_rejected`, `protocol_mismatch`, `handshake_failed`), and `connection_interrupted` as a
   hint on `storage.connection_lost`.
 - `ClientCertificateContent` on FTP and WebDAV connections: the client certificate as bytes. On Linux the
   key stays in memory; on macOS .NET keeps it in a temporary keychain; on Windows it goes into a
   non-persisted key container deleted with the connection.
-- `S3ConnectionConfig.ConditionalRequests` (`Auto`, `Enforced`, `NotEnforced`): how far to trust an
+- `S3ConnectionConfig.ConditionalRequests` and `S3StorageBackend.ConditionalRequests`
+  (`S3ConditionalRequestSupport`: `Auto` 0, `Enforced` 1, `NotEnforced` 2): how far to trust an
   S3-compatible server's conditional requests; `Auto` probes uploads, copies, and deletes once per
   connection.
 - `StorageConditionKind` (`CreateOnly` 0, `MatchVersion` 1, `DeleteMatchVersion` 2) and the
   `IStorageService.GetConditionEnforcementAsync(kind, serverSideCopy, cancellationToken)` extension
-  (`CL.Storage.Abstractions`): how a connection enforces a condition, `Atomic` or `CheckedBeforeCommit`.
-- `StorageTransferQueueOptions.ControlTimeout` (zero to one day, 30 s by default).
-- `StorageSyncAction.ReadPath`: where a copy reached through a followed link reads its content.
+  (`StorageConditionEnforcementExtensions` in `CL.Storage.Abstractions`): how a connection enforces a
+  condition, `Atomic` or `CheckedBeforeCommit`.
+- Swift passes `StorageDownloadOptions.VersionId` (and a copy's `SourceVersionId`) as `?version-id=`
+  instead of refusing it.
 - `StorageSessionConfig.LingerSeconds`; `StorageWatchOptions.Incremental`, `FullRescanEvery`, and
-  `PollFailed`; `StorageChangeKind.Overflow`.
-- Download progress carries `TotalBytes` even without a `Length`.
+  `PollFailed`.
 - Continuous integration runs the mutual-TLS tests on Windows (SChannel) too.
 
 ### Fixed
@@ -271,14 +312,25 @@ are listed under *Added*, even where they changed while this release was being b
 - Recursive listings on S3, Azure Blob, and Swift left out folders that exist only as key prefixes; Google
   Cloud repeated inferred folders after every page; a file named like a folder hid the folder.
 - Connections from `GetStorage()` never watched natively; the native watcher dropped changes silently on
-  overflow.
+  overflow. Polling reported every item as created when its first listing failed, and as deleted when a
+  listing was cut short; it now retries, reports failures to `PollFailed`, and native watching that cannot
+  start or fails falls back to polling.
 - FTP could not find dot-files on servers without MLST that hide them from `LIST` (vsftpd); they are found
   with `SIZE`/`MDTM`/`CWD` or a hidden-files listing, and `LIST -a` falls back to `LIST`.
 - SFTP `AppendAsync` failed on a missing file.
 - S3 metadata read back with an `x-amz-meta-` prefix; a `CompleteMultipartUpload` whose answer was lost
-  failed over the object it had committed; SSE-C ETags were taken for MD5.
+  failed over the object it had committed; SSE-C ETags were taken for MD5; server-side copies over 5 GiB
+  failed (one `CopyObject`) and now go part by part (parts of at least 128 MiB).
+- Azure Blob listings ended with an empty continuation token instead of none.
 - Swift declared conditional updates and deletes, but the server ignores `If-Match`, so an upload with a
-  wrong ETag overwrote the object.
+  wrong ETag overwrote the object. A create-only Swift copy failed, because the server applied its
+  `If-None-Match` to the source (304).
+- `MetadataPreservation = Discard` on a same-connection copy or move ran the server's own copy, which kept
+  the metadata; it now relays.
+- A non-recursive folder delete on FTP (FluentFTP's `DeleteDirectory` after a listing that missed hidden
+  files) or WebDAV (a listing, then a `DELETE` of depth infinity) could delete contents.
+- FTP listing times without MLSD are whole minutes (or days), so sync with the default 2 s `TimeTolerance`
+  saw an unchanged file as changed and copied it again on every run.
 - WebDAV treated `207 Multi-Status` on `COPY`/`MOVE` as success, and dropped items it listed in the
   server's own spelling of the root.
 - Moving a directory onto an existing one on FTP, SFTP, or WebDAV deleted the existing directory.
@@ -287,8 +339,7 @@ are listed under *Added*, even where they changed while this release was being b
 - Found while this release was reviewed (round 4), relative to earlier preview builds: same-server
   `Rename` relayed (and failed with one session); a sync into an empty folder spelled differently made a
   second folder; a refused conditional promote brought back a destination deleted meanwhile; a failed
-  confirm deleted the only previous version; non-recursive folder deletes on FTP and WebDAV could delete
-  contents; resumes across processes could mix data; spare TLS connections turned drops into
+  confirm deleted the only previous version; resumes across processes could mix data; spare TLS connections turned drops into
   `client_certificate_rejected`; an upload resume keyed only by a path continued an edited file; a hidden
   folder's contents showed on later pages of object-store listings; a same-size edit within the time
   tolerance could be deleted or overwritten by a sync; a folder left with old staging stayed `Stale` for
